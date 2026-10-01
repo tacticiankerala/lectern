@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use lectern_core::ipc::{
-    Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, SavedPosition, Settings,
-    SettingsPatch, StartupPayload,
+    Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, RecentEntry, SavedPosition,
+    Settings, SettingsPatch, StartupPayload,
 };
 use lectern_core::search::FileHits;
 use tauri::{State, WebviewWindow};
@@ -36,6 +36,12 @@ pub async fn startup(state: Shared<'_>) -> Result<StartupPayload, String> {
 #[tauri::command]
 pub async fn open_document(path: String, state: Shared<'_>) -> Result<OpenResult, String> {
     blocking(state.inner(), move |s| s.open_document(&path)).await
+}
+
+/// Opens a file the user chose (the file dialog or a drop), trusting its network host first.
+#[tauri::command]
+pub async fn open_user_path(path: String, state: Shared<'_>) -> Result<OpenResult, String> {
+    blocking(state.inner(), move |s| s.open_user_path(&path)).await
 }
 
 #[tauri::command]
@@ -100,6 +106,12 @@ pub async fn set_settings(patch: SettingsPatch, state: Shared<'_>) -> Result<Set
 #[tauri::command]
 pub fn save_position(path: String, position: SavedPosition, state: Shared<'_>) {
     state.save_position(&path, position);
+}
+
+/// Drops a file from the recent files for good; returns the recent files left.
+#[tauri::command]
+pub fn remove_recent(path: String, state: Shared<'_>) -> Vec<RecentEntry> {
+    state.remove_recent(&path)
 }
 
 #[tauri::command]

@@ -1,0 +1,346 @@
+/* The document: reading typography (spec §8), code, tables, and wide blocks breaking out of the
+   measure up to the pane's width. */
+
+.doc {
+  box-sizing: content-box;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 10px var(--gutter) 32px;
+  font: var(--font-size) / var(--line-height) var(--body-font);
+  overflow-wrap: break-word;
+  font-kerning: normal;
+}
+
+/* Off-screen blocks skip layout and paint until they come near the viewport. */
+.doc > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3em;
+}
+
+.doc > :first-child {
+  margin-top: 0;
+}
+
+/* ---- Text ---- */
+
+.doc p,
+.doc ul,
+.doc ol,
+.doc dl,
+.doc blockquote,
+.doc details,
+.doc .code-block,
+.doc .table-wrap,
+.doc .markdown-alert,
+.doc > pre {
+  margin: 0 0 0.9em;
+}
+
+.doc h1,
+.doc h2,
+.doc h3,
+.doc h4,
+.doc h5,
+.doc h6 {
+  margin: 1.7em 0 0.55em;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+
+.doc h1 {
+  margin-top: 0.6em;
+  font-size: 1.75em;
+  letter-spacing: -0.018em;
+}
+
+.doc h2 {
+  font-size: 1.4em;
+  letter-spacing: -0.012em;
+}
+
+.doc h3 {
+  font-size: 1.17em;
+}
+
+.doc h4 {
+  font-size: 1em;
+}
+
+.doc h5,
+.doc h6 {
+  font-size: 0.92em;
+  color: var(--fg-muted);
+}
+
+.doc strong {
+  font-weight: 650;
+}
+
+.doc a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  overflow-wrap: anywhere;
+}
+
+.doc a:hover {
+  text-decoration-color: currentColor;
+}
+
+.doc a.broken {
+  color: var(--fg-muted);
+  text-decoration-style: dashed;
+  text-decoration-color: var(--badge-blocked);
+  cursor: help;
+}
+
+.doc ul,
+.doc ol {
+  padding-left: 1.6em;
+}
+
+.doc li + li {
+  margin-top: 0.3em;
+}
+
+.doc li > p {
+  margin: 0.3em 0;
+}
+
+.doc li > ul,
+.doc li > ol {
+  margin: 0.3em 0 0;
+}
+
+/* Task lists: the checkbox hangs where the bullet would be. */
+.doc li:has(> input[type="checkbox"]) {
+  position: relative;
+  list-style: none;
+}
+
+.doc li > input[type="checkbox"] {
+  position: absolute;
+  left: -1.45em;
+  top: calc((var(--line-height) * 1em - 0.9em) / 2);
+  width: 0.9em;
+  height: 0.9em;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.doc li > input[type="checkbox"] + p {
+  margin-top: 0;
+}
+
+.doc blockquote {
+  padding: 0 0 0 1em;
+  border-left: 3px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.doc .markdown-alert {
+  --alert: var(--accent);
+  padding: 0.6em 1em;
+  border-left: 3px solid var(--alert);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--alert) 8%, transparent);
+}
+
+.doc .markdown-alert-tip {
+  --alert: var(--badge-active);
+}
+
+.doc .markdown-alert-warning,
+.doc .markdown-alert-caution {
+  --alert: var(--badge-blocked);
+}
+
+.doc .markdown-alert > :last-child {
+  margin-bottom: 0;
+}
+
+.doc .markdown-alert-title {
+  margin-bottom: 0.2em;
+  color: var(--alert);
+  font-weight: 650;
+}
+
+.doc hr {
+  height: 0;
+  margin: 2.2em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.doc img {
+  max-width: 100%;
+  height: auto;
+}
+
+.doc mark {
+  background: var(--mark);
+  color: inherit;
+}
+
+.doc .tag {
+  padding: 0.05em 0.35em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+.doc .footnotes {
+  margin-top: 2.4em;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 0.88em;
+}
+
+.doc summary {
+  cursor: pointer;
+}
+
+.doc .img-placeholder {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.25em 0.7em;
+  border: 1px dashed color-mix(in srgb, var(--fg-muted) 55%, transparent);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font: 0.75em / 1.4 var(--ui-font);
+  vertical-align: middle;
+}
+
+/* ---- Code ---- */
+
+.doc code {
+  padding: 0.12em 0.36em;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--code-font);
+  font-size: 0.86em;
+  overflow-wrap: anywhere;
+}
+
+.doc a.code-link {
+  text-decoration: none;
+}
+
+.doc a.code-link code {
+  color: var(--link);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--link) 40%, transparent);
+}
+
+.doc pre {
+  margin: 0;
+  padding: 12px 16px 14px;
+  overflow-x: auto;
+  font: 0.86em / 1.55 var(--code-font);
+  tab-size: 4;
+}
+
+.doc pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 1em;
+  overflow-wrap: normal;
+}
+
+.code-wrap pre {
+  white-space: pre-wrap;
+}
+
+.doc .code-block {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+
+.doc .code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font: 12px / 1 var(--ui-font);
+}
+
+.doc .code-copy {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font: 12px / 1.2 var(--ui-font);
+  cursor: pointer;
+}
+
+.doc .code-copy:hover {
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.doc .code-note {
+  padding: 6px 14px;
+  border-bottom: 1px dashed var(--border);
+  color: var(--fg-muted);
+  font: 12px / 1.4 var(--ui-font);
+}
+
+/* ---- Tables ---- */
+
+.doc .table-wrap {
+  overflow-x: auto;
+}
+
+.doc table {
+  width: auto;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+/* `anywhere` lets long cells wrap, but it also lets the table squeeze a short column to a letter
+   per line; the floor keeps short columns readable. */
+.doc th,
+.doc td {
+  min-width: 5.5em;
+  padding: 0.45em 0.75em;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.doc th {
+  background: var(--bg-elev);
+  font-weight: 600;
+}
+
+/* ---- Breakout ----
+   A table or code block wider than the measure grows, centred, up to the pane's width less the
+   gutters; one narrower than the measure keeps the text column's width. (`min(max-content, …)`
+   isn't valid CSS, hence max-content clamped by max-width.) */
+.doc > .table-wrap,
+.doc > .code-block {
+  position: relative;
+  left: 50%;
+  width: max-content;
+  min-width: 100%;
+  max-width: calc(var(--pane-width) - 2 * var(--gutter));
+  transform: translateX(-50%);
+}

@@ -1,9 +1,87 @@
+/* Variables, reset and the page. Theme values here are Graphite's, as defaults until Task 10's
+   themes.css defines every theme with the same names under html[data-theme]. */
+:root {
+  --bg: #1e1f22;
+  --bg-elev: #25262a;
+  --fg: #d7d8db;
+  --fg-muted: #9a9da5;
+  --accent: #7aa2f7;
+  --border: #34363c;
+  --code-bg: #26282c;
+  --code-fg: #d7d8db;
+  --link: #7aa2f7;
+  --selection: rgb(122 162 247 / 0.3);
+  --mark: rgb(224 175 104 / 0.35);
+  --badge-active: #6cc287;
+  --badge-blocked: #ec7f86;
+  --badge-parked: #9a9da5;
+  --badge-done: #7aa2f7;
+
+  /* Reading, from the settings. */
+  --font-size: 18px;
+  --line-height: 1.65;
+  --measure: 72ch;
+  --body-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif, "Segoe UI Emoji";
+  --code-font: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  /* Chrome: a fixed system font, whatever the reading size. */
+  --ui-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --ui-size: 13px;
+  --header-h: 36px;
+  --gutter: 40px;
+  --library-width: 280px;
+  --outline-width: 240px;
+  --radius: 6px;
+  --hover: color-mix(in srgb, var(--fg) 7%, transparent);
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 html,
 body {
   margin: 0;
   height: 100%;
-  background: #1e1f22;
-  color: #d7d8db;
-  font-family: "Segoe UI", system-ui, sans-serif;
-  font-size: 13px;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--ui-size) / 1.45 var(--ui-font);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+kbd {
+  font: 500 0.85em / 1 var(--ui-font);
+  padding: 0.2em 0.45em;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  white-space: nowrap;
 }

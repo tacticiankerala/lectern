@@ -133,6 +133,16 @@ impl State {
         self.recent.insert(0, e);
         self.recent.truncate(MAX_RECENT);
     }
+
+    /// Removes `path` from the recent files, compared as `push_recent` does; true when it was
+    /// there.
+    pub fn remove_recent(&mut self, path: &str) -> bool {
+        let key = path_key(Path::new(path));
+        let before = self.recent.len();
+        self.recent
+            .retain(|old| path_key(Path::new(&old.path)) != key);
+        self.recent.len() != before
+    }
 }
 
 /// Tells apart the temporary files of writes running at the same time.

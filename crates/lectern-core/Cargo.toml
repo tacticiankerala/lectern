@@ -30,3 +30,8 @@ url = "2.5.8"
 [dev-dependencies]
 insta = { version = "1.48.0", features = ["glob"] }
 tempfile = "3.27.0"
+
+# Its path remapping has unit tests, which `cargo test` then runs.
+[[example]]
+name = "export_fixtures"
+test = true

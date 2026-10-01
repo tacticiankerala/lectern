@@ -37,6 +37,14 @@ impl AppState {
         self.finish_open(seq, &path, result)
     }
 
+    /// Opens a file the user chose (the file dialog or a drop). The user picked it, so its network
+    /// host is trusted for the session, as for a launch argument; then it opens like
+    /// `open_document`.
+    pub fn open_user_path(self: &Arc<Self>, path: &str) -> OpenResult {
+        write(&self.trust).opened_by_user(Path::new(path));
+        self.open_document(path)
+    }
+
     pub(super) fn load(&self, path: &Path) -> Result<Rendered, OpenError> {
         // The generation is read before the index, so a render against an index replaced
         // meanwhile is never cached.
@@ -225,6 +233,15 @@ impl AppState {
         }
     }
 
+    /// Drops `path` from the recent files, for good; returns the recent files left.
+    pub fn remove_recent(&self, path: &str) -> Vec<RecentEntry> {
+        let mut state = lock(&self.state);
+        if state.reading.remove_recent(path) {
+            self.saver.state(&state);
+        }
+        state.reading.recent.clone()
+    }
+
     pub fn save_position(&self, path: &str, position: SavedPosition) {
         let mut state = lock(&self.state);
         state.reading.set_position(path, position, now_ms());
@@ -240,6 +257,7 @@ mod tests {
     use std::fs;
 
     use crate::state::doc::render_file;
+    use crate::state::profile::STATE_FILE;
     use crate::state::sync::lock;
 
     #[test]
@@ -332,6 +350,49 @@ mod tests {
         assert_eq!(f.host.doc_changes(), 1);
         rescan(&f, &root);
         assert_eq!(f.host.doc_changes(), 1);
+    }
+
+    #[test]
+    fn a_file_the_user_chose_trusts_its_host_before_it_opens() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let chosen = r"\\lectern-chosen.invalid\share\plan.md";
+        let refusal = trust::refusal(chosen);
+        // Reached from a note, the host is refused untouched.
+        assert!(matches!(
+            f.state.open_document(chosen),
+            OpenResult::Err { error } if error.message == refusal
+        ));
+        // Chosen by the user, the host is trusted first, so the open is attempted: the file isn't
+        // there, but it isn't refused.
+        match f.state.open_user_path(chosen) {
+            OpenResult::Err { error } => assert_ne!(error.message, refusal),
+            OpenResult::Ok { .. } => panic!("opened a file that doesn't exist"),
+        }
+        // The host stays trusted for the session.
+        assert!(f.state.trusts(r"\\LECTERN-CHOSEN.invalid\share\other.md"));
+        // A local file opens as `open_document` would.
+        let doc = f.dir.file("a.md", "# A");
+        assert_eq!(
+            opened_path(&f.state.open_user_path(&path_string(&doc))),
+            doc
+        );
+    }
+
+    #[test]
+    fn removing_a_recent_entry_saves_the_rest() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let a = f.dir.file("one/a.md", "# A");
+        let b = f.dir.file("two/b.md", "# B");
+        f.state.open_document(&path_string(&a));
+        f.state.open_document(&path_string(&b));
+        // Paths compare as on Windows.
+        let left = f.state.remove_recent(&path_string(&a).to_uppercase());
+        let left: Vec<PathBuf> = left.iter().map(|r| PathBuf::from(&r.path)).collect();
+        assert_eq!(left, [b]);
+        f.state.flush();
+        let saved = fs::read_to_string(f.config.join(STATE_FILE)).unwrap();
+        assert!(!saved.contains("a.md"), "{saved}");
+        assert!(saved.contains("b.md"), "{saved}");
     }
 
     /// Scans `root` again and waits for that scan to finish.

@@ -1,6 +1,7 @@
 // Bundles the UI into dist/ (or dist-fake/ with --fake): app.js, app.css, index.html and fonts/.
+// The fake build inlines dev/fixtures.json, which `npm run fixtures` writes.
 import { existsSync } from "node:fs";
-import { cp, mkdir, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -10,6 +11,15 @@ const fake = process.argv.includes("--fake");
 const outdir = path.join(root, fake ? "dist-fake" : "dist");
 const entry = path.join(root, fake ? "dev/main-fake.ts" : "src/main.ts");
 const target = "chrome120";
+
+const define = {};
+if (fake) {
+  const fixtures = path.join(root, "dev/fixtures.json");
+  if (!existsSync(fixtures)) {
+    throw new Error("dev/fixtures.json is missing: run `npm run fixtures` first");
+  }
+  define.__LX_FIXTURES__ = await readFile(fixtures, "utf8");
+}
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
@@ -21,6 +31,7 @@ await esbuild.build({
   format: "esm",
   minify: true,
   target,
+  define,
   logLevel: "warning",
 });
 

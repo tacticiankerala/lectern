@@ -103,6 +103,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
         .invoke_handler(tauri::generate_handler![
             commands::startup,
             commands::open_document,
+            commands::open_user_path,
             commands::get_library,
             commands::add_root,
             commands::remove_root,
@@ -115,6 +116,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::get_settings,
             commands::set_settings,
             commands::save_position,
+            commands::remove_recent,
             commands::set_chrome_colors,
             commands::list_system_fonts,
             commands::perf_mark,
@@ -413,6 +415,27 @@ pub fn active_theme(settings: &Settings, system_dark: bool) -> ThemeId {
         settings.dark_theme.clone()
     } else {
         settings.light_theme.clone()
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    /// The UI sets the native title as documents open, so the window must allow it.
+    #[test]
+    fn the_main_window_may_set_its_title() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert_eq!(caps["windows"][0], super::MAIN_WINDOW);
+        assert!(
+            permissions.contains(&"core:window:allow-set-title"),
+            "{permissions:?}"
+        );
     }
 }
 

@@ -292,6 +292,17 @@ fn recent_dedupes() {
 }
 
 #[test]
+fn recent_entry_is_removed_case_insensitively() {
+    let mut s = State::default();
+    s.push_recent(recent(r"C:\notes\a.md"));
+    s.push_recent(recent(r"C:\notes\b.md"));
+    assert!(s.remove_recent("c:/NOTES/a.md"));
+    assert_eq!(recent_paths(&s), [r"C:\notes\b.md"]);
+    assert!(!s.remove_recent(r"C:\notes\gone.md"));
+    assert_eq!(recent_paths(&s), [r"C:\notes\b.md"]);
+}
+
+#[test]
 fn recent_capped_newest_first() {
     let mut s = State::default();
     for i in 0..25 {

@@ -5,13 +5,14 @@
   "scripts": {
     "build": "node build.mjs",
     "build:fake": "node build.mjs --fake",
-    "serve:fake": "node build.mjs --fake && node dev/serve.mjs",
+    "serve:fake": "npm run fixtures && node build.mjs --fake && node dev/serve.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
     "e2e": "playwright test",
-    "tauri": "cd .. && tauri"
+    "tauri": "cd .. && tauri",
+    "fixtures": "cargo run --quiet -p lectern-core --example export_fixtures"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",

@@ -1,0 +1,587 @@
+/* The app's chrome: layout, header, sidebars, outline, properties strip, banner, toasts, and the
+   welcome and error states. */
+
+/* ---- Layout ---- */
+
+#lx-app.layout {
+  --library-col: var(--library-width);
+  --outline-col: var(--outline-width);
+  display: grid;
+  height: 100%;
+  grid-template-columns: var(--library-col) 0 minmax(0, 1fr) 0 var(--outline-col);
+  grid-template-rows: var(--header-h) minmax(0, 1fr);
+  grid-template-areas:
+    "header header header header header"
+    "library library-resizer doc outline-resizer outline";
+}
+
+#lx-app.no-library {
+  --library-col: 0px;
+}
+
+#lx-app.no-outline {
+  --outline-col: 0px;
+}
+
+#lx-app.no-library > #lx-library,
+#lx-app.no-library > .resizer[data-for="library"],
+#lx-app.no-outline > #lx-outline,
+#lx-app.no-outline > .resizer[data-for="outline"] {
+  display: none;
+}
+
+#lx-header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+#lx-breadcrumbs {
+  flex: 1;
+  min-width: 0;
+}
+
+#lx-header-actions {
+  display: flex;
+  gap: 4px;
+}
+
+#lx-progress {
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  pointer-events: none;
+}
+
+.sidebar {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg) 18%, transparent) transparent;
+}
+
+#lx-library {
+  grid-area: library;
+  background: var(--bg-elev);
+}
+
+#lx-outline {
+  grid-area: outline;
+  /* The entries' offset parent, for keeping the active one in view. */
+  position: relative;
+  padding: 28px 12px 32px 4px;
+}
+
+.resizer {
+  position: relative;
+  z-index: 2;
+  cursor: col-resize;
+}
+
+.resizer[data-for="library"] {
+  grid-area: library-resizer;
+  border-left: 1px solid var(--border);
+}
+
+.resizer[data-for="outline"] {
+  grid-area: outline-resizer;
+}
+
+/* A hit area wider than the line it sits on. */
+.resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 -3px;
+}
+
+#lx-doc-pane {
+  grid-area: doc;
+  min-height: 0;
+  overflow-y: auto;
+  /* Room to bring the last heading to the top. */
+  padding-bottom: 35vh;
+  /* Breakout widths come from the pane's width (doc.css). */
+  container-type: inline-size;
+  --pane-width: 100cqw;
+  scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
+}
+
+/* The banner and the properties strip share the document's column: their width is measured in the
+   reading font, their content set in the chrome's. */
+#lx-banner,
+#lx-properties {
+  box-sizing: content-box;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+  font: var(--font-size) / var(--line-height) var(--body-font);
+}
+
+#lx-banner > *,
+#lx-properties > * {
+  font: var(--ui-size) / 1.45 var(--ui-font);
+}
+
+/* ---- Banner ---- */
+
+#lx-banner {
+  padding-top: 20px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--badge-blocked) 45%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--badge-blocked) 10%, transparent);
+}
+
+.banner-dismiss {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.banner-dismiss:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+/* ---- Properties strip ---- */
+
+#lx-properties {
+  padding-top: 26px;
+}
+
+.props-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.props-chevron {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 2px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+
+.collapsed .props-chevron {
+  transform: rotate(-45deg);
+  margin-bottom: 0;
+}
+
+.props-head:has(+ .props-body:empty) {
+  cursor: default;
+}
+
+.props-head:has(+ .props-body:empty) .props-chevron {
+  visibility: hidden;
+}
+
+.props-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.props-head:hover .props-label {
+  color: var(--fg);
+}
+
+.props-tasks {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.props-warning {
+  color: var(--badge-blocked);
+  font-size: 14px;
+  cursor: help;
+}
+
+.props-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 22px;
+  padding: 6px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.props-body:empty {
+  padding: 0 0 10px;
+}
+
+.collapsed .props-body {
+  display: none;
+}
+
+#lx-properties.collapsed {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.prop {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.prop-key {
+  color: var(--fg-muted);
+}
+
+.prop-value {
+  overflow-wrap: anywhere;
+}
+
+.prop-value time {
+  border-bottom: 1px dotted color-mix(in srgb, var(--fg-muted) 60%, transparent);
+  cursor: help;
+}
+
+.props-raw {
+  flex: 1;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font: 12px / 1.5 var(--code-font);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.badge {
+  --badge: var(--fg-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--badge) 15%, transparent);
+  color: var(--badge);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-active {
+  --badge: var(--badge-active);
+}
+
+.status-blocked {
+  --badge: var(--badge-blocked);
+}
+
+.status-parked {
+  --badge: var(--badge-parked);
+}
+
+.status-done {
+  --badge: var(--badge-done);
+}
+
+.chip {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  font: 12px / 18px var(--code-font);
+}
+
+/* ---- Outline ---- */
+
+.outline-title {
+  padding: 0 8px 10px 14px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.outline-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.outline-list a,
+.outline-list span {
+  display: block;
+  overflow: hidden;
+  padding: 3px 8px 3px calc(12px + var(--depth, 0) * 12px);
+  border-left: 2px solid transparent;
+  border-radius: 0 4px 4px 0;
+  color: var(--fg-muted);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-list a:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.outline-list li.active > a {
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+
+/* ---- Toasts ---- */
+
+#lx-toasts {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  max-width: min(520px, 90vw);
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.35);
+  animation: toast-in 0.16s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* ---- Welcome and error states (inside #lx-doc) ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font: 500 13px / 18px var(--ui-font);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: color-mix(in srgb, var(--fg) 25%, var(--border));
+}
+
+.btn.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.btn.primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--fg));
+}
+
+.btn kbd {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.doc .welcome {
+  padding: 11vh 0 48px;
+}
+
+.doc .welcome-title {
+  margin: 0 0 0.25em;
+  font-size: 2.1em;
+  letter-spacing: -0.02em;
+}
+
+.welcome-lede {
+  margin: 0 0 1.4em;
+  color: var(--fg-muted);
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.doc .state-heading {
+  margin: 2.6em 0 0.8em;
+  padding: 0;
+  border: 0;
+  color: var(--fg-muted);
+  font: 600 11px / 1 var(--ui-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.recent-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 -10px;
+  border-radius: var(--radius);
+}
+
+.recent-row:hover {
+  background: var(--hover);
+}
+
+.recent-item {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent-remove {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-right: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.recent-row:hover .recent-remove,
+.recent-remove:focus-visible {
+  opacity: 1;
+}
+
+.recent-remove:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.recent-title {
+  font: 500 15px / 1.4 var(--ui-font);
+}
+
+.recent-path {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font: 12px / 1.4 var(--ui-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 24px;
+  margin: 0;
+  font: 13px / 1.5 var(--ui-font);
+}
+
+.keys dd {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.doc .state {
+  padding: 14vh 0 48px;
+  text-align: center;
+}
+
+.doc .state-title {
+  margin: 0 0 0.5em;
+  font-size: 1.4em;
+}
+
+.state-detail {
+  margin: 0 0 0.4em;
+  color: var(--fg-muted);
+}
+
+.state-path {
+  margin: 0;
+  color: var(--fg-muted);
+  font: 12px / 1.5 var(--code-font);
+  overflow-wrap: anywhere;
+}
+
+.state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 1.8em;
+}
