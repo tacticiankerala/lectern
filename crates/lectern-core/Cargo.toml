@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 ammonia = "4.2.0"
 comrak = { version = "0.55.0", default-features = false }
+jwalk = "0.9.0"
 percent-encoding = "2.3.2"
 rayon = "1.12.0"
 saphyr = { version = "0.1.0", default-features = false }
