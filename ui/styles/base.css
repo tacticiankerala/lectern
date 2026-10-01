@@ -1,22 +1,6 @@
-/* Variables, reset and the page. Theme values here are Graphite's, as defaults until Task 10's
-   themes.css defines every theme with the same names under html[data-theme]. */
+/* Variables, reset and the page. The colours come from the theme (themes.css, chosen by
+   html[data-theme]); the reading variables from the settings (themes.ts sets them). */
 :root {
-  --bg: #1e1f22;
-  --bg-elev: #25262a;
-  --fg: #d7d8db;
-  --fg-muted: #9a9da5;
-  --accent: #7aa2f7;
-  --border: #34363c;
-  --code-bg: #26282c;
-  --code-fg: #d7d8db;
-  --link: #7aa2f7;
-  --selection: rgb(122 162 247 / 0.3);
-  --mark: rgb(224 175 104 / 0.35);
-  --badge-active: #6cc287;
-  --badge-blocked: #ec7f86;
-  --badge-parked: #9a9da5;
-  --badge-done: #7aa2f7;
-
   /* Reading, from the settings. */
   --font-size: 18px;
   --line-height: 1.65;
@@ -33,8 +17,6 @@
   --outline-width: 240px;
   --radius: 6px;
   --hover: color-mix(in srgb, var(--fg) 7%, transparent);
-
-  color-scheme: dark;
 }
 
 *,

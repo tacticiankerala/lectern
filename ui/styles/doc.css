@@ -36,6 +36,8 @@
   margin: 0 0 0.9em;
 }
 
+/* Headings: the body family, heavier, tightening as they grow. Space above outweighs space below,
+   so each heading belongs to what follows. */
 .doc h1,
 .doc h2,
 .doc h3,
@@ -52,16 +54,21 @@
 .doc h1 {
   margin-top: 0.6em;
   font-size: 1.75em;
-  letter-spacing: -0.018em;
+  font-weight: 700;
+  line-height: 1.18;
+  letter-spacing: -0.022em;
 }
 
 .doc h2 {
+  margin-top: 2em;
   font-size: 1.4em;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.014em;
 }
 
 .doc h3 {
+  margin-top: 1.8em;
   font-size: 1.17em;
+  letter-spacing: -0.008em;
 }
 
 .doc h4 {
@@ -103,6 +110,15 @@
   padding-left: 1.6em;
 }
 
+.doc li::marker {
+  color: var(--fg-muted);
+}
+
+.doc p,
+.doc li {
+  text-wrap: pretty;
+}
+
 .doc li + li {
   margin-top: 0.3em;
 }
@@ -122,14 +138,37 @@
   list-style: none;
 }
 
+/* Drawn rather than native, so a disabled (read-only) box isn't greyed out: an open task is an
+   outline, a done one is filled with the accent. */
 .doc li > input[type="checkbox"] {
   position: absolute;
-  left: -1.45em;
-  top: calc((var(--line-height) * 1em - 0.9em) / 2);
-  width: 0.9em;
-  height: 0.9em;
+  left: -1.5em;
+  /* Centred on the line, nudged down to the middle of the capitals. */
+  top: calc((var(--line-height) * 1em - 0.92em) / 2 + 0.05em);
+  width: 0.92em;
+  height: 0.92em;
   margin: 0;
-  accent-color: var(--accent);
+  border: 0.09em solid color-mix(in srgb, var(--fg-muted) 80%, transparent);
+  border-radius: 0.22em;
+  background: none;
+  appearance: none;
+}
+
+.doc li > input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.doc li > input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 0.27em;
+  top: 0.1em;
+  width: 0.24em;
+  height: 0.46em;
+  border: solid var(--bg);
+  border-width: 0 0.12em 0.12em 0;
+  transform: rotate(45deg);
 }
 
 .doc li > input[type="checkbox"] + p {
@@ -138,7 +177,7 @@
 
 .doc blockquote {
   padding: 0 0 0 1em;
-  border-left: 3px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   color: var(--fg-muted);
 }
 
@@ -221,13 +260,17 @@
 
 /* ---- Code ---- */
 
+/* Inline code is the notes' most frequent mark, so it stays light: a faint tint of the code ink
+   over whatever it sits on (text, a table header, a quote), and no ligatures, as code reads in an
+   editor. */
 .doc code {
-  padding: 0.12em 0.36em;
+  padding: 0.1em 0.32em;
   border-radius: 4px;
-  background: var(--code-bg);
+  background: color-mix(in srgb, var(--code-fg) 8%, transparent);
   color: var(--code-fg);
   font-family: var(--code-font);
   font-size: 0.86em;
+  font-variant-ligatures: none;
   overflow-wrap: anywhere;
 }
 
@@ -245,6 +288,7 @@
   padding: 12px 16px 14px;
   overflow-x: auto;
   font: 0.86em / 1.55 var(--code-font);
+  font-variant-ligatures: none;
   tab-size: 4;
 }
 
@@ -329,6 +373,10 @@
 .doc th {
   background: var(--bg-elev);
   font-weight: 600;
+}
+
+.doc td {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- Breakout ----

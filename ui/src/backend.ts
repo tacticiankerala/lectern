@@ -54,6 +54,8 @@ export interface Backend {
   removeRecent(path: string): Promise<RecentEntry[]>;
   /** Sets the native window title (the title bar and the task switcher). */
   setTitle(title: string): Promise<void>;
+  /** Puts the window in or out of full screen, for focus mode. */
+  setFullscreen(on: boolean): Promise<void>;
   showWindow(): Promise<void>;
   /** Subscribes to a backend event; returns the unsubscribe function. */
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- callers name the payload type

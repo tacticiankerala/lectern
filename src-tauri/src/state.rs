@@ -56,7 +56,7 @@ use self::profile::StateFile;
 use self::saver::Saver;
 use self::startup::spawn_forwarder;
 use self::sync::{lock, read, write, Gate};
-use crate::app::WindowPlacement;
+use crate::app::{Rect, WindowPlacement};
 use crate::events::{Host, UiEvent};
 
 const CACHE_CAP: usize = 64;
@@ -149,7 +149,7 @@ pub struct AppState {
     forwards: Sender<OpenRequest>,
     watch: Box<dyn Watch>,
     saver: Saver,
-    /// The window's last normal (not maximised or minimised) placement.
+    /// The window's last normal (not maximised, minimised or full screen) placement.
     window: Mutex<Option<WindowPlacement>>,
 }
 
@@ -303,20 +303,23 @@ impl AppState {
 
     /// Remembers the window's normal placement after a move or resize.
     pub fn track_window(&self, window: &Window) {
-        let normal = window.is_visible().unwrap_or(false)
-            && !window.is_maximized().unwrap_or(true)
-            && !window.is_minimized().unwrap_or(true);
-        if !normal {
-            return;
-        }
-        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
-            *lock(&self.window) = Some(WindowPlacement {
+        let shape = WindowShape::of(window);
+        let rect = match (window.outer_position(), window.inner_size()) {
+            (Ok(pos), Ok(size)) if shape.is_normal() => Some(Rect {
                 x: pos.x,
                 y: pos.y,
                 width: size.width,
                 height: size.height,
-                maximized: false,
-            });
+            }),
+            _ => None,
+        };
+        self.track_placement(shape, rect);
+    }
+
+    /// Takes `rect` as the normal placement when the window is in its normal shape.
+    fn track_placement(&self, shape: WindowShape, rect: Option<Rect>) {
+        if let (true, Some(rect)) = (shape.is_normal(), rect) {
+            *lock(&self.window) = Some(WindowPlacement::from_rect(rect));
         }
     }
 
@@ -341,7 +344,35 @@ impl AppState {
     pub fn set_initial_placement(&self, placement: WindowPlacement) {
         *lock(&self.window) = Some(placement);
     }
+}
 
+/// The window's state, for telling its normal placement from a passing one.
+#[derive(Clone, Copy, Debug)]
+struct WindowShape {
+    visible: bool,
+    maximized: bool,
+    minimized: bool,
+    fullscreen: bool,
+}
+
+impl WindowShape {
+    /// What can't be read counts against: a placement is kept only when surely normal.
+    fn of(window: &Window) -> Self {
+        Self {
+            visible: window.is_visible().unwrap_or(false),
+            maximized: window.is_maximized().unwrap_or(true),
+            minimized: window.is_minimized().unwrap_or(true),
+            fullscreen: window.is_fullscreen().unwrap_or(true),
+        }
+    }
+
+    /// Shown, and not maximised, minimised or full screen (focus mode).
+    fn is_normal(self) -> bool {
+        self.visible && !self.maximized && !self.minimized && !self.fullscreen
+    }
+}
+
+impl AppState {
     /// Writes pending settings and state now; called as the app exits.
     pub fn flush(&self) {
         self.saver.flush(Duration::from_secs(2));
@@ -363,6 +394,62 @@ mod tests {
 
     use crate::state::profile::{SETTINGS_FILE, STATE_FILE, UNLOADED_NOTICE};
     use crate::state::saver::SAVE_DEBOUNCE;
+
+    /// Focus mode's full screen, like maximised and minimised, is not the window's normal
+    /// placement: closing in focus mode must keep the rect to restore.
+    #[test]
+    fn only_a_normal_window_updates_the_remembered_placement() {
+        let f = fixture(Profile::unloaded(), FakeHost::default());
+        let normal = WindowShape {
+            visible: true,
+            maximized: false,
+            minimized: false,
+            fullscreen: false,
+        };
+        let rect = Rect {
+            x: 120,
+            y: 80,
+            width: 1280,
+            height: 860,
+        };
+        f.state.track_placement(normal, Some(rect));
+        assert_eq!(
+            f.state.saved_placement(),
+            Some(WindowPlacement::from_rect(rect))
+        );
+        let screen = Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let passing = [
+            WindowShape {
+                fullscreen: true,
+                ..normal
+            },
+            WindowShape {
+                maximized: true,
+                ..normal
+            },
+            WindowShape {
+                minimized: true,
+                ..normal
+            },
+            WindowShape {
+                visible: false,
+                ..normal
+            },
+        ];
+        for shape in passing {
+            f.state.track_placement(shape, Some(screen));
+            assert_eq!(
+                f.state.saved_placement(),
+                Some(WindowPlacement::from_rect(rect)),
+                "{shape:?}"
+            );
+        }
+    }
 
     #[test]
     fn an_unloaded_profile_saves_nothing() {

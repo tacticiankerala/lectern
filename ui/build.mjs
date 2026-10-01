@@ -36,6 +36,7 @@ await esbuild.build({
 });
 
 // One CSS bundle from every stylesheet, in file-name order, through a generated @import entry.
+// Font urls stay as written: they point at fonts/, copied next to app.css below.
 const styles = (await readdir(path.join(root, "styles"))).filter((f) => f.endsWith(".css")).sort();
 await esbuild.build({
   stdin: {
@@ -45,6 +46,7 @@ await esbuild.build({
     loader: "css",
   },
   outfile: path.join(outdir, "app.css"),
+  external: ["*.woff2"],
   bundle: true,
   minify: true,
   target,

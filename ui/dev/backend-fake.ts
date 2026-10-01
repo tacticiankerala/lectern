@@ -44,6 +44,10 @@ export interface FakeControl {
   /** Replaces a document's HTML, adds a document, or (with null) deletes one. */
   setDoc(path: string, html: string | null): void;
   readonly marks: PerfMark[];
+  /** Every `setFullscreen` call, in order. */
+  readonly fullscreen: boolean[];
+  /** Every title-bar colouring, as `[bg, fg, dark]`, in order. */
+  readonly chromeColors: [string, string, boolean][];
 }
 
 declare global {
@@ -66,6 +70,10 @@ export class FakeBackend implements Backend, FakeControl {
   readonly shown: number[] = [];
   /** Every native title set, in order. */
   readonly titles: string[] = [];
+  readonly fullscreen: boolean[] = [];
+  readonly chromeColors: [string, string, boolean][] = [];
+  /** What `listSystemFonts` answers. */
+  systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc }>();
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
   private settings: Settings = { ...DEFAULT_SETTINGS };
@@ -121,6 +129,11 @@ export class FakeBackend implements Backend, FakeControl {
   setTitle(title: string): Promise<void> {
     this.titles.push(title);
     document.title = title;
+    return Promise.resolve();
+  }
+
+  setFullscreen(on: boolean): Promise<void> {
+    this.fullscreen.push(on);
     return Promise.resolve();
   }
 
@@ -183,12 +196,13 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
-  setChromeColors(): Promise<void> {
+  setChromeColors(bg: string, fg: string, dark: boolean): Promise<void> {
+    this.chromeColors.push([bg, fg, dark]);
     return Promise.resolve();
   }
 
   listSystemFonts(): Promise<string[]> {
-    return Promise.resolve([]);
+    return Promise.resolve(this.systemFonts);
   }
 
   checkUpdate(): Promise<UpdateInfo | null> {

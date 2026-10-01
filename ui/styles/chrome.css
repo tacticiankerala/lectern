@@ -51,6 +51,26 @@
   gap: 4px;
 }
 
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-muted);
+  font: 600 13px / 1 var(--ui-font);
+  cursor: pointer;
+}
+
+.icon-btn:hover,
+.icon-btn[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--fg);
+}
+
 #lx-progress {
   position: fixed;
   top: var(--header-h);
@@ -212,10 +232,8 @@
 }
 
 .props-label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .props-head:hover .props-label {
@@ -340,10 +358,8 @@
 .outline-title {
   padding: 0 8px 10px 14px;
   color: var(--fg-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
 }
 
 .outline-list {
@@ -470,9 +486,7 @@
   padding: 0;
   border: 0;
   color: var(--fg-muted);
-  font: 600 11px / 1 var(--ui-font);
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+  font: 600 12px / 1 var(--ui-font);
 }
 
 .recent-list {
@@ -584,4 +598,331 @@
   justify-content: center;
   gap: 10px;
   margin-top: 1.8em;
+}
+
+/* ---- Reading panel (the "Aa" popover) ---- */
+
+.reading-panel {
+  --panel-bg: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  position: fixed;
+  top: calc(var(--header-h) + 6px);
+  right: 10px;
+  z-index: 40;
+  width: 328px;
+  max-width: calc(100vw - 20px);
+  max-height: calc(100vh - var(--header-h) - 20px);
+  overflow-y: auto;
+  padding: 14px 16px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  box-shadow:
+    0 18px 44px -12px rgb(0 0 0 / 0.3),
+    0 2px 6px rgb(0 0 0 / 0.06);
+  animation: panel-in 0.14s ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.rp-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.rp-row + .rp-row {
+  margin-top: 10px;
+}
+
+.rp-row.top {
+  align-items: start;
+}
+
+.rp-row.top > .rp-label {
+  padding-top: 13px;
+}
+
+.rp-label {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.rp-rule {
+  height: 1px;
+  margin: 14px 0 12px;
+  background: var(--border);
+}
+
+/* Radios drawn as tiles: the real input covers its tile, invisibly, so keyboard and pointer both
+   reach it, and the tile after it shows its state. */
+.segment input,
+.swatch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.segment {
+  position: relative;
+  display: grid;
+  color: var(--fg-muted);
+}
+
+.segment span {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  border-radius: 6px;
+}
+
+.segment:hover {
+  color: var(--fg);
+}
+
+.segment input:checked + span {
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgb(0 0 0 / 0.1);
+}
+
+.segment input:focus-visible + span,
+.swatch input:focus-visible + .swatch-tile {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.swatch {
+  position: relative;
+  display: block;
+}
+
+/* A page in miniature: the theme's paper and ink, with a bookmark ribbon in its accent. */
+.swatch-tile {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  height: 42px;
+  padding: 0 0 6px 8px;
+  border-radius: 7px;
+  background: var(--sw-bg);
+  color: var(--sw-fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sw-fg) 14%, transparent);
+  font: 600 15px / 1 var(--body-font);
+}
+
+.swatch-tile::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 9px;
+  width: 6px;
+  height: 14px;
+  background: var(--sw-accent);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+}
+
+.swatch:hover .swatch-tile {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sw-fg) 35%, transparent);
+}
+
+/* The theme on screen gets the accent ring; the other mode's choice, a quiet one. */
+.swatch input:checked + .swatch-tile {
+  box-shadow:
+    0 0 0 2px var(--panel-bg),
+    0 0 0 3.5px color-mix(in srgb, var(--fg) 40%, transparent);
+}
+
+.swatch-group.showing .swatch input:checked + .swatch-tile {
+  box-shadow:
+    0 0 0 2px var(--panel-bg),
+    0 0 0 4px var(--accent);
+}
+
+.swatch-name {
+  margin-top: 7px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.swatch-group.showing .swatch-name {
+  color: var(--fg);
+}
+
+.rp-font {
+  display: grid;
+  gap: 6px;
+}
+
+.select {
+  position: relative;
+  display: block;
+}
+
+.select::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border: solid var(--fg-muted);
+  border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+.reading-panel select,
+.reading-panel input[type="text"] {
+  width: 100%;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px / 1 var(--ui-font);
+}
+
+.reading-panel select {
+  padding-right: 28px;
+  appearance: none;
+  cursor: pointer;
+}
+
+.reading-panel select:hover {
+  border-color: color-mix(in srgb, var(--fg) 25%, var(--border));
+}
+
+.reading-panel input::placeholder {
+  color: var(--fg-muted);
+}
+
+.rp-slider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 10px;
+}
+
+.rp-slider input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rp-slider input:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.rp-value {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.rp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  cursor: pointer;
+}
+
+.rp-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.rp-row.check + .rp-row.check {
+  margin-top: 4px;
+}
+
+/* ---- Focus mode (F11): the text alone, full screen ---- */
+
+body.focus #lx-app.layout {
+  --library-col: 0px;
+  --outline-col: 0px;
+  grid-template-rows: 0 minmax(0, 1fr);
+}
+
+body.focus #lx-header,
+body.focus #lx-progress,
+body.focus #lx-library,
+body.focus #lx-outline,
+body.focus .resizer {
+  display: none;
+}
+
+body.focus #lx-doc-pane {
+  padding-top: 5vh;
+}
+
+/* ---- Narrow windows: the outline goes first, then the library, unless shown on purpose ---- */
+
+@media (max-width: 1099.98px) {
+  #lx-app:not(.show-outline) {
+    --outline-col: 0px;
+  }
+
+  #lx-app:not(.show-outline) > #lx-outline,
+  #lx-app:not(.show-outline) > .resizer[data-for="outline"] {
+    display: none;
+  }
+}
+
+@media (max-width: 799.98px) {
+  :root {
+    --gutter: 24px;
+  }
+
+  #lx-app:not(.show-library) {
+    --library-col: 0px;
+  }
+
+  #lx-app:not(.show-library) > #lx-library,
+  #lx-app:not(.show-library) > .resizer[data-for="library"] {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reading-panel,
+  .toast {
+    animation: none;
+  }
+
+  .props-chevron {
+    transition: none;
+  }
 }

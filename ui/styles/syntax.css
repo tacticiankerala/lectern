@@ -1,0 +1,184 @@
+/* Syntax colours: syntect's scope classes (`hl-` + each part of the scope name) mapped to the
+   fourteen token variables each theme defines. Spans nest, so a token's colour comes from its
+   innermost styled span; the rules run from broad to specific, and a later rule of the same
+   specificity wins. Classes were taken from real output for the vault's languages: Ruby, JSX/TSX,
+   Bash and Vim script first, then JS, TS, JSON, YAML, SCSS, SQL, diff, Python and HTML. */
+
+/* ---- Broad categories ---- */
+
+.hl-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+.hl-string {
+  color: var(--syn-string);
+}
+
+.hl-constant {
+  color: var(--syn-constant);
+}
+
+.hl-constant.hl-numeric,
+.hl-constant.hl-other.hl-color {
+  color: var(--syn-number);
+}
+
+.hl-keyword,
+.hl-storage {
+  color: var(--syn-keyword);
+}
+
+.hl-keyword.hl-operator {
+  color: var(--syn-operator);
+}
+
+.hl-variable {
+  color: var(--syn-variable);
+}
+
+.hl-punctuation {
+  color: var(--syn-punctuation);
+}
+
+/* ---- Names ---- */
+
+/* Word operators (`new`, `typeof`) read as keywords; `=>` reads as an operator. */
+.hl-keyword.hl-operator.hl-new,
+.hl-keyword.hl-operator.hl-word {
+  color: var(--syn-keyword);
+}
+
+.hl-storage.hl-type.hl-function.hl-arrow {
+  color: var(--syn-operator);
+}
+
+.hl-entity.hl-name.hl-function,
+.hl-support.hl-function,
+.hl-variable.hl-function {
+  color: var(--syn-function);
+}
+
+/* Classes, modules, types and JSX components. */
+.hl-entity.hl-name.hl-type,
+.hl-entity.hl-name.hl-class,
+.hl-entity.hl-name.hl-namespace,
+.hl-entity.hl-other.hl-inherited-class,
+.hl-support.hl-class,
+.hl-support.hl-type {
+  color: var(--syn-type);
+}
+
+/* `self`, `this`, constants, enum members, Ruby symbols (constant.other.symbol, above). */
+.hl-variable.hl-language,
+.hl-variable.hl-other.hl-constant,
+.hl-variable.hl-other.hl-enummember,
+.hl-entity.hl-name.hl-constant,
+.hl-support.hl-constant {
+  color: var(--syn-constant);
+}
+
+/* HTML and JSX tags, YAML keys. */
+.hl-entity.hl-name.hl-tag {
+  color: var(--syn-tag);
+}
+
+/* Attributes, CSS properties and selectors, shell options (`--format`). */
+.hl-entity.hl-other.hl-attribute-name,
+.hl-entity.hl-other.hl-pseudo-class,
+.hl-support.hl-type.hl-property-name,
+.hl-variable.hl-parameter.hl-option {
+  color: var(--syn-attribute);
+}
+
+/* ---- Punctuation that belongs to its token ---- */
+
+.hl-punctuation.hl-definition.hl-string {
+  color: var(--syn-string);
+}
+
+/* A comment's marker, a symbol's colon, a number's decimal point, an entity's `&` and `;`. */
+.hl-punctuation.hl-definition.hl-comment,
+.hl-punctuation.hl-definition.hl-constant,
+.hl-constant .hl-punctuation {
+  color: inherit;
+}
+
+/* `$` and `@` sigils. */
+.hl-punctuation.hl-definition.hl-variable {
+  color: var(--syn-variable);
+}
+
+.hl-punctuation.hl-definition.hl-keyword {
+  color: var(--syn-keyword);
+}
+
+/* Interpolation (`#{…}`, `${…}`, JSX `{…}`): the delimiters stand out, and the code inside a
+   string goes back to plain code colours. */
+.hl-punctuation.hl-section.hl-interpolation,
+.hl-punctuation.hl-section.hl-embedded,
+.hl-punctuation.hl-definition.hl-template-expression {
+  color: var(--syn-keyword);
+}
+
+.hl-meta.hl-interpolation,
+.hl-meta.hl-template-expression,
+.hl-meta.hl-embedded {
+  color: var(--code-fg);
+}
+
+/* JSON keys: their own colour, quotes included. */
+.hl-meta.hl-mapping.hl-key,
+.hl-meta.hl-mapping.hl-key * {
+  color: var(--syn-attribute);
+}
+
+/* ---- Diffs ---- */
+
+.hl-markup.hl-inserted {
+  color: var(--syn-inserted);
+}
+
+.hl-markup.hl-deleted {
+  color: var(--syn-deleted);
+}
+
+.hl-markup.hl-changed {
+  color: var(--syn-constant);
+}
+
+.hl-markup .hl-punctuation {
+  color: inherit;
+}
+
+.hl-meta.hl-header,
+.hl-meta.hl-header .hl-punctuation {
+  color: var(--syn-keyword);
+}
+
+.hl-meta.hl-range,
+.hl-meta.hl-range .hl-punctuation {
+  color: var(--syn-function);
+}
+
+/* ---- Markdown inside a fence ---- */
+
+.hl-markup.hl-heading {
+  color: var(--syn-keyword);
+}
+
+.hl-markup.hl-bold {
+  font-weight: 650;
+}
+
+.hl-markup.hl-italic {
+  font-style: italic;
+}
+
+.hl-markup.hl-raw {
+  color: var(--syn-string);
+}
+
+.hl-markup.hl-underline.hl-link {
+  color: var(--syn-function);
+}

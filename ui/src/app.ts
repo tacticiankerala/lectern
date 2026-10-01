@@ -11,7 +11,7 @@
 //   arrives while a navigation is in flight waits for it, applying only if it lands on that path.
 // - `startupNotice` shows once, as a toast.
 import type { Backend } from "./backend";
-import { DocView } from "./doc-view";
+import { DocView, READER_INPUT } from "./doc-view";
 import { buildLayout, h, nextPaint, samePath, type Layout } from "./dom";
 import type { DocChanged } from "./generated/DocChanged";
 import type { DocPayload } from "./generated/DocPayload";
@@ -22,9 +22,19 @@ import type { OpenResult } from "./generated/OpenResult";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
+import type { SettingsPatch } from "./generated/SettingsPatch";
+import { installKeymap, type Action } from "./keymap";
 import { Outline } from "./outline";
 import { trackProgress } from "./progress";
 import { renderProperties } from "./properties";
+import { ReadingPanel } from "./reading-panel";
+import {
+  applySettings,
+  bumpFontSize,
+  loadFonts,
+  loadRememberedFonts,
+  toggleThemeMode,
+} from "./themes";
 import { Toasts } from "./toast";
 import { renderError, renderWelcome } from "./welcome";
 
@@ -49,8 +59,23 @@ export const DEFAULT_SETTINGS: Settings = {
   autoUpdate: true,
 };
 
-const BODY_FALLBACK = '"Segoe UI", system-ui, sans-serif, "Segoe UI Emoji"';
-const CODE_FALLBACK = '"Cascadia Code", Consolas, ui-monospace, monospace';
+/** How long a settings change waits for more before it is saved, when asked to. */
+const SAVE_DEBOUNCE_MS = 150;
+/** How long the first paint waits for the selected bundled fonts. */
+const FONT_WAIT_MS = 150;
+/** How long focus mode holds the reader's place while the window goes to or from full screen. */
+const HOLD_MS = 1500;
+/** The hold ends once the place has held still for this many frames after a resize. */
+const HOLD_STABLE_FRAMES = 3;
+/** Settings that move the text, so the reading position is kept across them. */
+const REFLOWING: (keyof Settings)[] = [
+  "fontSize",
+  "lineHeight",
+  "measure",
+  "bodyFont",
+  "codeFont",
+  "codeWrap",
+];
 
 export interface AppState {
   settings: Settings;
@@ -74,6 +99,12 @@ export interface OpenOptions {
 
 export type Change = "doc" | "settings" | "library";
 
+/** A reading spot held across a reflow: a block, and how far down it the pane's top falls. */
+interface FlowAnchor {
+  block: Element;
+  into: number;
+}
+
 export class App {
   readonly state: AppState = {
     settings: DEFAULT_SETTINGS,
@@ -90,6 +121,16 @@ export class App {
   openSearch: (query: string) => void = () => undefined;
   private readonly toasts: Toasts;
   private readonly outline: Outline;
+  private readonly panel: ReadingPanel;
+  /** The OS colour scheme, which `system` theme mode follows. */
+  private readonly darkQuery: MediaQueryList | null =
+    typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+  private focusMode = false;
+  /** Ends the hold on the reader's place in progress, if any. */
+  private stopHold: (() => void) | null = null;
+  /** Settings changes not yet saved, and the timer that saves them. */
+  private unsaved: SettingsPatch = {};
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly updateProgress: () => void;
   private readonly listeners = new Map<Change, Set<() => void>>();
   /** Bumped by every navigation; the answer to an older one is dropped. */
@@ -117,6 +158,37 @@ export class App {
       this.view.scrollToAnchor(id);
     });
     this.updateProgress = trackProgress(this.layout.docPane, this.layout.progress);
+
+    const readingButton = h(
+      "button",
+      {
+        type: "button",
+        id: "lx-reading-btn",
+        class: "icon-btn",
+        title: "Reading settings",
+        "aria-label": "Reading settings",
+        "aria-haspopup": "dialog",
+        "aria-expanded": "false",
+      },
+      "Aa",
+    );
+    this.layout.headerActions.append(readingButton);
+    this.panel = new ReadingPanel(readingButton, this.layout.overlayRoot, {
+      settings: () => this.state.settings,
+      systemDark: () => this.systemDark(),
+      update: (patch, opts) => {
+        this.updateSettings(patch, opts);
+      },
+      listSystemFonts: () => this.backend.listSystemFonts(),
+    });
+    this.on("settings", () => {
+      this.panel.refresh();
+    });
+    this.darkQuery?.addEventListener("change", () => {
+      this.applySettings();
+    });
+    // Once a test replaces the page's app, the old one stops listening.
+    installKeymap(root.ownerDocument, (action) => root.isConnected && this.run(action));
   }
 
   /** The element the document scrolls in. */
@@ -146,6 +218,8 @@ export class App {
     const navigation = this.beginNavigation();
     let notice: string | null;
     let initial: OpenResult | null = null;
+    // The fonts selected last time load while the startup payload is on its way.
+    const earlyFonts = loadRememberedFonts();
     try {
       const payload = await this.backend.startup();
       Object.assign(this.state, {
@@ -155,16 +229,19 @@ export class App {
         version: payload.version,
         portable: payload.portable,
       });
-      this.applySettings();
       notice = payload.startupNotice;
       initial = payload.initial;
     } catch (e) {
       notice = `Lectern didn't start properly: ${String(e)}`;
     }
+    // The theme and fonts are in place before the first paint, so nothing flashes.
+    this.applySettings();
+    const fonts = Promise.all([earlyFonts, loadFonts(this.state.settings)]);
     if (this.endNavigation(navigation)) {
       this.show(initial);
       this.settleDeferred();
     }
+    await Promise.race([fonts, delay(FONT_WAIT_MS)]);
     await nextPaint();
     this.backend.perfMark("first-paint");
     quietly(this.backend.showWindow());
@@ -208,6 +285,185 @@ export class App {
 
   toast(message: string): void {
     this.toasts.show(message);
+  }
+
+  /**
+   * Changes settings: applied at once, keeping the reading position when the text moves, then
+   * saved. With `debounce` the save waits until changes stop for a moment (slider drags).
+   */
+  updateSettings(patch: SettingsPatch, opts: { debounce?: boolean } = {}): void {
+    const changes = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== null),
+    ) as Partial<Settings>;
+    const anchor = REFLOWING.some((key) => key in changes) ? this.flowAnchor() : null;
+    this.state.settings = { ...this.state.settings, ...changes };
+    this.applySettings();
+    if (anchor) {
+      this.keepFlow(anchor);
+    }
+    Object.assign(this.unsaved, changes);
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    if (opts.debounce) {
+      this.saveTimer = setTimeout(() => {
+        this.saveSettings();
+      }, SAVE_DEBOUNCE_MS);
+    } else {
+      this.saveSettings();
+    }
+  }
+
+  private saveSettings(): void {
+    this.saveTimer = null;
+    const patch = this.unsaved;
+    this.unsaved = {};
+    if (Object.keys(patch).length > 0) {
+      this.backend.setSettings(patch).catch((e: unknown) => {
+        this.toast(`Couldn't save the settings: ${String(e)}`);
+      });
+    }
+  }
+
+  /**
+   * The block at the top of the pane and how far down it the top falls, as a fraction of its
+   * height, to hold across a reflow. Null at the very top, or with no document.
+   */
+  private flowAnchor(): FlowAnchor | null {
+    if (this.state.doc === null || this.scroller.scrollTop === 0) {
+      return null;
+    }
+    const top = this.scroller.getBoundingClientRect().top;
+    const blocks = this.layout.doc.children;
+    // Blocks come in page order: the first one reaching below the top, by binary search.
+    let lo = 0;
+    let hi = blocks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((blocks[mid]?.getBoundingClientRect().bottom ?? Infinity) <= top) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    const block = blocks[lo];
+    if (!block) {
+      return null;
+    }
+    const rect = block.getBoundingClientRect();
+    return { block, into: rect.height > 0 ? (top - rect.top) / rect.height : 0 };
+  }
+
+  /**
+   * Scrolls the anchor's block back to where it was at the top, after the text has moved.
+   * Returns how far it had moved.
+   */
+  private keepFlow({ block, into }: FlowAnchor): number {
+    const rect = block.getBoundingClientRect();
+    const moved = rect.top + into * rect.height - this.scroller.getBoundingClientRect().top;
+    if (Math.abs(moved) > 0.5) {
+      this.scroller.scrollTop += moved;
+    }
+    return moved;
+  }
+
+  /**
+   * Holds the anchor at the top of the pane while the window goes to or from full screen, which
+   * resizes it some frames later: re-corrected every frame until it has held still for a few
+   * frames after a resize, or until HOLD_MS, or until the reader scrolls.
+   */
+  private holdFlow(anchor: FlowAnchor): void {
+    this.stopHold?.();
+    const started = performance.now();
+    let resized = false;
+    let stable = 0;
+    let frame = 0;
+    const onResize = (): void => {
+      resized = true;
+      stable = 0;
+    };
+    const stop = (): void => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", onResize);
+      for (const type of READER_INPUT) {
+        window.removeEventListener(type, stop, true);
+      }
+      if (this.stopHold === stop) {
+        this.stopHold = null;
+      }
+    };
+    const tick = (): void => {
+      if (!anchor.block.isConnected || performance.now() - started > HOLD_MS) {
+        stop();
+        return;
+      }
+      stable = Math.abs(this.keepFlow(anchor)) <= 1 ? stable + 1 : 0;
+      if (resized && stable >= HOLD_STABLE_FRAMES) {
+        stop();
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    window.addEventListener("resize", onResize);
+    // Added while the key that toggled focus mode is still on its way, these see only later input.
+    for (const type of READER_INPUT) {
+      window.addEventListener(type, stop, { capture: true, passive: true });
+    }
+    frame = requestAnimationFrame(tick);
+    this.stopHold = stop;
+  }
+
+  private systemDark(): boolean {
+    return this.darkQuery?.matches ?? false;
+  }
+
+  /** Runs a shortcut; false when it had nothing to do. */
+  private run(action: Action): boolean {
+    const s = this.state.settings;
+    switch (action) {
+      case "font-up":
+        this.updateSettings(bumpFontSize(s, 1), { debounce: true });
+        return true;
+      case "font-down":
+        this.updateSettings(bumpFontSize(s, -1), { debounce: true });
+        return true;
+      case "font-reset":
+        this.updateSettings(bumpFontSize(s, 0));
+        return true;
+      case "toggle-theme":
+        this.updateSettings(toggleThemeMode(s, this.systemDark()));
+        return true;
+      case "focus":
+        this.setFocusMode(!this.focusMode);
+        return true;
+      case "escape":
+        if (this.panel.isOpen) {
+          this.panel.close();
+          return true;
+        }
+        if (this.focusMode) {
+          this.setFocusMode(false);
+          return true;
+        }
+        return false;
+    }
+  }
+
+  /**
+   * Focus mode: no header, sidebars or progress bar, full screen, at the same reading spot, held
+   * through the native resize.
+   */
+  private setFocusMode(on: boolean): void {
+    this.focusMode = on;
+    this.panel.close();
+    const anchor = this.flowAnchor();
+    document.body.classList.toggle("focus", on);
+    if (anchor) {
+      this.keepFlow(anchor);
+      this.holdFlow(anchor);
+    }
+    quietly(this.backend.setFullscreen(on));
   }
 
   on(change: Change, cb: () => void): () => void {
@@ -478,30 +734,21 @@ export class App {
     );
   }
 
-  /**
-   * Applies the reading and layout settings. Task 10 moves the reading part into
-   * `themes.applySettings`, with the theme and the title-bar colours.
-   */
+  /** Applies the settings: the theme and reading ones (themes.ts), then the layout. */
   private applySettings(): void {
     const s = this.state.settings;
+    applySettings(s, this.systemDark(), this.backend);
     const root = document.documentElement;
-    root.style.setProperty("--font-size", `${String(s.fontSize)}px`);
-    root.style.setProperty("--line-height", String(s.lineHeight));
-    root.style.setProperty("--measure", s.measure === "full" ? "none" : `${String(s.measure)}ch`);
-    root.style.setProperty("--body-font", `${fontName(s.bodyFont)}, ${BODY_FALLBACK}`);
-    root.style.setProperty("--code-font", `${fontName(s.codeFont)}, ${CODE_FALLBACK}`);
     root.style.setProperty("--library-width", `${String(s.libraryWidth)}px`);
     root.style.setProperty("--outline-width", `${String(s.outlineWidth)}px`);
-    root.classList.toggle("code-wrap", s.codeWrap);
     this.layout.app.classList.toggle("no-library", !s.libraryVisible);
     this.layout.app.classList.toggle("no-outline", !s.outlineVisible);
     this.emit("settings");
   }
 }
 
-/** A font family name as a CSS string. */
-function fontName(name: string): string {
-  return `"${name.replace(/["\\]/g, "")}"`;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Runs a promise for its effect, logging a failure instead of leaving it unhandled. */

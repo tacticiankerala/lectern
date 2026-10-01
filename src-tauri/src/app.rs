@@ -326,7 +326,7 @@ impl WindowPlacement {
         }
     }
 
-    fn from_rect(rect: Rect) -> Self {
+    pub(crate) fn from_rect(rect: Rect) -> Self {
         Self {
             x: rect.x,
             y: rect.y,
@@ -436,6 +436,18 @@ mod capability_tests {
             permissions.contains(&"core:window:allow-set-title"),
             "{permissions:?}"
         );
+    }
+
+    /// Focus mode puts the window in full screen.
+    #[test]
+    fn the_main_window_may_go_full_screen() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert!(caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "core:window:allow-set-fullscreen"));
     }
 }
 
@@ -601,6 +613,40 @@ mod tests {
             assert_eq!(colors.dark, dark, "{id:?}");
         }
         assert_eq!(theme_colors(&ThemeId::Graphite).bg, "#1e1f22");
+    }
+
+    /// The window and title bar take a theme's colours before the page paints, so they must be
+    /// the page's: `--bg` and `--fg` in each theme's block of themes.css.
+    #[test]
+    fn theme_colours_match_the_stylesheet() {
+        let css = include_str!("../../ui/styles/themes.css");
+        let themes = [
+            ("paper", ThemeId::Paper),
+            ("daylight", ThemeId::Daylight),
+            ("sepia", ThemeId::Sepia),
+            ("latte", ThemeId::Latte),
+            ("graphite", ThemeId::Graphite),
+            ("midnight", ThemeId::Midnight),
+            ("nord", ThemeId::Nord),
+            ("mocha", ThemeId::Mocha),
+        ];
+        for (name, id) in themes {
+            let start = css
+                .find(&format!("html[data-theme=\"{name}\"]"))
+                .unwrap_or_else(|| panic!("themes.css has no {name} block"));
+            let block = &css[start..start + css[start..].find('}').unwrap()];
+            let value = |prop: &str| {
+                let at = block.find(&format!("{prop}:")).unwrap() + prop.len() + 1;
+                block[at..at + block[at..].find(';').unwrap()]
+                    .trim()
+                    .to_string()
+            };
+            let colors = theme_colors(&id);
+            assert_eq!(value("--bg"), colors.bg, "{name} --bg");
+            assert_eq!(value("--fg"), colors.fg, "{name} --fg");
+            let scheme = if colors.dark { "dark" } else { "light" };
+            assert_eq!(value("color-scheme"), scheme, "{name} color-scheme");
+        }
     }
 
     #[test]

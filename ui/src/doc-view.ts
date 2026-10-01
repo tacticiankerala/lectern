@@ -20,7 +20,7 @@ const STABLE_PX = 2;
 /** ...or after this long. */
 const ANCHOR_MS = 1000;
 /** Input that means the reader is scrolling: anchoring stops rather than fight it. */
-const READER_INPUT = ["wheel", "keydown", "touchstart", "pointerdown"] as const;
+export const READER_INPUT = ["wheel", "keydown", "touchstart", "pointerdown"] as const;
 const COPIED_MS = 1200;
 const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
 

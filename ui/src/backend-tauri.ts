@@ -50,6 +50,11 @@ export class TauriBackend implements Backend {
     return invoke("plugin:window|set_title", { label: MAIN_WINDOW, value: title });
   }
 
+  /** The window plugin's `set_fullscreen`, invoked directly for the same reason as `setTitle`. */
+  setFullscreen(on: boolean): Promise<void> {
+    return invoke("plugin:window|set_fullscreen", { label: MAIN_WINDOW, value: on });
+  }
+
   getLibrary(): Promise<LibraryPayload> {
     return invoke("get_library");
   }
