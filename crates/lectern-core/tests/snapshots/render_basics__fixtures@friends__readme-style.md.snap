@@ -1,0 +1,42 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/friends/readme-style.md
+---
+title: Readme style
+words: 34
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter: none
+outline:
+  h1 #readme-style Readme style
+---- html ----
+<p align="center">
+  <img src="img/logo.png" alt="Lectern logo" width="64" height="64">
+</p>
+<h1 id="readme-style" data-sourcepos="5:1-5:14">Readme style</h1>
+<p data-sourcepos="7:1-7:21"><img data-sourcepos="7:1-7:21" src="img/logo.png" alt="logo"></p>
+<p data-sourcepos="9:1-9:80"><a data-sourcepos="9:1-9:80" href="https://example.com/ci"><img data-sourcepos="9:2-9:55" src="https://example.com/badges/build-passing.svg" alt="build"></a></p>
+<div class="markdown-alert markdown-alert-note" data-sourcepos="11:1-12:50">
+<p class="markdown-alert-title">Note</p>
+<p data-sourcepos="12:3-12:50">Lectern only reads notes. It never changes them.</p>
+</div>
+<div class="markdown-alert markdown-alert-warning" data-sourcepos="14:1-15:38">
+<p class="markdown-alert-title">Warning</p>
+<p data-sourcepos="15:3-15:38">Remote images load over the network.</p>
+</div>
+<p data-sourcepos="17:1-17:33">Every claim here is invented.<sup data-sourcepos="17:30-17:33" class="footnote-ref"><a href="#fn-1" id="fnref-1" data-footnote-ref="">1</a></sup></p>
+<pre data-sourcepos="19:1-23:3"><code class="language-mermaid">graph TD
+  Library --&gt; Index
+  Index --&gt; Render
+</code></pre>
+<p data-sourcepos="25:1-27:2">$$
+\sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+$$</p>
+<section data-sourcepos="29:1-29:30" class="footnotes" data-footnotes="">
+<ol>
+<li data-sourcepos="29:1-29:30" id="fn-1">
+<p data-sourcepos="29:7-29:30">Including this footnote. <a href="#fnref-1" class="footnote-backref" data-footnote-backref="" data-footnote-backref-idx="1" aria-label="Back to reference 1">↩</a></p>
+</li>
+</ol>
+</section>

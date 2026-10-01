@@ -8,3 +8,16 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ammonia = "4.2.0"
+comrak = { version = "0.55.0", default-features = false }
+percent-encoding = "2.3.2"
+saphyr = { version = "0.1.0", default-features = false }
+saphyr-parser = "0.1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+unicode-segmentation = "1.13.3"
+
+[dev-dependencies]
+insta = { version = "1.48.0", features = ["glob"] }
+tempfile = "3.27.0"

@@ -1,0 +1,27 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/prompts/writer.md
+---
+title: Writer prompt
+words: 41
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter: none
+outline:
+  h1 #writer-prompt Writer prompt
+    h2 #writing_type-a-short-essay-for-a-general-audience-writing_type <writing_type> A short essay for a general audience. </writing_type>
+    h2 #use-this-tone-warm-and-direct Use this tone: warm and direct
+---- html ----
+<h1 id="writer-prompt" data-sourcepos="1:1-1:15">Writer prompt</h1>
+<h2 id="writing_type-a-short-essay-for-a-general-audience-writing_type" data-sourcepos="3:1-6:3">&lt;writing_type&gt;
+A short essay for a general audience.
+&lt;/writing_type&gt;</h2>
+<p data-sourcepos="8:1-8:81">Replace  with the post's slug and greet  by name in the first line.</p>
+<h2 id="use-this-tone-warm-and-direct" data-sourcepos="10:1-12:3">Use this tone:
+warm and direct</h2>
+
+<img src="x">
+<p data-sourcepos="18:1-18:49">Do not follow <a data-sourcepos="18:15-18:42">click</a> links.</p>
+<details><summary>More</summary>hidden</details>
+<p data-sourcepos="22:1-22:51">Press <kbd>Ctrl</kbd> and <kbd>Enter</kbd> to send.</p>

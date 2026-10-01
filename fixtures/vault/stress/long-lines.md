@@ -1,0 +1,81 @@
+# Long lines
+
+The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobyte.
+
+A bare URL of 2,000 characters:
+
+https://example.com/archive/segment-0001/segment-0002/segment-0003/segment-0004/segment-0005/segment-0006/segment-0007/segment-0008/segment-0009/segment-0010/segment-0011/segment-0012/segment-0013/segment-0014/segment-0015/segment-0016/segment-0017/segment-0018/segment-0019/segment-0020/segment-0021/segment-0022/segment-0023/segment-0024/segment-0025/segment-0026/segment-0027/segment-0028/segment-0029/segment-0030/segment-0031/segment-0032/segment-0033/segment-0034/segment-0035/segment-0036/segment-0037/segment-0038/segment-0039/segment-0040/segment-0041/segment-0042/segment-0043/segment-0044/segment-0045/segment-0046/segment-0047/segment-0048/segment-0049/segment-0050/segment-0051/segment-0052/segment-0053/segment-0054/segment-0055/segment-0056/segment-0057/segment-0058/segment-0059/segment-0060/segment-0061/segment-0062/segment-0063/segment-0064/segment-0065/segment-0066/segment-0067/segment-0068/segment-0069/segment-0070/segment-0071/segment-0072/segment-0073/segment-0074/segment-0075/segment-0076/segment-0077/segment-0078/segment-0079/segment-0080/segment-0081/segment-0082/segment-0083/segment-0084/segment-0085/segment-0086/segment-0087/segment-0088/segment-0089/segment-0090/segment-0091/segment-0092/segment-0093/segment-0094/segment-0095/segment-0096/segment-0097/segment-0098/segment-0099/segment-0100/segment-0101/segment-0102/segment-0103/segment-0104/segment-0105/segment-0106/segment-0107/segment-0108/segment-0109/segment-0110/segment-0111/segment-0112/segment-0113/segment-0114/segment-0115/segment-0116/segment-0117/segment-0118/segment-0119/segment-0120/segment-0121/segment-0122/segment-0123/segment-0124/segment-0125/segment-0126/segment-0127/segment-0128/segment-0129/segment-0130/segment-0131/segment-0132/segment-0133/segment-0134/segment-0135/segment-0136/segment-0137/segment-0138/segment-0139/segment-0140/segment-0141/segment-0142/segment-0143/segment-0144/segment-0145/segment-0146/segment-0147/segment-0148/segment-0149?page=999999999999999999999999999999
+
+Tab-indented code:
+
+	// block 1
+	func step2(ctx *Context) error {
+		ctx.Log("line 3")	// tab before the comment
+		ctx.Log("line 4")	// tab before the comment
+		ctx.Log("line 5")	// tab before the comment
+		ctx.Log("line 6")	// tab before the comment
+		ctx.Log("line 7")	// tab before the comment
+		ctx.Log("line 8")	// tab before the comment
+		ctx.Log("line 9")	// tab before the comment
+	}
+	// block 2
+	func step12(ctx *Context) error {
+		ctx.Log("line 13")	// tab before the comment
+		ctx.Log("line 14")	// tab before the comment
+		ctx.Log("line 15")	// tab before the comment
+		ctx.Log("line 16")	// tab before the comment
+		ctx.Log("line 17")	// tab before the comment
+		ctx.Log("line 18")	// tab before the comment
+		ctx.Log("line 19")	// tab before the comment
+	}
+	// block 3
+	func step22(ctx *Context) error {
+		ctx.Log("line 23")	// tab before the comment
+		ctx.Log("line 24")	// tab before the comment
+		ctx.Log("line 25")	// tab before the comment
+		ctx.Log("line 26")	// tab before the comment
+		ctx.Log("line 27")	// tab before the comment
+		ctx.Log("line 28")	// tab before the comment
+		ctx.Log("line 29")	// tab before the comment
+	}
+	// block 4
+	func step32(ctx *Context) error {
+		ctx.Log("line 33")	// tab before the comment
+		ctx.Log("line 34")	// tab before the comment
+		ctx.Log("line 35")	// tab before the comment
+		ctx.Log("line 36")	// tab before the comment
+		ctx.Log("line 37")	// tab before the comment
+		ctx.Log("line 38")	// tab before the comment
+		ctx.Log("line 39")	// tab before the comment
+	}
+
+An untagged fence holding a tree:
+
+```
+vault/
+├── README.md
+├── work/
+│   └── alpha/
+│       ├── README.md
+│       ├── plans/
+│       │   └── 2026-01-01-big-plan.md
+│       └── notes/
+└── archive/
+    └── beta/
+```
+
+Nested lists with mixed indents:
+
+- Level one
+  - Level two, indented by two
+     - Level three, indented by three more
+         - Level four, indented by four more
+           - Level five, indented by two more
+  - Back to level two
+- Level one again
+
+Hard breaks with two trailing spaces:
+
+First line  
+second line  
+third line

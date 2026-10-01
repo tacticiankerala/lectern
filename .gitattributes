@@ -3,3 +3,5 @@
 *.png binary
 *.ico binary
 *.icns binary
+fixtures/**/._* binary
+fixtures/**/.DS_Store binary

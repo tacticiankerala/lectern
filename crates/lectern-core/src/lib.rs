@@ -1,5 +1,10 @@
 //! Lectern's core logic. Pure Rust with no Tauri dependency, so it builds and tests on Linux.
 
+pub mod frontmatter;
+pub mod library;
+pub mod render;
+pub mod text;
+
 /// The Lectern version, taken from the workspace manifest.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
