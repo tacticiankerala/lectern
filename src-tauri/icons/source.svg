@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Placeholder icon: an open book on a lectern. Replaced in Task 13. -->
+  <rect width="1024" height="1024" rx="224" fill="#1e1f22"/>
+  <path d="M512 330 C432 282 322 270 214 292 L214 596 C322 576 432 588 512 636 Z" fill="#e8b273"/>
+  <path d="M512 330 C592 282 702 270 810 292 L810 596 C702 576 592 588 512 636 Z" fill="#c9884a"/>
+  <path d="M182 640 L842 640 L790 700 L234 700 Z" fill="#9a5b2e"/>
+  <rect x="484" y="700" width="56" height="130" fill="#9a5b2e"/>
+  <rect x="362" y="822" width="300" height="52" rx="26" fill="#9a5b2e"/>
+</svg>
