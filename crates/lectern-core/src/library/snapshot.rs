@@ -1,14 +1,11 @@
 //! Root indexes persisted as JSON, so the tree can appear before the first walk finishes.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{path_key, RootIndex};
-
-/// Tells apart the temporary files of saves running at the same time.
-static SAVE_COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::store::write_json_atomic;
 
 /// The snapshot file for `root` in `dir`: `index-<hash>.json`, where the hash is 64-bit FNV-1a
 /// over the root's comparison key, so `S:\Dev` and `s:\dev\` share a snapshot.
@@ -22,28 +19,7 @@ pub fn snapshot_path(dir: &Path, root: &Path) -> PathBuf {
 /// Writes `r`'s snapshot, creating `dir` if needed. The JSON goes to a temporary file in `dir`
 /// that then replaces the snapshot, so a reader never sees a half-written file.
 pub fn save_snapshot(dir: &Path, r: &RootIndex) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let target = snapshot_path(dir, &r.root);
-    let mut tmp_name = target.file_name().unwrap_or_default().to_owned();
-    tmp_name.push(format!(
-        ".{}-{}.tmp",
-        std::process::id(),
-        SAVE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let tmp = dir.join(tmp_name);
-    let written = write_json(&tmp, r).and_then(|()| fs::rename(&tmp, &target));
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    written
-}
-
-fn write_json(path: &Path, r: &RootIndex) -> io::Result<()> {
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    let mut out = BufWriter::new(file);
-    serde_json::to_writer(&mut out, r)?;
-    out.flush()?;
-    out.get_ref().sync_all()
+    write_json_atomic(&snapshot_path(dir, &r.root), r)
 }
 
 /// The saved snapshot of `root`, finalized. `None` when it is missing, unreadable, corrupt, or

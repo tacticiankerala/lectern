@@ -7,12 +7,14 @@ use std::borrow::Cow;
 
 use saphyr::{Mapping, Scalar, ScalarStyle, Tag, Yaml, YamlLoader};
 use saphyr_parser::{Event, Parser, ScanError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// One frontmatter value. YAML has no date type, so dates are recognised from the text of
 /// string values.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+#[ts(export)]
 pub enum PropValue {
     Text(String),
     /// `YYYY-MM-DD`.
@@ -25,16 +27,18 @@ pub enum PropValue {
     List(Vec<PropValue>),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct Property {
     /// The key; nested maps are flattened to dotted keys such as `metadata.type`.
     pub key: String,
     pub value: PropValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export)]
 pub enum Frontmatter {
     /// Entries in document order.
     Parsed { entries: Vec<Property> },

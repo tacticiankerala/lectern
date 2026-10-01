@@ -3,12 +3,14 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::{FileEntry, RootIndex};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TreeNode {
     pub name: String,
     /// The absolute path.

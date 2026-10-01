@@ -18,7 +18,8 @@ use comrak::html::{self, ChildRendering, Context};
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::options::Plugins;
 use comrak::{parse_document, Arena};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::frontmatter::{parse_frontmatter, Frontmatter};
 use crate::library::pathmap::PathMapper;
@@ -39,8 +40,9 @@ pub struct RenderContext<'a> {
     pub asset_base: &'a str,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct OutlineItem {
     pub level: u8,
     pub text: String,
@@ -48,14 +50,16 @@ pub struct OutlineItem {
     pub id: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TaskStats {
     pub done: u32,
     pub total: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct RenderedDoc {
     pub html: String,
     pub outline: Vec<OutlineItem>,

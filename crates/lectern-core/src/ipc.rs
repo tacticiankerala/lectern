@@ -1,0 +1,319 @@
+//! Every type that crosses IPC between the Rust side and the UI. Fields are camelCase in JSON, and
+//! each type is exported to `ui/src/generated/<Type>.ts` by ts-rs when `cargo test` runs (see
+//! `.cargo/config.toml`).
+
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::frontmatter::Frontmatter;
+use crate::library::tree::TreeNode;
+use crate::render::{OutlineItem, TaskStats};
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum ThemeMode {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum ThemeId {
+    Paper,
+    Daylight,
+    Sepia,
+    Latte,
+    Graphite,
+    Midnight,
+    Nord,
+    Mocha,
+}
+
+/// The reading width: a number of characters, or the full window. JSON `72` or `"full"`.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum Measure {
+    Full,
+    // Untagged variants must follow the tagged ones.
+    #[serde(untagged)]
+    Chars(u16),
+}
+
+/// How "Open in editor" launches: the system's default, or a command line.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+#[ts(export)]
+pub enum EditorPref {
+    Auto,
+    Custom { command: String },
+}
+
+/// A user prefix mapping for absolute paths in notes, such as `/home/me/shared` → `S:\Shared`.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PathMapping {
+    pub from: String,
+    pub to: String,
+}
+
+/// `settings.json`. Missing fields take their defaults and unknown fields are ignored, so files
+/// from older and newer versions both load.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct Settings {
+    pub theme_mode: ThemeMode,
+    pub light_theme: ThemeId,
+    pub dark_theme: ThemeId,
+    pub body_font: String,
+    pub code_font: String,
+    /// Pixels, 12–32.
+    pub font_size: u8,
+    /// 1.3–2.0.
+    pub line_height: f64,
+    /// 50–120 characters, or full width.
+    pub measure: Measure,
+    pub code_wrap: bool,
+    pub library_visible: bool,
+    pub outline_visible: bool,
+    pub library_width: u16,
+    pub outline_width: u16,
+    pub library_roots: Vec<String>,
+    pub path_mappings: Vec<PathMapping>,
+    pub editor: EditorPref,
+    pub auto_update: bool,
+}
+
+/// A change to some settings; absent fields are left as they are.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields = nullable)]
+pub struct SettingsPatch {
+    pub theme_mode: Option<ThemeMode>,
+    pub light_theme: Option<ThemeId>,
+    pub dark_theme: Option<ThemeId>,
+    pub body_font: Option<String>,
+    pub code_font: Option<String>,
+    pub font_size: Option<u8>,
+    pub line_height: Option<f64>,
+    pub measure: Option<Measure>,
+    pub code_wrap: Option<bool>,
+    pub library_visible: Option<bool>,
+    pub outline_visible: Option<bool>,
+    pub library_width: Option<u16>,
+    pub outline_width: Option<u16>,
+    pub library_roots: Option<Vec<String>>,
+    pub path_mappings: Option<Vec<PathMapping>>,
+    pub editor: Option<EditorPref>,
+    pub auto_update: Option<bool>,
+}
+
+/// Where the reader was in a document: the nearest heading and the pixel offset below it, falling
+/// back to the top block's source line, then to the scroll fraction.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SavedPosition {
+    pub heading_id: Option<String>,
+    pub offset: f64,
+    pub line: Option<u32>,
+    pub fraction: f64,
+}
+
+/// One breadcrumb segment: a root, a folder or the file.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Crumb {
+    pub name: String,
+    pub path: String,
+    /// The folder's `README.md`, opened when the segment is clicked.
+    pub readme: Option<String>,
+}
+
+/// A rendered document, ready to show.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DocPayload {
+    pub path: String,
+    pub title: String,
+    pub html: String,
+    pub outline: Vec<OutlineItem>,
+    pub frontmatter: Option<Frontmatter>,
+    pub tasks: TaskStats,
+    pub word_count: u32,
+    /// Last modified, in milliseconds since the Unix epoch.
+    pub mtime_ms: i64,
+    /// The file was not valid UTF-8 and was decoded with replacement characters.
+    pub lossy: bool,
+    pub position: Option<SavedPosition>,
+    pub breadcrumbs: Vec<Crumb>,
+    /// The library root holding the document, if any.
+    pub root_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum OpenErrorKind {
+    NotFound,
+    Permission,
+    Binary,
+    Io,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OpenError {
+    pub kind: OpenErrorKind,
+    pub message: String,
+    pub path: String,
+}
+
+// One result per open, moved straight into the response, so boxing the document buys nothing.
+#[expect(clippy::large_enum_variant)]
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(tag = "status", rename_all = "camelCase")]
+#[ts(export)]
+pub enum OpenResult {
+    Ok { doc: DocPayload },
+    Err { error: OpenError },
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(tag = "state", rename_all = "camelCase")]
+#[ts(export)]
+pub enum RootState {
+    Scanning,
+    Ready,
+    Unavailable { reason: String },
+}
+
+/// One library root in the sidebar. `tree` is absent until a scan or snapshot provides one.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RootView {
+    pub path: String,
+    pub name: String,
+    pub state: RootState,
+    pub tree: Option<TreeNode>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LibraryPayload {
+    pub roots: Vec<RootView>,
+}
+
+/// A file offered by quick open.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Candidate {
+    pub path: String,
+    pub name: String,
+    /// The path relative to `root`, `/`-separated.
+    pub rel: String,
+    pub root: String,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RecentEntry {
+    pub path: String,
+    pub title: String,
+    /// When it was last opened, in milliseconds since the Unix epoch.
+    pub opened_ms: i64,
+}
+
+/// Everything the UI needs for its first paint.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StartupPayload {
+    pub settings: Settings,
+    pub library: LibraryPayload,
+    pub recent: Vec<RecentEntry>,
+    /// The document given on the command line, or the last one open, rendered during startup.
+    pub initial: Option<OpenResult>,
+    pub version: String,
+    pub portable: bool,
+    /// A one-time message for the user, such as settings having been reset.
+    pub startup_notice: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum FollowKind {
+    Doc,
+    File,
+    Path,
+    External,
+    Broken,
+}
+
+/// A link or inline-code path the user clicked.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FollowTarget {
+    pub kind: FollowKind,
+    pub target: String,
+    pub line: Option<u32>,
+    pub anchor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(tag = "action", rename_all = "camelCase")]
+#[ts(export)]
+pub enum FollowResult {
+    /// Show this document in the reader.
+    OpenDoc {
+        path: String,
+        anchor: Option<String>,
+        line: Option<u32>,
+    },
+    /// Handed to the shell or an editor; nothing changes in the reader.
+    Opened,
+    NotFound {
+        message: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub notes: Option<String>,
+    pub portable: bool,
+}
+
+/// Event payload: the open document changed on disk.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DocChanged {
+    pub path: String,
+}
+
+/// Event payload: a second launch (or a drop) asked to open `path`.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OpenRequest {
+    pub path: String,
+    /// When the request started, for perf marks.
+    pub t0_ms: Option<f64>,
+}
