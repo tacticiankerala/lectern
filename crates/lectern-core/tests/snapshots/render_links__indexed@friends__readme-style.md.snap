@@ -5,10 +5,10 @@ expression: v.redact(&text)
 unresolved wikilinks: false
 ---- html ----
 <p align="center">
-  <img src="http://asset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="Lectern logo" width="64" height="64" loading="lazy" decoding="async">
+  <img src="http://lxasset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="Lectern logo" width="64" height="64" loading="lazy" decoding="async">
 </p>
 <h1 id="readme-style" data-sourcepos="5:1-5:14">Readme style</h1>
-<p data-sourcepos="7:1-7:21"><img data-sourcepos="7:1-7:21" src="http://asset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="logo" loading="lazy" decoding="async"></p>
+<p data-sourcepos="7:1-7:21"><img data-sourcepos="7:1-7:21" src="http://lxasset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="logo" loading="lazy" decoding="async"></p>
 <p data-sourcepos="9:1-9:80"><a data-sourcepos="9:1-9:80" href="https://example.com/ci" data-kind="external"><img data-sourcepos="9:2-9:55" src="https://example.com/badges/build-passing.svg" alt="build" loading="lazy" decoding="async"></a></p>
 <div class="markdown-alert markdown-alert-note" data-sourcepos="11:1-12:50">
 <p class="markdown-alert-title">Note</p>

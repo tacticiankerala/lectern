@@ -172,21 +172,19 @@ impl DocWatcher {
         let shared = Arc::clone(&self.shared);
         let handler = move |result: notify::Result<Event>| match result {
             Ok(event) => shared.on_notify(&event),
-            Err(e) => eprintln!("lectern: file watcher error: {e}"),
+            Err(e) => log::warn!("file watcher error: {e}"),
         };
         let mut watcher = match notify::recommended_watcher(handler) {
             Ok(watcher) => watcher,
             Err(e) => {
-                eprintln!(
-                    "lectern: can't start the file watcher; polling the open document only: {e}"
-                );
+                log::error!("can't start the file watcher; polling the open document only: {e}");
                 return;
             }
         };
         // Event paths start with the path watched, so it is watched in the form keys are made from.
         for (path, abs) in &resolved {
             if let Err(e) = watcher.watch(abs, RecursiveMode::Recursive) {
-                eprintln!("lectern: can't watch {}: {e}", path.display());
+                log::warn!("can't watch {}: {e}", path.display());
             }
         }
         *notify = Some(watcher);
@@ -257,7 +255,7 @@ fn spawn(
             let _alive = alive;
             run();
         })
-        .map_err(|e| eprintln!("lectern: can't start the {name} thread: {e}"))
+        .map_err(|e| log::error!("can't start the {name} thread: {e}"))
         .ok()
 }
 

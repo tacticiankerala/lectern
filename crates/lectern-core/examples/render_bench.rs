@@ -38,7 +38,8 @@ fn main() {
         doc_path: &path,
         index: Some(&index),
         mapper: &mapper,
-        asset_base: "http://asset.localhost/",
+        asset_base: "http://lxasset.localhost/",
+        trusted_unc_hosts: &[],
     };
 
     let start = Instant::now();

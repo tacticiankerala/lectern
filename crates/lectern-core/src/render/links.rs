@@ -18,10 +18,12 @@ use comrak::nodes::{AstNode, NodeLink, NodeValue};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 
+use super::internal::is_internal_url;
 use super::slug::slugify;
 use super::{Prepared, RenderContext};
 use crate::library::pathmap::{
-    asset_url, is_absolute, line_fragment, split_line_suffix, LineRef, Mapped, PathMapper,
+    asset_url, is_absolute, line_fragment, split_line_suffix, unc_host_trusted, LineRef, Mapped,
+    PathMapper,
 };
 use crate::library::resolve::{resolve_relative, resolve_wikilink, WikiResolution};
 use crate::library::scan::is_markdown;
@@ -73,7 +75,24 @@ pub(super) struct ImageSources {
     doc_dir: PathBuf,
     mapper: PathMapper,
     asset_base: String,
+    trusted_unc_hosts: Vec<String>,
 }
+
+/// What a render does with an image source.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ImageSrc {
+    /// A local file, loaded through this asset URL.
+    Asset(String),
+    /// Remote, in-page, another scheme, or an absolute path nothing maps: kept as written, for
+    /// the sanitiser and the CSP to judge.
+    AsWritten,
+    /// A file on a network host the user hasn't chosen: not loaded at all, since reaching the
+    /// host would hand it the user's Windows credentials.
+    Blocked,
+}
+
+/// The tooltip of an image that wasn't loaded because of where it lives.
+pub(super) const BLOCKED_IMAGE_TITLE: &str = "Image on an unknown network location was not loaded";
 
 /// A local place a link points at.
 enum Target {
@@ -92,6 +111,8 @@ enum Target {
 /// What a Markdown link's href points at.
 enum Href {
     External,
+    /// One of the app's own origins: never followed, shown as a broken link.
+    Internal,
     /// A heading in this note: the href keeps its fragment, and this is its slug.
     Anchor {
         slug: String,
@@ -111,12 +132,16 @@ impl<'c> Links<'c> {
         }
     }
 
-    /// Classifies an href: `http(s)`, `mailto` and protocol-relative `//host/…` are external,
-    /// `#x` is in-page, and anything else without a scheme is a path. `None` for an empty href
-    /// or another scheme, which keep comrak's markup for the sanitiser to judge.
+    /// Classifies an href: one to the app's own origins is internal, `http(s)`, `mailto` and
+    /// protocol-relative `//host/…` are external, `#x` is in-page, and anything else without a
+    /// scheme is a path. `None` for an empty href or another scheme, which keep comrak's markup
+    /// for the sanitiser to judge.
     fn classify(&self, url: &str) -> Option<Href> {
         if url.is_empty() {
             return None;
+        }
+        if is_internal_url(url) {
+            return Some(Href::Internal);
         }
         if let Some(fragment) = url.strip_prefix('#') {
             let slug = slugify(&decode(fragment));
@@ -167,10 +192,16 @@ impl<'c> Links<'c> {
         }
     }
 
+    /// A link to an absolute path. One on a network host the user hasn't chosen is always a
+    /// `path` link, which the app checks (and refuses) when followed.
     fn absolute_target(&self, path: &str, anchor: Option<String>, line: Option<u32>) -> Target {
         match self.mapper.map(path, self.index) {
-            Mapped::Verified(found) => local_target(found, anchor, line),
-            Mapped::Unverified(mapped) => Target::Path { path: mapped, line },
+            Mapped::Verified(found) if self.images.trusts(&found) => {
+                local_target(found, anchor, line)
+            }
+            Mapped::Verified(mapped) | Mapped::Unverified(mapped) => {
+                Target::Path { path: mapped, line }
+            }
             Mapped::Unresolved => Target::Path {
                 path: PathBuf::from(path),
                 line,
@@ -224,31 +255,45 @@ impl ImageSources {
                 .unwrap_or_default(),
             mapper: ctx.mapper.clone(),
             asset_base: ctx.asset_base.to_owned(),
+            trusted_unc_hosts: ctx.trusted_unc_hosts.to_vec(),
         }
     }
 
-    /// The asset URL for a local image source, keeping any `#fragment` (an SVG sprite's symbol).
-    /// `None` for a remote source, a protocol-relative one or any other scheme, which stay as
-    /// written, and for an absolute path nothing maps. Surrounding ASCII whitespace is ignored,
-    /// as browsers ignore it.
-    pub(super) fn url(&self, src: &str) -> Option<String> {
+    /// Whether `path` is local, or on a network host the user has chosen.
+    fn trusts(&self, path: &Path) -> bool {
+        unc_host_trusted(&path.to_string_lossy(), &self.trusted_unc_hosts)
+    }
+
+    /// Where an image source points: an asset URL for a local file, keeping any `#fragment` (an
+    /// SVG sprite's symbol); as written for a remote source, a protocol-relative one, any other
+    /// scheme, or an absolute path nothing maps; blocked for a file on an untrusted network host
+    /// and for a URL to one of the app's own origins.
+    /// Surrounding ASCII whitespace is ignored, as browsers ignore it.
+    pub(super) fn resolve(&self, src: &str) -> ImageSrc {
         let src = src.trim_matches(|c: char| c.is_ascii_whitespace());
+        // An author-written URL to the app's own image protocol (or IPC) never loads.
+        if is_internal_url(src) {
+            return ImageSrc::Blocked;
+        }
         if src.is_empty() || src.starts_with('#') || src.starts_with("//") || scheme(src).is_some()
         {
-            return None;
+            return ImageSrc::AsWritten;
         }
         let (path, fragment) = split_url(src);
         let path = decode(path);
         let local = if is_absolute(&path) {
             match self.mapper.map(&path, None) {
                 Mapped::Verified(path) | Mapped::Unverified(path) => path,
-                Mapped::Unresolved => return None,
+                Mapped::Unresolved => return ImageSrc::AsWritten,
             }
         } else {
             join_lexically(&self.doc_dir, &path)
         };
+        if !self.trusts(&local) {
+            return ImageSrc::Blocked;
+        }
         let url = asset_url(&self.asset_base, &local);
-        Some(match fragment {
+        ImageSrc::Asset(match fragment {
             Some(fragment) => format!("{url}#{fragment}"),
             None => url,
         })
@@ -257,8 +302,8 @@ impl ImageSources {
     /// A `srcset` with each local candidate's URL passed through `url`, descriptors kept. The
     /// candidates split as the HTML spec splits them: a URL runs to the next whitespace, so it
     /// may hold commas (less any trailing ones, which end the candidate), and its descriptors run
-    /// to the next comma. `None` when no candidate changes.
-    pub(super) fn srcset(&self, srcset: &str) -> Option<String> {
+    /// to the next comma. As written when no candidate changes; blocked when any candidate is.
+    pub(super) fn srcset(&self, srcset: &str) -> ImageSrc {
         let mut changed = false;
         let mut candidates = Vec::new();
         let mut rest = srcset;
@@ -278,12 +323,13 @@ impl ImageSources {
                 after.split_once(',').unwrap_or((after, ""))
             };
             rest = next;
-            let url = match self.url(src) {
-                Some(url) => {
+            let url = match self.resolve(src) {
+                ImageSrc::Asset(url) => {
                     changed = true;
                     url
                 }
-                None => src.to_owned(),
+                ImageSrc::AsWritten => src.to_owned(),
+                ImageSrc::Blocked => return ImageSrc::Blocked,
             };
             let descriptors = descriptors.trim_matches(|c: char| c.is_ascii_whitespace());
             candidates.push(match descriptors {
@@ -291,7 +337,11 @@ impl ImageSources {
                 descriptors => format!("{url} {descriptors}"),
             });
         }
-        changed.then(|| candidates.join(", "))
+        if changed {
+            ImageSrc::Asset(candidates.join(", "))
+        } else {
+            ImageSrc::AsWritten
+        }
     }
 }
 
@@ -415,6 +465,7 @@ pub(super) fn format_link<'a>(
             context.escape_href(&link.url)?;
             context.write_str("\" data-kind=\"external\"")?;
         }
+        Href::Internal => context.write_str(" href=\"#\" data-kind=\"broken\"")?,
         Href::Anchor { slug } => {
             context.write_str(" href=\"")?;
             context.escape_href(&link.url)?;
@@ -500,8 +551,9 @@ pub(super) fn format_code<'a>(
     Ok(ChildRendering::HTML)
 }
 
-/// `<img>` with a local `src` turned into an asset URL. The alt text comes from the children,
-/// written as plain text between the two halves. The sanitiser adds lazy loading to every image.
+/// `<img>` with its `src` as the note wrote it, like a raw `<img>`: the sanitiser resolves every
+/// image source in one place (an asset URL for a local file, nothing at all for a blocked one).
+/// The alt text comes from the children, written as plain text between the two halves.
 pub(super) fn format_image<'a>(
     context: &mut Context<'_, '_, Prepared<'_>>,
     node: &'a AstNode<'a>,
@@ -512,8 +564,14 @@ pub(super) fn format_image<'a>(
         context.write_str("<img")?;
         html::render_sourcepos(context, node)?;
         context.write_str(" src=\"")?;
-        match context.user.links.images.url(&image.url) {
-            Some(src) => context.escape(&src)?,
+        // A drive path (`C:\…`) would read as a URL scheme to the sanitiser, which drops
+        // unknown schemes; with its colon encoded it stays a path, which `resolve` decodes.
+        match drive_letter(&image.url) {
+            Some((drive, rest)) => {
+                context.escape_href(drive)?;
+                context.write_str("%3A")?;
+                context.escape_href(rest)?;
+            }
             None => context.escape_href(&image.url)?,
         }
         context.write_str("\" alt=\"")?;
@@ -525,6 +583,13 @@ pub(super) fn format_image<'a>(
     }
     context.write_str("\" />")?;
     Ok(ChildRendering::HTML)
+}
+
+/// The drive letter of a drive path (`C:\…`, `C:/…`) and what follows its colon.
+fn drive_letter(url: &str) -> Option<(&str, &str)> {
+    let b = url.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        .then(|| (&url[..1], &url[2..]))
 }
 
 fn in_link<'a>(node: &'a AstNode<'a>) -> bool {
@@ -575,18 +640,67 @@ mod tests {
             doc_dir: PathBuf::from("/vault/notes"),
             mapper: PathMapper::default(),
             asset_base: "asset:".to_owned(),
+            trusted_unc_hosts: vec!["nas".to_owned()],
         }
+    }
+
+    /// The rewritten value, or `None` when the source stays as written.
+    fn rewritten(src: ImageSrc) -> Option<String> {
+        match src {
+            ImageSrc::Asset(url) => Some(url),
+            ImageSrc::AsWritten => None,
+            ImageSrc::Blocked => panic!("blocked"),
+        }
+    }
+
+    #[test]
+    fn images_pointing_into_the_app_are_blocked() {
+        let images = images();
+        for src in [
+            "http://lxasset.localhost/%5C%5Cattacker%5Cs%5Cx.png",
+            "http://lxasset.localhost/C%3A%5Cvault%5Ca.png",
+            "lxasset://localhost/x.png",
+            "//ipc.localhost/x",
+        ] {
+            assert_eq!(images.resolve(src), ImageSrc::Blocked, "{src}");
+        }
+        assert_eq!(
+            images.srcset("a.png 1x, http://lxasset.localhost/x.png 2x"),
+            ImageSrc::Blocked
+        );
+    }
+
+    #[test]
+    fn images_on_untrusted_network_hosts_are_blocked() {
+        let images = images();
+        assert_eq!(images.resolve(r"\\attacker\share\x.png"), ImageSrc::Blocked);
+        assert_eq!(
+            images.resolve("%5C%5Cattacker%5Cs%5Cx.png"),
+            ImageSrc::Blocked
+        );
+        assert_eq!(
+            images.srcset(r"a.png 1x, \\attacker\s\b.png 2x"),
+            ImageSrc::Blocked
+        );
+        assert_eq!(
+            images.resolve(r"\\nas\Shared\x.png"),
+            ImageSrc::Asset("asset:%5C%5Cnas%5CShared%5Cx.png".to_owned())
+        );
+        assert_eq!(
+            images.resolve(r"C:\pics\a.png"),
+            ImageSrc::Asset("asset:C%3A%5Cpics%5Ca.png".to_owned())
+        );
     }
 
     #[test]
     fn image_urls_keep_fragments_and_skip_remote_sources() {
         let images = images();
         assert_eq!(
-            images.url("img/sprite.svg#icon").as_deref(),
+            rewritten(images.resolve("img/sprite.svg#icon")).as_deref(),
             Some("asset:%2Fvault%2Fnotes%2Fimg%2Fsprite.svg#icon")
         );
         assert_eq!(
-            images.url("../a%20b.png?v=2").as_deref(),
+            rewritten(images.resolve("../a%20b.png?v=2")).as_deref(),
             Some("asset:%2Fvault%2Fa%20b.png")
         );
         for remote in [
@@ -596,7 +710,7 @@ mod tests {
             "#x",
             "",
         ] {
-            assert_eq!(images.url(remote), None, "{remote}");
+            assert_eq!(rewritten(images.resolve(remote)), None, "{remote}");
         }
     }
 
@@ -604,21 +718,22 @@ mod tests {
     fn srcset_candidates_are_rewritten_with_their_descriptors() {
         let images = images();
         assert_eq!(
-            images
-                .srcset("a.png 1x, https://e.com/b.png 2x,c.png")
-                .as_deref(),
+            rewritten(images.srcset("a.png 1x, https://e.com/b.png 2x,c.png")).as_deref(),
             Some("asset:%2Fvault%2Fnotes%2Fa.png 1x, https://e.com/b.png 2x, asset:%2Fvault%2Fnotes%2Fc.png")
         );
-        assert_eq!(images.srcset("https://e.com/b.png 2x"), None);
+        assert_eq!(rewritten(images.srcset("https://e.com/b.png 2x")), None);
     }
 
     #[test]
     fn srcset_urls_may_hold_commas() {
         let images = images();
         // A comma inside a URL (no whitespace before it) is part of the URL.
-        assert_eq!(images.srcset("https://example.com/a,b.png 1x"), None);
         assert_eq!(
-            images.srcset("a,b.png 1x,c.png  2x ,, d.png,").as_deref(),
+            rewritten(images.srcset("https://example.com/a,b.png 1x")),
+            None
+        );
+        assert_eq!(
+            rewritten(images.srcset("a,b.png 1x,c.png  2x ,, d.png,")).as_deref(),
             Some(concat!(
                 "asset:%2Fvault%2Fnotes%2Fa%2Cb.png 1x, ",
                 "asset:%2Fvault%2Fnotes%2Fc.png 2x, ",
@@ -626,7 +741,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            images.srcset("a.png 1x, b.png 2x").as_deref(),
+            rewritten(images.srcset("a.png 1x, b.png 2x")).as_deref(),
             Some("asset:%2Fvault%2Fnotes%2Fa.png 1x, asset:%2Fvault%2Fnotes%2Fb.png 2x")
         );
     }
@@ -634,9 +749,9 @@ mod tests {
     #[test]
     fn image_urls_ignore_surrounding_whitespace() {
         let images = images();
-        assert_eq!(images.url(" https://e.com/a.png\t"), None);
+        assert_eq!(rewritten(images.resolve(" https://e.com/a.png\t")), None);
         assert_eq!(
-            images.url("\n img/a.png ").as_deref(),
+            rewritten(images.resolve("\n img/a.png ")).as_deref(),
             Some("asset:%2Fvault%2Fnotes%2Fimg%2Fa.png")
         );
     }

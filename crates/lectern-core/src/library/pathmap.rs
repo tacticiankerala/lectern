@@ -251,6 +251,35 @@ const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'(')
     .remove(b')');
 
+/// The network host a UNC path names, lowercased: `server` for `\\server\share\…` (either
+/// separator) and for the verbatim `\\?\UNC\server\…`. Other verbatim and device paths
+/// (`\\?\C:\…`, `\\.\pipe\…`) give `?` or `.`, which no one trusts. `None` for anything
+/// that isn't a UNC path, such as `C:\…` or `/home/…`.
+pub fn unc_host(path: &str) -> Option<String> {
+    let b = path.as_bytes();
+    if b.len() < 3 || !matches!(b[0], b'\\' | b'/') || !matches!(b[1], b'\\' | b'/') {
+        return None;
+    }
+    let mut parts = path[2..].split(['\\', '/']);
+    let first = parts.next().filter(|host| !host.is_empty())?;
+    let verbatim_unc = (first == "?" || first == ".")
+        && parts.next().is_some_and(|p| p.eq_ignore_ascii_case("UNC"));
+    if verbatim_unc {
+        return parts.next().map(str::to_lowercase);
+    }
+    Some(first.to_lowercase())
+}
+
+/// Whether reaching `path` is allowed: always for a local path, and for a UNC path only when its
+/// host is one of `trusted` (compared case-insensitively). Windows hands any SMB host the user's
+/// credentials, so a note must never make Lectern touch a host the user hasn't chosen.
+pub fn unc_host_trusted(path: &str, trusted: &[String]) -> bool {
+    match unc_host(path) {
+        None => true,
+        Some(host) => trusted.iter().any(|t| t.eq_ignore_ascii_case(&host)),
+    }
+}
+
 /// The asset-protocol URL for a local file, matching Tauri's `convertFileSrc`: `asset_base`
 /// followed by the whole path passed through `encodeURIComponent`.
 pub fn asset_url(asset_base: &str, path: &Path) -> String {

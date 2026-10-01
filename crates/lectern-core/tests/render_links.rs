@@ -6,7 +6,7 @@ use lectern_core::library::pathmap::{asset_url, PathMapper};
 use lectern_core::library::LibraryIndex;
 use lectern_core::render::{render, RenderContext, RenderedDoc};
 
-const ASSET_BASE: &str = "http://asset.localhost/";
+const ASSET_BASE: &str = "http://lxasset.localhost/";
 
 /// The fixture vault, copied and indexed.
 struct Vault {
@@ -52,12 +52,25 @@ impl Vault {
         index: Option<&LibraryIndex>,
         mapper: &PathMapper,
     ) -> RenderedDoc {
+        self.render_trusting(rel, src, index, mapper, &[])
+    }
+
+    /// Renders `src` as the note at `rel`, trusting the network hosts `hosts`.
+    fn render_trusting(
+        &self,
+        rel: &str,
+        src: &str,
+        index: Option<&LibraryIndex>,
+        mapper: &PathMapper,
+        hosts: &[String],
+    ) -> RenderedDoc {
         let doc_path = self.path(rel);
         let ctx = RenderContext {
             doc_path: &doc_path,
             index,
             mapper,
             asset_base: ASSET_BASE,
+            trusted_unc_hosts: hosts,
         };
         render(src, &ctx)
     }
@@ -621,7 +634,7 @@ fn an_img_inside_an_attribute_value_is_not_an_image() {
             "<div title=\"<img src='img/logo.png'>\">x</div>\n",
         )
         .html;
-    assert_lacks(&html, "asset.localhost");
+    assert_lacks(&html, "lxasset.localhost");
     assert_lacks(&html, "loading=");
     assert_has(&html, "src='img/logo.png'");
 }
@@ -662,7 +675,7 @@ fn protocol_relative_urls_stay_remote() {
     assert_has(&html, r#"src="//example.com/a.png" alt="a""#);
     assert_has(&html, r#"<img src="//example.com/b.png" loading="lazy""#);
     assert_lacks(&html, "wsl.localhost");
-    assert_lacks(&html, "asset.localhost");
+    assert_lacks(&html, "lxasset.localhost");
 }
 
 #[test]
@@ -720,14 +733,14 @@ fn snapshot_redaction_reads_the_same_on_windows() {
     let vault = Path::new(r"C:\Users\runner\AppData\Local\Temp\.tmp1\vault");
     let text = concat!(
         r#"<a data-target="C:\Users\runner\AppData\Local\Temp\.tmp1\vault\notes\a b.md">x</a>"#,
-        r#"<img src="http://asset.localhost/C%3A%5CUsers%5Crunner%5CAppData%5CLocal%5CTemp%5C.tmp1%5Cvault%5Cimg%5Cl.png">"#,
+        r#"<img src="http://lxasset.localhost/C%3A%5CUsers%5Crunner%5CAppData%5CLocal%5CTemp%5C.tmp1%5Cvault%5Cimg%5Cl.png">"#,
         r#"<p>a \| b and \sum</p>"#,
     );
     assert_eq!(
         common::redact_vault(text, vault),
         concat!(
             r#"<a data-target="[vault]/notes/a b.md">x</a>"#,
-            r#"<img src="http://asset.localhost/[vault]%2Fimg%2Fl.png">"#,
+            r#"<img src="http://lxasset.localhost/[vault]%2Fimg%2Fl.png">"#,
             r#"<p>a \| b and \sum</p>"#,
         )
     );
@@ -765,5 +778,113 @@ fn raw_html_image_sources_are_trimmed_before_classifying() {
             asset_url(ASSET_BASE, &v.path("friends/img/logo.png"))
         ),
     );
-    assert_eq!(html.matches("asset.localhost").count(), 1, "{html}");
+    assert_eq!(html.matches("lxasset.localhost").count(), 1, "{html}");
+}
+
+#[test]
+fn images_on_untrusted_network_hosts_are_not_loaded() {
+    let v = Vault::new();
+    // Markdown unescapes `\\` in a destination, so a UNC path takes four backslashes there.
+    let src = concat!(
+        r#"![remote share](\\\\attacker.example\share\x.png "T")"#,
+        "\n\n",
+        r#"<img src="\\attacker.example\s\y.png" class="c" alt="raw">"#,
+        "\n\n",
+        r#"<picture><source srcset="\\attacker.example\s\z.png 2x"><img src="img/logo.png"></picture>"#,
+        "\n\n",
+        r"![encoded](%5C%5Cattacker.example%5Cs%5Cw.png) [doc](\\\\attacker.example\share\doc.md)",
+        "\n",
+    );
+    let html = v.render("friends/readme-style.md", src).html;
+    assert_lacks(&html, "attacker.example%5C");
+    assert_lacks(&html, r#"src="\\attacker"#);
+    assert_lacks(&html, "srcset");
+    assert_has(
+        &html,
+        r#"<img data-sourcepos="1:1-1:53" alt="remote share" class="img-blocked" title="Image on an unknown network location was not loaded" loading="lazy" decoding="async">"#,
+    );
+    assert_has(
+        &html,
+        r#"<img alt="raw" class="img-blocked" title="Image on an unknown network location was not loaded" loading="lazy" decoding="async">"#,
+    );
+    assert_has(&html, r#"alt="encoded" class="img-blocked""#);
+    assert_has(
+        &html,
+        r#"data-kind="path" data-target="\\attacker.example\share\doc.md""#,
+    );
+}
+
+#[test]
+fn images_on_trusted_network_hosts_and_drives_load() {
+    let v = Vault::new();
+    let trusted = ["nas".to_owned()];
+    let html = v
+        .render_trusting(
+            "friends/readme-style.md",
+            r"![nas](\\\\nas\Shared\x.png) ![drive](C:\pics\a.png) ![other](\\\\evil\s\x.png)",
+            Some(&v.ix),
+            &PathMapper::default(),
+            &trusted,
+        )
+        .html;
+    assert_has(
+        &html,
+        &asset_url(ASSET_BASE, Path::new(r"\\nas\Shared\x.png")),
+    );
+    assert_has(&html, &asset_url(ASSET_BASE, Path::new(r"C:\pics\a.png")));
+    assert_lacks(&html, "evil");
+    assert_has(&html, r#"class="img-blocked""#);
+}
+
+#[test]
+fn images_pointing_into_the_app_are_not_loaded() {
+    let v = Vault::new();
+    let src = concat!(
+        r"![md](http://lxasset.localhost/%5C%5Cattacker.invalid%5Cs%5Cx.png)",
+        "\n\n",
+        r#"<img src="lxasset://localhost/C%3A%5Cx.png" alt="scheme"> <img src="http://asset.localhost/x.png" alt="old"> <img src="//IPC.localhost/x" alt="relative">"#,
+        "\n\n",
+        r#"<picture><source srcset="http://tauri.localhost/x.png 2x"><img src="img/logo.png"></picture>"#,
+        "\n\n",
+        // Hosts the browser maps to ours (`ℓ` is `l` after IDNA mapping), and the slash pairs it
+        // takes for `//`.
+        "![idna](http://\u{2113}xasset.localhost/%5C%5Cattacker.invalid%5Cs%5Cx.png)",
+        "\n\n",
+        r#"<img src="/\tauri.localhost/x.png" alt="slashes"> <img src="http://LXASSET.LOCALHOST/x.png" alt="upper">"#,
+        "\n",
+    );
+    let html = v.render("friends/readme-style.md", src).html;
+    for alt in [
+        "md", "scheme", "old", "relative", "idna", "slashes", "upper",
+    ] {
+        assert_has(&html, &format!(r#"alt="{alt}" class="img-blocked""#));
+    }
+    assert_lacks(&html, "attacker");
+    assert_lacks(&html, "srcset");
+    assert_lacks(&html, "ipc.localhost");
+    assert_lacks(&html, "tauri.localhost");
+    assert_lacks(&html, "src=\"lxasset");
+    // The note's own image still loads.
+    assert_has(
+        &html,
+        &asset_url(ASSET_BASE, &v.path("friends/img/logo.png")),
+    );
+}
+
+#[test]
+fn links_into_the_app_are_broken() {
+    let v = Vault::new();
+    let src = concat!(
+        "[md](http://tauri.localhost/index.html) <lxasset:x> [ipc](//ipc.localhost/plugin)\n\n",
+        r#"<a href="http://lxasset.localhost/C%3A%5Cx.png" data-kind="file" data-target="C:\evil.exe">raw</a>"#,
+        "\n",
+    );
+    let html = v.render("README.md", src).html;
+    assert_eq!(
+        html.matches(r##"href="#" data-kind="broken""##).count(),
+        4,
+        "{html}"
+    );
+    assert_lacks(&html, "localhost");
+    assert_lacks(&html, "evil.exe");
 }

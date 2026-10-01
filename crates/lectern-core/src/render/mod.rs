@@ -3,6 +3,7 @@
 mod code_blocks;
 pub mod highlight;
 mod html_policy;
+mod internal;
 mod links;
 mod options;
 mod sanitize;
@@ -28,7 +29,7 @@ use code_blocks::CodeBlocks;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.
-pub const RENDER_VERSION: u32 = 3;
+pub const RENDER_VERSION: u32 = 5;
 
 /// What a render needs besides the Markdown source.
 #[derive(Debug, Clone, Copy)]
@@ -36,8 +37,13 @@ pub struct RenderContext<'a> {
     pub doc_path: &'a Path,
     pub index: Option<&'a LibraryIndex>,
     pub mapper: &'a PathMapper,
-    /// The asset-protocol prefix for local images, `http://asset.localhost/` on Windows.
+    /// The prefix of the app's image protocol for local images, `http://lxasset.localhost/` on
+    /// Windows.
     pub asset_base: &'a str,
+    /// Network hosts the user has chosen (library roots, path mappings, WSL). An image on any
+    /// other UNC host isn't loaded, and a link to one is always checked when followed: reaching
+    /// the host would hand it the user's Windows credentials.
+    pub trusted_unc_hosts: &'a [String],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

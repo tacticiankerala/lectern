@@ -10,7 +10,7 @@ use lectern_core::render::slug::{slugify, Slugger};
 use lectern_core::render::{render, RenderContext, RenderedDoc};
 use lectern_core::text::decode;
 
-const ASSET_BASE: &str = "http://asset.localhost/";
+const ASSET_BASE: &str = "http://lxasset.localhost/";
 
 fn r_at(src: &str, doc_path: &Path) -> RenderedDoc {
     let mapper = PathMapper::default();
@@ -19,6 +19,7 @@ fn r_at(src: &str, doc_path: &Path) -> RenderedDoc {
         index: None,
         mapper: &mapper,
         asset_base: ASSET_BASE,
+        trusted_unc_hosts: &[],
     };
     render(src, &ctx)
 }
@@ -284,17 +285,17 @@ fn five_mb_document_renders_quickly_enough() {
 fn asset_url_encodes_spaces_unicode_unc() {
     assert_eq!(
         asset_url(
-            "http://asset.localhost/",
+            "http://lxasset.localhost/",
             std::path::Path::new(r"S:\Notes\My Vault\a é.png")
         ),
-        "http://asset.localhost/S%3A%5CNotes%5CMy%20Vault%5Ca%20%C3%A9.png"
+        "http://lxasset.localhost/S%3A%5CNotes%5CMy%20Vault%5Ca%20%C3%A9.png"
     );
     assert_eq!(
         asset_url(
-            "http://asset.localhost/",
+            "http://lxasset.localhost/",
             std::path::Path::new(r"\\nas\Shared\it's (1).png")
         ),
-        "http://asset.localhost/%5C%5Cnas%5CShared%5Cit's%20(1).png"
+        "http://lxasset.localhost/%5C%5Cnas%5CShared%5Cit's%20(1).png"
     );
 }
 

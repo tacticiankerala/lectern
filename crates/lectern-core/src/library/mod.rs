@@ -158,7 +158,7 @@ impl LibraryIndex {
 
 /// A path as a comparison key: lowercase, `/`-separated, without a trailing separator. Lectern
 /// runs on Windows, so paths compare case-insensitively on every platform.
-pub(crate) fn path_key(path: &Path) -> String {
+pub fn path_key(path: &Path) -> String {
     path.to_string_lossy()
         .to_lowercase()
         .replace('\\', "/")

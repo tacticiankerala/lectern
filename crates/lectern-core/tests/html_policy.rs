@@ -9,7 +9,8 @@ fn r(src: &str) -> RenderedDoc {
         doc_path: Path::new("/vault/notes/Untitled note.md"),
         index: None,
         mapper: &mapper,
-        asset_base: "http://asset.localhost/",
+        asset_base: "http://lxasset.localhost/",
+        trusted_unc_hosts: &[],
     };
     render(src, &ctx)
 }
@@ -161,7 +162,7 @@ fn details_open_and_picture_sources_kept() {
     assert!(h.contains(r#"<details open="">"#), "{h}");
     // The source survives, its local srcset pointed at the file beside the note.
     let dark = asset_url(
-        "http://asset.localhost/",
+        "http://lxasset.localhost/",
         &Path::new("/vault/notes").join("dark.png"),
     );
     assert!(

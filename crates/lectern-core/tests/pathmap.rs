@@ -236,3 +236,29 @@ fn map_without_wsl_is_unresolved() {
         Mapped::Unresolved
     );
 }
+
+#[test]
+fn unc_hosts_are_read_from_either_separator_and_verbatim_paths() {
+    use lectern_core::library::pathmap::{unc_host, unc_host_trusted};
+    assert_eq!(
+        unc_host(r"\\nas\Shared\a.md").as_deref(),
+        Some("nas")
+    );
+    assert_eq!(unc_host("//server/share/a.md").as_deref(), Some("server"));
+    assert_eq!(
+        unc_host(r"\\?\UNC\Server\share\a").as_deref(),
+        Some("server")
+    );
+    assert_eq!(unc_host(r"\\?\C:\a").as_deref(), Some("?"));
+    assert_eq!(unc_host(r"\\.\pipe\x").as_deref(), Some("."));
+    assert_eq!(unc_host(r"C:\a.md"), None);
+    assert_eq!(unc_host("/home/me/a.md"), None);
+    assert_eq!(unc_host(r"\\"), None);
+    let trusted = ["nas".to_owned(), "wsl.localhost".to_owned()];
+    assert!(unc_host_trusted(r"\\nas\Shared\x.png", &trusted));
+    assert!(unc_host_trusted(r"\\wsl.localhost\Ubuntu\a.md", &trusted));
+    assert!(unc_host_trusted(r"S:\Agents\x.png", &trusted));
+    assert!(!unc_host_trusted(r"\\attacker\s\x.png", &trusted));
+    assert!(!unc_host_trusted(r"\\?\UNC\attacker\s\x.png", &trusted));
+    assert!(!unc_host_trusted(r"\\.\pipe\x", &trusted));
+}

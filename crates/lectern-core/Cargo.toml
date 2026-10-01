@@ -11,6 +11,7 @@ publish = false
 ammonia = "4.2.0"
 comrak = { version = "0.55.0", default-features = false }
 jwalk = "0.9.0"
+log = "0.4.34"
 notify = "8.2.0"
 percent-encoding = "2.3.2"
 rayon = "1.12.0"
@@ -24,6 +25,7 @@ ts-rs = { version = "12.0.1", features = ["serde-compat"] }
 two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
 unicode-segmentation = "1.13.3"
+url = "2.5.8"
 
 [dev-dependencies]
 insta = { version = "1.48.0", features = ["glob"] }
