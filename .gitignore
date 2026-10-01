@@ -1,0 +1,10 @@
+target/
+ui/node_modules/
+ui/dist/
+ui/dist-fake/
+ui/dev/fixtures.json
+ui/test-results/
+ui/playwright-report/
+*.log
+.superpowers/
+src-tauri/gen/
