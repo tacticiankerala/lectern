@@ -174,7 +174,7 @@ pub(crate) fn join_rel(root: &Path, rel: &str) -> PathBuf {
 }
 
 /// The part of path key `key` below path key `root`: empty for the root itself, `None` outside it.
-fn key_under<'a>(key: &'a str, root: &str) -> Option<&'a str> {
+pub(crate) fn key_under<'a>(key: &'a str, root: &str) -> Option<&'a str> {
     if key == root {
         return Some("");
     }

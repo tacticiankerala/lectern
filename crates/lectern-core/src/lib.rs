@@ -7,8 +7,10 @@ pub mod ipc;
 pub mod library;
 pub mod perf;
 pub mod render;
+pub mod search;
 pub mod store;
 pub mod text;
+pub mod watch;
 
 /// The Lectern version, taken from the workspace manifest.
 pub fn version() -> &'static str {

@@ -228,7 +228,7 @@ fn head_fields(head: &[u8]) -> (Option<String>, Option<String>) {
 /// line. `None` without frontmatter, or when the closing line isn't within `head`: a truncated
 /// block is never parsed. `complete` says `head` holds the whole file, so a closing `---` at the
 /// end needs no line break.
-fn frontmatter_yaml(head: &[u8], complete: bool) -> Option<&[u8]> {
+pub(crate) fn frontmatter_yaml(head: &[u8], complete: bool) -> Option<&[u8]> {
     let head = head.strip_prefix(UTF8_BOM).unwrap_or(head);
     let body = head
         .strip_prefix(b"---\n")
