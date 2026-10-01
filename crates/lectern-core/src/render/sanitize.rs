@@ -61,6 +61,7 @@ const GENERIC_ATTRIBUTE_PREFIXES: &[&str] = &["data-", "aria-"];
 const TAG_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("a", &["href"]),
     ("button", &["type"]),
+    ("details", &["open"]),
     (
         "img",
         &["src", "alt", "width", "height", "loading", "decoding"],
@@ -68,6 +69,9 @@ const TAG_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("input", &["type", "checked", "disabled"]),
     // comrak writes `start` for ordered lists that don't begin at 1.
     ("ol", &["start"]),
+    // `<picture>` sources. A `srcset` URL is only ever fetched as an image, and the app's CSP
+    // limits where images load from.
+    ("source", &["srcset", "type", "media"]),
 ];
 
 /// `javascript:`, `data:` and every other scheme not listed here are dropped. Relative URLs pass.

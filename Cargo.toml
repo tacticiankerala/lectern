@@ -16,7 +16,7 @@ opt-level = 3
 strip = true
 panic = "abort"
 
-# Debug builds (and `cargo test`) parse and sanitise large notes at a usable speed.
+# Debug builds (and `cargo test`) parse, highlight and sanitise large notes at a usable speed.
 [profile.dev.package.ammonia]
 opt-level = 2
 [profile.dev.package.html5ever]
@@ -28,4 +28,12 @@ opt-level = 2
 [profile.dev.package.string_cache]
 opt-level = 2
 [profile.dev.package.comrak]
+opt-level = 2
+[profile.dev.package.syntect]
+opt-level = 2
+[profile.dev.package.fancy-regex]
+opt-level = 2
+[profile.dev.package.regex-automata]
+opt-level = 2
+[profile.dev.package.regex-syntax]
 opt-level = 2

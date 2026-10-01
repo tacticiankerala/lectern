@@ -1,9 +1,13 @@
 //! Markdown to HTML for the reading view, plus the outline, frontmatter and stats around it.
 
+mod code_blocks;
+pub mod highlight;
+mod html_policy;
 mod options;
 mod sanitize;
 pub mod slug;
 mod stats;
+mod tags;
 
 use std::collections::HashMap;
 use std::fmt::{self, Write as _};
@@ -18,10 +22,11 @@ use serde::Serialize;
 use crate::frontmatter::{parse_frontmatter, Frontmatter};
 use crate::library::pathmap::PathMapper;
 use crate::library::LibraryIndex;
+use code_blocks::CodeBlocks;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.
-pub const RENDER_VERSION: u32 = 1;
+pub const RENDER_VERSION: u32 = 2;
 
 /// What a render needs besides the Markdown source.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +68,12 @@ pub struct RenderedDoc {
 /// Heading ids by the heading's start position (line, column), for the formatter.
 type HeadingIds = HashMap<(usize, usize), String>;
 
+/// What the formatter writes in place of comrak's own markup, worked out before formatting.
+struct Prepared {
+    heading_ids: HeadingIds,
+    code_blocks: CodeBlocks,
+}
+
 /// Renders a note to sanitised HTML and collects its outline, frontmatter and stats.
 pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
     let blanked = blank_empty_frontmatter(source);
@@ -76,9 +87,12 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
         Some(_) => Some(Frontmatter::Parsed { entries: vec![] }),
         None => take_frontmatter(root),
     };
+    html_policy::apply(&arena, root);
     let (outline, heading_ids) = collect_headings(root);
     let tasks = stats::count_tasks(root);
     let word_count = stats::word_count(&stats::visible_text(root));
+    tags::apply(&arena, root);
+    let code_blocks = code_blocks::render_all(root);
 
     let mut html = String::with_capacity(source.len() * 2);
     html::format_document_with_formatter(
@@ -87,7 +101,10 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
         &mut html,
         &Plugins::default(),
         format_node,
-        heading_ids,
+        Prepared {
+            heading_ids,
+            code_blocks,
+        },
     )
     .expect("formatting into a String cannot fail");
     let html = sanitize::clean(&html);
@@ -178,14 +195,16 @@ fn collect_headings<'a>(root: &'a AstNode<'a>) -> (Vec<OutlineItem>, HeadingIds)
     (outline, ids)
 }
 
-/// comrak's HTML formatter, with heading ids and a scroll wrapper around tables.
+/// comrak's HTML formatter, with heading ids, highlighted code blocks and a scroll wrapper around
+/// tables.
 fn format_node<'a>(
-    context: &mut Context<'_, '_, HeadingIds>,
+    context: &mut Context<'_, '_, Prepared>,
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
     match node.data().value {
         NodeValue::Heading(ref heading) => format_heading(context, node, entering, heading.level),
+        NodeValue::CodeBlock(_) => format_code_block(context, node, entering),
         NodeValue::Table(_) => format_table(context, node, entering),
         _ => html::format_node_default(context, node, entering),
     }
@@ -193,7 +212,7 @@ fn format_node<'a>(
 
 /// `<hN id="…" data-sourcepos="…">`, the id omitted when the slug is empty.
 fn format_heading<'a>(
-    context: &mut Context<'_, '_, HeadingIds>,
+    context: &mut Context<'_, '_, Prepared>,
     node: &'a AstNode<'a>,
     entering: bool,
     level: u8,
@@ -202,7 +221,7 @@ fn format_heading<'a>(
         context.cr()?;
         write!(context, "<h{level}")?;
         let start = node.data().sourcepos.start;
-        if let Some(id) = context.user.remove(&(start.line, start.column)) {
+        if let Some(id) = context.user.heading_ids.remove(&(start.line, start.column)) {
             if !id.is_empty() {
                 context.write_str(" id=\"")?;
                 context.escape(&id)?;
@@ -218,9 +237,27 @@ fn format_heading<'a>(
     Ok(ChildRendering::HTML)
 }
 
+/// The markup `code_blocks::render_all` built for this block.
+fn format_code_block<'a>(
+    context: &mut Context<'_, '_, Prepared>,
+    node: &'a AstNode<'a>,
+    entering: bool,
+) -> Result<ChildRendering, fmt::Error> {
+    if entering {
+        let start = node.data().sourcepos.start;
+        let Some(markup) = context.user.code_blocks.remove(&(start.line, start.column)) else {
+            return html::format_node_default(context, node, entering);
+        };
+        context.cr()?;
+        context.write_str(&markup)?;
+        context.lf()?;
+    }
+    Ok(ChildRendering::HTML)
+}
+
 /// comrak's table markup inside `<div class="table-wrap">`, which scrolls wide tables sideways.
 fn format_table<'a>(
-    context: &mut Context<'_, '_, HeadingIds>,
+    context: &mut Context<'_, '_, Prepared>,
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
@@ -246,4 +283,11 @@ fn format_table<'a>(
         context.lf()?;
     }
     Ok(ChildRendering::HTML)
+}
+
+/// `text` with `&`, `<`, `>` and `"` escaped, for HTML text and double-quoted attributes.
+pub(crate) fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() + text.len() / 8);
+    html::escape(&mut escaped, text).expect("writing to a String cannot fail");
+    escaped
 }

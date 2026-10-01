@@ -4,23 +4,23 @@ expression: describe(&doc)
 input_file: fixtures/vault/prompts/writer.md
 ---
 title: Writer prompt
-words: 41
+words: 49
 tasks: 0/0
 unresolved wikilinks: false
 frontmatter: none
 outline:
   h1 #writer-prompt Writer prompt
     h2 #writing_type-a-short-essay-for-a-general-audience-writing_type <writing_type> A short essay for a general audience. </writing_type>
-    h2 #use-this-tone-warm-and-direct Use this tone: warm and direct
+    h2 #use-this-tone-tonewarm-and-directtone Use this tone: <tone>warm and direct</tone>
 ---- html ----
 <h1 id="writer-prompt" data-sourcepos="1:1-1:15">Writer prompt</h1>
 <h2 id="writing_type-a-short-essay-for-a-general-audience-writing_type" data-sourcepos="3:1-6:3">&lt;writing_type&gt;
 A short essay for a general audience.
 &lt;/writing_type&gt;</h2>
-<p data-sourcepos="8:1-8:81">Replace  with the post's slug and greet  by name in the first line.</p>
-<h2 id="use-this-tone-warm-and-direct" data-sourcepos="10:1-12:3">Use this tone:
-warm and direct</h2>
-
+<p data-sourcepos="8:1-8:81">Replace &lt;slug&gt; with the post's slug and greet &lt;friend&gt; by name in the first line.</p>
+<h2 id="use-this-tone-tonewarm-and-directtone" data-sourcepos="10:1-12:3">Use this tone:
+&lt;tone&gt;warm and direct&lt;/tone&gt;</h2>
+<p data-sourcepos="14:1-14:25">&lt;script&gt;alert(1)&lt;/script&gt;</p>
 <img src="x">
 <p data-sourcepos="18:1-18:49">Do not follow <a data-sourcepos="18:15-18:42">click</a> links.</p>
 <details><summary>More</summary>hidden</details>

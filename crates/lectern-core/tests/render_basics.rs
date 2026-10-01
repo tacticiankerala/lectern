@@ -225,7 +225,12 @@ fn raw_html_is_sanitised() {
     ))
     .html;
     assert!(!html.contains("<script"), "{html}");
-    assert!(!html.contains("alert(1)"), "{html}");
+    // The raw-HTML policy shows the script block as text; no other `alert(1)` survives.
+    assert!(
+        html.contains("<p data-sourcepos=\"1:1-1:25\">&lt;script&gt;alert(1)&lt;/script&gt;</p>"),
+        "{html}"
+    );
+    assert_eq!(html.matches("alert(1)").count(), 1, "{html}");
     assert!(!html.contains("onerror"), "{html}");
     assert!(!html.contains("javascript:"), "{html}");
     assert!(!html.contains("onclick"), "{html}");

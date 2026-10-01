@@ -11,7 +11,7 @@ frontmatter: none
 outline:
   h1 #memory-index Memory index
 ---- html ----
-<p data-sourcepos="1:1-1:14">#nvim #motions</p>
+<p data-sourcepos="1:1-1:14"><span class="tag" data-tag="nvim">#nvim</span> <span class="tag" data-tag="motions">#motions</span></p>
 <h1 id="memory-index" data-sourcepos="3:1-3:14">Memory index</h1>
 <ul data-sourcepos="5:1-10:55">
 <li data-sourcepos="5:1-5:66"><a data-sourcepos="5:3-5:12" href="README" data-wikilink="true">README</a>: the vault home, found by walking up from this folder</li>

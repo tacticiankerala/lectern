@@ -11,10 +11,13 @@ publish = false
 ammonia = "4.2.0"
 comrak = { version = "0.55.0", default-features = false }
 percent-encoding = "2.3.2"
+rayon = "1.12.0"
 saphyr = { version = "0.1.0", default-features = false }
 saphyr-parser = "0.1.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "html", "dump-load", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
 unicode-segmentation = "1.13.3"
 
