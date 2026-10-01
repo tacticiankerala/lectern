@@ -1,9 +1,11 @@
+mod common;
+
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lectern_core::frontmatter::{Frontmatter, PropValue};
-use lectern_core::library::pathmap::PathMapper;
+use lectern_core::library::pathmap::{asset_url, PathMapper};
 use lectern_core::render::slug::{slugify, Slugger};
 use lectern_core::render::{render, RenderContext, RenderedDoc};
 use lectern_core::text::decode;
@@ -234,7 +236,14 @@ fn raw_html_is_sanitised() {
     assert!(!html.contains("onerror"), "{html}");
     assert!(!html.contains("javascript:"), "{html}");
     assert!(!html.contains("onclick"), "{html}");
-    assert!(html.contains(r#"<img src="x">"#), "{html}");
+    // The raw image survives as a lazy asset-protocol image, without its handler.
+    let src = asset_url(ASSET_BASE, &Path::new("/vault/notes").join("x"));
+    assert!(
+        html.contains(&format!(
+            r#"<img src="{src}" loading="lazy" decoding="async">"#
+        )),
+        "{html}"
+    );
     assert!(html.contains(r##"<a href="#top">ok</a>"##), "{html}");
 }
 
@@ -273,7 +282,6 @@ fn five_mb_document_renders_quickly_enough() {
 
 #[test]
 fn asset_url_encodes_spaces_unicode_unc() {
-    use lectern_core::library::pathmap::asset_url;
     assert_eq!(
         asset_url(
             "http://asset.localhost/",
@@ -292,11 +300,16 @@ fn asset_url_encodes_spaces_unicode_unc() {
 
 const BIG_PLAN: &str = "work/alpha/plans/2026-01-01-big-plan.md";
 
-/// Every Markdown fixture, rendered and pinned. Binary files with a `.md` name are skipped, and so
-/// is the big plan, which `big_plan_structure` covers instead of a snapshot that every rendering
-/// change would rewrite.
+/// Every Markdown fixture, rendered without an index and pinned. Binary files with a `.md` name
+/// are skipped, and so is the big plan, which `big_plan_structure` covers instead of a snapshot
+/// that every rendering change would rewrite. The vault's path is redacted, since links and
+/// images carry absolute paths.
 #[test]
 fn fixtures() {
+    let vault = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/vault")
+        .canonicalize()
+        .unwrap();
     insta::glob!("../../../fixtures/vault", "**/*.md", |path| {
         if path.ends_with(BIG_PLAN) {
             return;
@@ -304,7 +317,7 @@ fn fixtures() {
         let bytes = std::fs::read(path).unwrap();
         let Ok(decoded) = decode(&bytes) else { return };
         let doc = r_at(&decoded.text, path);
-        insta::assert_snapshot!(describe(&doc));
+        insta::assert_snapshot!(common::redact_vault(&describe(&doc), &vault));
     });
 }
 

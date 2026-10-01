@@ -3,6 +3,7 @@
 mod code_blocks;
 pub mod highlight;
 mod html_policy;
+mod links;
 mod options;
 mod sanitize;
 pub mod slug;
@@ -26,7 +27,7 @@ use code_blocks::CodeBlocks;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.
-pub const RENDER_VERSION: u32 = 2;
+pub const RENDER_VERSION: u32 = 3;
 
 /// What a render needs besides the Markdown source.
 #[derive(Debug, Clone, Copy)]
@@ -68,10 +69,12 @@ pub struct RenderedDoc {
 /// Heading ids by the heading's start position (line, column), for the formatter.
 type HeadingIds = HashMap<(usize, usize), String>;
 
-/// What the formatter writes in place of comrak's own markup, worked out before formatting.
-struct Prepared {
+/// What the formatter writes in place of comrak's own markup: worked out before formatting, or
+/// (links) resolved as the formatter reaches them.
+struct Prepared<'c> {
     heading_ids: HeadingIds,
     code_blocks: CodeBlocks,
+    links: links::Links<'c>,
 }
 
 /// Renders a note to sanitised HTML and collects its outline, frontmatter and stats.
@@ -92,10 +95,11 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
     let tasks = stats::count_tasks(root);
     let word_count = stats::word_count(&stats::visible_text(root));
     tags::apply(&arena, root);
+    let links = links::Links::new(ctx);
     let code_blocks = code_blocks::render_all(root);
 
     let mut html = String::with_capacity(source.len() * 2);
-    html::format_document_with_formatter(
+    let prepared = html::format_document_with_formatter(
         root,
         &options,
         &mut html,
@@ -104,10 +108,11 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
         Prepared {
             heading_ids,
             code_blocks,
+            links,
         },
     )
     .expect("formatting into a String cannot fail");
-    let html = sanitize::clean(&html);
+    let html = sanitize::clean(&html, prepared.links.images);
     let title = stats::title_of(frontmatter.as_ref(), &outline, ctx.doc_path);
 
     RenderedDoc {
@@ -117,7 +122,7 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
         tasks,
         title,
         word_count,
-        has_unresolved_wikilinks: false,
+        has_unresolved_wikilinks: prepared.links.unresolved_wikilinks,
     }
 }
 
@@ -195,24 +200,33 @@ fn collect_headings<'a>(root: &'a AstNode<'a>) -> (Vec<OutlineItem>, HeadingIds)
     (outline, ids)
 }
 
-/// comrak's HTML formatter, with heading ids, highlighted code blocks and a scroll wrapper around
-/// tables.
+/// comrak's HTML formatter, with heading ids, highlighted code blocks, a scroll wrapper around
+/// tables, and resolved links, wikilinks, code paths and images.
 fn format_node<'a>(
-    context: &mut Context<'_, '_, Prepared>,
+    context: &mut Context<'_, '_, Prepared<'_>>,
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
-    match node.data().value {
+    let data = node.data();
+    if entering && data.value.contains_inlines() {
+        links::start_inlines(context);
+    }
+    match data.value {
         NodeValue::Heading(ref heading) => format_heading(context, node, entering, heading.level),
         NodeValue::CodeBlock(_) => format_code_block(context, node, entering),
         NodeValue::Table(_) => format_table(context, node, entering),
+        NodeValue::Link(ref link) => links::format_link(context, node, entering, link),
+        NodeValue::WikiLink(ref link) => links::format_wikilink(context, node, entering, &link.url),
+        NodeValue::Code(ref code) => links::format_code(context, node, entering, &code.literal),
+        NodeValue::Image(ref image) => links::format_image(context, node, entering, image),
+        NodeValue::HtmlInline(ref raw) => links::format_raw_inline(context, node, entering, raw),
         _ => html::format_node_default(context, node, entering),
     }
 }
 
 /// `<hN id="…" data-sourcepos="…">`, the id omitted when the slug is empty.
 fn format_heading<'a>(
-    context: &mut Context<'_, '_, Prepared>,
+    context: &mut Context<'_, '_, Prepared<'_>>,
     node: &'a AstNode<'a>,
     entering: bool,
     level: u8,
@@ -239,7 +253,7 @@ fn format_heading<'a>(
 
 /// The markup `code_blocks::render_all` built for this block.
 fn format_code_block<'a>(
-    context: &mut Context<'_, '_, Prepared>,
+    context: &mut Context<'_, '_, Prepared<'_>>,
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {
@@ -257,7 +271,7 @@ fn format_code_block<'a>(
 
 /// comrak's table markup inside `<div class="table-wrap">`, which scrolls wide tables sideways.
 fn format_table<'a>(
-    context: &mut Context<'_, '_, Prepared>,
+    context: &mut Context<'_, '_, Prepared<'_>>,
     node: &'a AstNode<'a>,
     entering: bool,
 ) -> Result<ChildRendering, fmt::Error> {

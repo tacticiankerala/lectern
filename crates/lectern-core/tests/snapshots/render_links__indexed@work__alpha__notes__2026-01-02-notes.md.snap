@@ -1,0 +1,11 @@
+---
+source: crates/lectern-core/tests/render_links.rs
+expression: v.redact(&text)
+---
+unresolved wikilinks: false
+---- html ----
+<h1 id="notes-2-january" data-sourcepos="1:1-1:18">Notes, 2 January</h1>
+<p data-sourcepos="3:1-3:82">Paths relative to this note: <a href="#" class="code-link" data-kind="doc" data-target="[vault]/work/alpha/README.md"><code data-sourcepos="3:30-3:43">../README.md</code></a> and <a href="#" class="code-link" data-kind="doc" data-target="[vault]/work/alpha/plans/2026-01-01-big-plan.md"><code data-sourcepos="3:49-3:81">../plans/2026-01-01-big-plan.md</code></a>.</p>
+<p data-sourcepos="5:1-5:80">Paths relative to the task root: <a href="#" class="code-link" data-kind="doc" data-target="[vault]/work/alpha/plans/2026-01-01-big-plan.md"><code data-sourcepos="5:34-5:63">plans/2026-01-01-big-plan.md</code></a> and <a href="#" class="code-link" data-kind="doc" data-target="[vault]/work/alpha/README.md"><code data-sourcepos="5:69-5:79">README.md</code></a>.</p>
+<p data-sourcepos="7:1-7:88">An absolute link with a line suffix: <a data-sourcepos="7:38-7:87" href="#" class="link-doc" data-kind="doc" data-target="[vault]/work/alpha/README.md" data-line="3">x</a>.</p>
+<p data-sourcepos="9:1-9:128">A stale link from before beta was archived: <a data-sourcepos="9:45-9:94" href="#" class="link-doc" data-kind="doc" data-target="[vault]/archive/beta/README.md">beta</a>. Beta lives under <code data-sourcepos="9:114-9:123">archive/</code> now.</p>

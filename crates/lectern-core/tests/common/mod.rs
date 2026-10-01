@@ -1,7 +1,12 @@
-//! Helpers shared by the library tests.
+//! Helpers shared by the library and render tests. Each test crate uses only some of them.
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use lectern_core::library::pathmap::asset_url;
+use lectern_core::library::scan::{read_heads, scan_root, ScanOptions};
+use lectern_core::library::LibraryIndex;
 
 /// A copy of `fixtures/vault` in a fresh temporary directory, so no test writes to the repo.
 /// Returns the guard (the copy is deleted when it drops) and the path of the copied vault.
@@ -11,6 +16,49 @@ pub fn vault_copy() -> (tempfile::TempDir, PathBuf) {
     let dst = tmp.path().join("vault");
     copy_dir(&src, &dst);
     (tmp, dst)
+}
+
+/// An index holding `root` alone, scanned with its frontmatter heads read.
+pub fn index_of(root: &Path) -> LibraryIndex {
+    let mut index = scan_root(root, &ScanOptions::default()).unwrap();
+    read_heads(&mut index);
+    LibraryIndex { roots: vec![index] }
+}
+
+/// Where a redacted vault path starts in a snapshot.
+pub const VAULT_MARK: &str = "[vault]";
+
+/// `text` with `vault`'s path, written plainly or encoded in an asset URL, replaced by
+/// `[vault]`, and the rest of each such path (up to the end of its attribute value) written with
+/// `/` and `%2F` rather than `\` and `%5C`. Snapshots then read the same on Windows and Linux.
+pub fn redact_vault(text: &str, vault: &Path) -> String {
+    let text = text
+        .replace(&asset_url("", vault), VAULT_MARK)
+        .replace(&*vault.to_string_lossy(), VAULT_MARK);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(VAULT_MARK) {
+        let path_start = at + VAULT_MARK.len();
+        let path_end = rest[path_start..]
+            .find(['"', '<', '\n'])
+            .map_or(rest.len(), |len| path_start + len);
+        out.push_str(&rest[..path_start]);
+        out.push_str(
+            &rest[path_start..path_end]
+                .replace('\\', "/")
+                .replace("%5C", "%2F"),
+        );
+        rest = &rest[path_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `root` joined with the `/`-separated `rel` using the platform's separators, as the index
+/// joins paths.
+pub fn native_join(root: &Path, rel: &str) -> PathBuf {
+    rel.split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn copy_dir(src: &Path, dst: &Path) {

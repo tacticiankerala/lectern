@@ -158,7 +158,7 @@ fn rel_path(root: &Path, entry: &WalkEntry) -> Option<String> {
     Some(rel)
 }
 
-fn is_markdown(rel: &str) -> bool {
+pub(crate) fn is_markdown(rel: &str) -> bool {
     Path::new(rel)
         .extension()
         .and_then(|ext| ext.to_str())

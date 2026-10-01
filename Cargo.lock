@@ -1902,6 +1902,7 @@ dependencies = [
  "jwalk",
  "percent-encoding",
  "rayon",
+ "regex",
  "saphyr",
  "saphyr-parser",
  "serde",

@@ -1,20 +1,8 @@
 ---
-source: crates/lectern-core/tests/render_basics.rs
-expression: "common::redact_vault(&describe(&doc), &vault)"
-input_file: fixtures/vault/README.md
+source: crates/lectern-core/tests/render_links.rs
+expression: v.redact(&text)
 ---
-title: Sample Vault
-words: 66
-tasks: 0/0
 unresolved wikilinks: false
-frontmatter:
-  status: Text("active")
-  started: Date("2026-01-01")
-  updated: Date("2026-01-15")
-  prs: List([Number("101"), Number("102")])
-  branch: Text("feat/x")
-outline:
-  h1 #sample-vault Sample Vault
 ---- html ----
 <h1 id="sample-vault" data-sourcepos="9:1-9:14">Sample Vault</h1>
 <p data-sourcepos="11:1-11:205">An invented library for Lectern's tests — nothing here is real. It moves from plans → notes → archive, cites § 4 of a made-up spec, and marks progress with ✅ done, 🔒 locked and ⚠ check first.</p>

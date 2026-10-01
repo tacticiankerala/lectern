@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use lectern_core::library::pathmap::PathMapper;
+use lectern_core::library::pathmap::{asset_url, PathMapper};
 use lectern_core::render::{render, RenderContext, RenderedDoc};
 
 fn r(src: &str) -> RenderedDoc {
@@ -159,10 +159,15 @@ fn details_open_and_picture_sources_kept() {
     ))
     .html;
     assert!(h.contains(r#"<details open="">"#), "{h}");
+    // The source survives, its local srcset pointed at the file beside the note.
+    let dark = asset_url(
+        "http://asset.localhost/",
+        &Path::new("/vault/notes").join("dark.png"),
+    );
     assert!(
-        h.contains(
-            r#"<source srcset="dark.png" media="(prefers-color-scheme: dark)" type="image/png">"#
-        ),
+        h.contains(&format!(
+            r#"<source srcset="{dark}" media="(prefers-color-scheme: dark)" type="image/png">"#
+        )),
         "{h}"
     );
 }

@@ -1,6 +1,6 @@
 ---
 source: crates/lectern-core/tests/render_basics.rs
-expression: describe(&doc)
+expression: "common::redact_vault(&describe(&doc), &vault)"
 input_file: fixtures/vault/prompts/writer.md
 ---
 title: Writer prompt
@@ -21,7 +21,7 @@ A short essay for a general audience.
 <h2 id="use-this-tone-tonewarm-and-directtone" data-sourcepos="10:1-12:3">Use this tone:
 &lt;tone&gt;warm and direct&lt;/tone&gt;</h2>
 <p data-sourcepos="14:1-14:25">&lt;script&gt;alert(1)&lt;/script&gt;</p>
-<img src="x">
+<img src="http://asset.localhost/[vault]%2Fprompts%2Fx" loading="lazy" decoding="async">
 <p data-sourcepos="18:1-18:49">Do not follow <a data-sourcepos="18:15-18:42">click</a> links.</p>
 <details><summary>More</summary>hidden</details>
 <p data-sourcepos="22:1-22:51">Press <kbd>Ctrl</kbd> and <kbd>Enter</kbd> to send.</p>

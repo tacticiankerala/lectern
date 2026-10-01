@@ -1,15 +1,8 @@
 ---
-source: crates/lectern-core/tests/render_basics.rs
-expression: "common::redact_vault(&describe(&doc), &vault)"
-input_file: fixtures/vault/friends/readme-style.md
+source: crates/lectern-core/tests/render_links.rs
+expression: v.redact(&text)
 ---
-title: Readme style
-words: 34
-tasks: 0/0
 unresolved wikilinks: false
-frontmatter: none
-outline:
-  h1 #readme-style Readme style
 ---- html ----
 <p align="center">
   <img src="http://asset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="Lectern logo" width="64" height="64" loading="lazy" decoding="async">

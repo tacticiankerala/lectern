@@ -1,4 +1,5 @@
-//! Times `render` on the 3,000-line fixture plan and on a synthetic 5 MB note.
+//! Times `render` on the 3,000-line fixture plan and on a synthetic 5 MB note, with an index of
+//! `fixtures/vault` so links, wikilinks and inline-code paths resolve as they do in the app.
 //!
 //! `cargo run -p lectern-core --release --example render_bench`. The spec's budget for the plan is
 //! a median of 30 ms or less in a release build.
@@ -8,19 +9,34 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lectern_core::library::pathmap::PathMapper;
+use lectern_core::library::scan::{read_heads, scan_root, ScanOptions};
+use lectern_core::library::LibraryIndex;
 use lectern_core::render::{highlight, render, RenderContext};
 
-const BIG_PLAN: &str = "../../fixtures/vault/work/alpha/plans/2026-01-01-big-plan.md";
+const VAULT: &str = "../../fixtures/vault";
+const BIG_PLAN: &str = "work/alpha/plans/2026-01-01-big-plan.md";
 const RUNS: usize = 20;
 const SYNTHETIC_BYTES: usize = 5 * 1024 * 1024;
 
 fn main() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(BIG_PLAN);
+    let vault = Path::new(env!("CARGO_MANIFEST_DIR")).join(VAULT);
+    let path = vault.join(BIG_PLAN);
     let source = std::fs::read_to_string(&path).expect("the big plan fixture is readable");
+
+    let start = Instant::now();
+    let mut root = scan_root(&vault, &ScanOptions::default()).expect("the fixture vault scans");
+    read_heads(&mut root);
+    let index = LibraryIndex { roots: vec![root] };
+    println!(
+        "index of fixtures/vault ({} files): {:.2} ms",
+        index.roots[0].files.len(),
+        ms(start.elapsed())
+    );
+
     let mapper = PathMapper::default();
     let ctx = RenderContext {
         doc_path: &path,
-        index: None,
+        index: Some(&index),
         mapper: &mapper,
         asset_base: "http://asset.localhost/",
     };

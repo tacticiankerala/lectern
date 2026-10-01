@@ -2,6 +2,7 @@
 
 pub mod ignore;
 pub mod pathmap;
+pub mod resolve;
 pub mod scan;
 pub mod snapshot;
 pub mod tree;

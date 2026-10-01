@@ -1,6 +1,6 @@
 ---
 source: crates/lectern-core/tests/render_basics.rs
-expression: describe(&doc)
+expression: "common::redact_vault(&describe(&doc), &vault)"
 input_file: fixtures/vault/memory/index.md
 ---
 title: Memory index
@@ -14,11 +14,11 @@ outline:
 <p data-sourcepos="1:1-1:14"><span class="tag" data-tag="nvim">#nvim</span> <span class="tag" data-tag="motions">#motions</span></p>
 <h1 id="memory-index" data-sourcepos="3:1-3:14">Memory index</h1>
 <ul data-sourcepos="5:1-10:55">
-<li data-sourcepos="5:1-5:66"><a data-sourcepos="5:3-5:12" href="README" data-wikilink="true">README</a>: the vault home, found by walking up from this folder</li>
-<li data-sourcepos="6:1-6:66"><a data-sourcepos="6:3-6:23" href="README" data-wikilink="true">Vault home</a>: the same note with a title after the pipe</li>
-<li data-sourcepos="7:1-7:66"><a data-sourcepos="7:3-7:30" href="feedback-incremental-prs" data-wikilink="true">feedback-incremental-prs</a>: resolves through its <code data-sourcepos="7:54-7:60">name:</code> field</li>
-<li data-sourcepos="8:1-8:77"><a data-sourcepos="8:3-8:30" href="feedback_incremental-prs" data-wikilink="true">feedback_incremental-prs</a>: resolves with hyphens and underscores swapped</li>
-<li data-sourcepos="9:1-9:41"><a data-sourcepos="9:3-9:18" href="missing-note" data-wikilink="true">missing-note</a>: no note has this name</li>
-<li data-sourcepos="10:1-10:55"><a data-sourcepos="10:3-10:24" href="big-plan#Section%202" data-wikilink="true">big-plan#Section 2</a>: a heading inside the big plan</li>
+<li data-sourcepos="5:1-5:66"><a data-sourcepos="5:3-5:12" href="#" class="wikilink broken" data-kind="broken" title="No note named README">README</a>: the vault home, found by walking up from this folder</li>
+<li data-sourcepos="6:1-6:66"><a data-sourcepos="6:3-6:23" href="#" class="wikilink broken" data-kind="broken" title="No note named README">Vault home</a>: the same note with a title after the pipe</li>
+<li data-sourcepos="7:1-7:66"><a data-sourcepos="7:3-7:30" href="#" class="wikilink broken" data-kind="broken" title="No note named feedback-incremental-prs">feedback-incremental-prs</a>: resolves through its <code data-sourcepos="7:54-7:60">name:</code> field</li>
+<li data-sourcepos="8:1-8:77"><a data-sourcepos="8:3-8:30" href="#" class="wikilink broken" data-kind="broken" title="No note named feedback_incremental-prs">feedback_incremental-prs</a>: resolves with hyphens and underscores swapped</li>
+<li data-sourcepos="9:1-9:41"><a data-sourcepos="9:3-9:18" href="#" class="wikilink broken" data-kind="broken" title="No note named missing-note">missing-note</a>: no note has this name</li>
+<li data-sourcepos="10:1-10:55"><a data-sourcepos="10:3-10:24" href="#" class="wikilink broken" data-kind="broken" title="No note named big-plan">big-plan#Section 2</a>: a heading inside the big plan</li>
 </ul>
 <p data-sourcepos="12:1-12:81">None of these are tags: the colour #519767, PR #6257 and the method Klass#method.</p>
