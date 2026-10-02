@@ -110,3 +110,10 @@ export function samePath(a: string, b: string): boolean {
   const key = (p: string) => p.toLowerCase().replaceAll("/", "\\");
   return key(a) === key(b);
 }
+
+/** Runs a promise for its effect, logging a failure instead of leaving it unhandled. */
+export function quietly(promise: Promise<unknown>): void {
+  promise.catch((e: unknown) => {
+    console.warn(e);
+  });
+}

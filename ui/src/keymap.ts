@@ -1,17 +1,67 @@
-// Keyboard shortcuts (spec §6): one global keydown handler that maps keys to actions. Task 10 has
-// the reading ones; Task 11 adds navigation to `Action` and `actionFor`.
+// Keyboard shortcuts (spec §6): one global keydown handler that maps keys to actions. While the
+// user types in a field only Esc goes through.
 
-export type Action = "font-up" | "font-down" | "font-reset" | "toggle-theme" | "focus" | "escape";
+export type Action =
+  | "open-file"
+  | "add-folder"
+  | "quick-open"
+  | "search"
+  | "find"
+  | "back"
+  | "forward"
+  | "font-up"
+  | "font-down"
+  | "font-reset"
+  | "toggle-theme"
+  | "toggle-library"
+  | "toggle-outline"
+  | "focus"
+  | "open-editor"
+  | "copy-path"
+  | "reload"
+  | "preferences"
+  | "escape";
+
+/** Ctrl with a letter or comma, by `e.key` lower-cased: without Shift, then with it. */
+const CTRL: Record<string, [Action | null, Action | null]> = {
+  o: ["open-file", "toggle-outline"],
+  n: [null, "add-folder"],
+  p: ["quick-open", null],
+  f: ["find", "search"],
+  t: [null, "toggle-theme"],
+  b: ["toggle-library", null],
+  e: ["open-editor", null],
+  c: [null, "copy-path"],
+  // F5's twin: WebView2 would otherwise reload the whole page.
+  r: ["reload", null],
+  ",": ["preferences", null],
+};
 
 /** The action a key press stands for, or null. */
 export function actionFor(e: KeyboardEvent): Action | null {
-  if (e.key === "Escape" && !e.ctrlKey && !e.altKey) {
-    return "escape";
+  if (e.metaKey) {
+    return null;
   }
-  if (e.key === "F11" && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-    return "focus";
+  const plain = !e.ctrlKey && !e.altKey && !e.shiftKey;
+  switch (e.key) {
+    case "Escape":
+      return e.ctrlKey || e.altKey ? null : "escape";
+    case "F11":
+      return plain ? "focus" : null;
+    case "F5":
+      return plain ? "reload" : null;
+    case "BrowserBack":
+      return plain ? "back" : null;
+    case "BrowserForward":
+      return plain ? "forward" : null;
+    case "ArrowLeft":
+    case "ArrowRight":
+      if (e.altKey && !e.ctrlKey && !e.shiftKey) {
+        return e.key === "ArrowLeft" ? "back" : "forward";
+      }
+      return null;
   }
-  if (!e.ctrlKey || e.altKey || e.metaKey) {
+  if (!e.ctrlKey || e.altKey) {
     return null;
   }
   // Ctrl with "+" or "=" (with or without Shift, and the numpad's), "-", or "0".
@@ -24,12 +74,9 @@ export function actionFor(e: KeyboardEvent): Action | null {
       return "font-down";
     case "0":
       return e.shiftKey ? null : "font-reset";
-    case "T":
-    case "t":
-      return e.shiftKey ? "toggle-theme" : null;
-    default:
-      return null;
   }
+  const pair = CTRL[e.key.toLowerCase()];
+  return pair ? pair[e.shiftKey ? 1 : 0] : null;
 }
 
 /** Text entry, where keys belong to the field. */

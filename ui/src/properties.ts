@@ -1,6 +1,7 @@
 // The properties strip above the document: its frontmatter and task count. The status shows as a
 // badge, dates as relative text, `prs` numbers as chips, everything else as compact key/value
-// pairs. It collapses from its header, and remembers that across documents and launches.
+// pairs; keys with nothing to show are left out. It collapses from its header, and remembers that
+// across documents and launches.
 import { h } from "./dom";
 import type { DocPayload } from "./generated/DocPayload";
 import type { PropValue } from "./generated/PropValue";
@@ -13,7 +14,7 @@ const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 /** Renders `doc`'s properties into `host`, hiding it when there are none. `now` is for tests. */
 export function renderProperties(host: HTMLElement, doc: DocPayload, now = Date.now()): void {
   const fm = doc.frontmatter;
-  const entries = fm?.kind === "parsed" ? fm.entries : [];
+  const entries = (fm?.kind === "parsed" ? fm.entries : []).filter((e) => !isEmpty(e.value));
   const hasTasks = doc.tasks.total > 0;
   if (!hasTasks && entries.length === 0 && fm?.kind !== "invalid") {
     host.hidden = true;
@@ -72,7 +73,20 @@ export function renderProperties(host: HTMLElement, doc: DocPayload, now = Date.
   host.hidden = false;
 }
 
-function badge(status: string): HTMLElement {
+/** Nothing to show: an empty text (YAML's null included) or a list of nothing. `false` and 0 show. */
+function isEmpty(v: PropValue): boolean {
+  switch (v.kind) {
+    case "bool":
+      return false;
+    case "list":
+      return v.value.every(isEmpty);
+    default:
+      return v.value.trim() === "";
+  }
+}
+
+/** A frontmatter `status:` as a badge, coloured by the theme's `--badge-<status>` when it has one. */
+export function badge(status: string): HTMLElement {
   const slug = status.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return h("span", { class: `badge status-${slug}` }, status);
 }

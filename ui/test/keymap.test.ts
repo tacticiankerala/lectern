@@ -16,11 +16,53 @@ describe("actionFor", () => {
     expect(actionFor(key({ key: "Escape" }))).toBe("escape");
   });
 
+  it("maps shortcuts", () => {
+    expect(actionFor(new KeyboardEvent("keydown", { key: "p", ctrlKey: true }))).toBe("quick-open");
+    expect(actionFor(key({ key: "F", ctrlKey: true, shiftKey: true }))).toBe("search");
+    expect(actionFor(key({ key: "f", ctrlKey: true }))).toBe("find");
+    expect(actionFor(key({ key: "ArrowLeft", altKey: true }))).toBe("back");
+    expect(actionFor(key({ key: "ArrowRight", altKey: true }))).toBe("forward");
+    expect(actionFor(key({ key: "F11" }))).toBe("focus");
+    expect(actionFor(key({ key: "=", ctrlKey: true }))).toBe("font-up");
+  });
+
+  it("maps the rest of the spec's table", () => {
+    const table: [KeyboardEventInit, string][] = [
+      [{ key: "o", ctrlKey: true }, "open-file"],
+      [{ key: "N", ctrlKey: true, shiftKey: true }, "add-folder"],
+      [{ key: "b", ctrlKey: true }, "toggle-library"],
+      [{ key: "O", ctrlKey: true, shiftKey: true }, "toggle-outline"],
+      [{ key: "e", ctrlKey: true }, "open-editor"],
+      [{ key: "C", ctrlKey: true, shiftKey: true }, "copy-path"],
+      [{ key: "F5" }, "reload"],
+      // WebView2 would otherwise reload the whole page.
+      [{ key: "r", ctrlKey: true }, "reload"],
+      [{ key: ",", ctrlKey: true }, "preferences"],
+      // Caps Lock gives capitals without Shift.
+      [{ key: "P", ctrlKey: true }, "quick-open"],
+      // Keyboards with Back and Forward keys.
+      [{ key: "BrowserBack" }, "back"],
+      [{ key: "BrowserForward" }, "forward"],
+    ];
+    for (const [init, action] of table) {
+      expect(actionFor(key(init)), JSON.stringify(init)).toBe(action);
+    }
+  });
+
   it("ignores other keys and modifiers", () => {
     expect(actionFor(key({ key: "=" }))).toBeNull();
     expect(actionFor(key({ key: "=", ctrlKey: true, altKey: true }))).toBeNull();
     expect(actionFor(key({ key: "t", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "F11", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "p" }))).toBeNull();
+    expect(actionFor(key({ key: "P", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "ArrowLeft" }))).toBeNull();
+    expect(actionFor(key({ key: "ArrowLeft", altKey: true, ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "ArrowLeft", altKey: true, shiftKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "F5", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "c", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "b", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "p", metaKey: true }))).toBeNull();
   });
 });
 

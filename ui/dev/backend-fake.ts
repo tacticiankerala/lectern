@@ -17,6 +17,7 @@ import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { StartupPayload } from "../src/generated/StartupPayload";
 import type { TreeNode } from "../src/generated/TreeNode";
 import type { UpdateInfo } from "../src/generated/UpdateInfo";
+import type { UserOpen } from "../src/generated/UserOpen";
 
 export interface Fixtures {
   /** The fake library root, `C:\Fixtures\vault`. */
@@ -31,7 +32,13 @@ export interface FakeOptions {
   /** A document "given on the command line": startup renders it as `initial`. */
   initial?: string;
   recent?: RecentEntry[];
+  /** Keeps the settings in sessionStorage, so they survive a page reload as on disk. */
+  persist?: boolean;
 }
+
+/** The fake library's second root, on a share that never answers. */
+export const OFFLINE_ROOT = "\\\\offline-nas\\share\\notes";
+const SETTINGS_KEY = "lx-fake-settings";
 
 export interface PerfMark {
   name: string;
@@ -43,6 +50,10 @@ export interface FakeControl {
   emit(event: BackendEvent, payload: unknown): void;
   /** Replaces a document's HTML, adds a document, or (with null) deletes one. */
   setDoc(path: string, html: string | null): void;
+  /** Drops files or folders on the window. */
+  drop(paths: string[]): void;
+  /** Every root `retryRoot` was asked to retry, in order. */
+  readonly retried: string[];
   readonly marks: PerfMark[];
   /** Every `setFullscreen` call, in order. */
   readonly fullscreen: boolean[];
@@ -65,6 +76,13 @@ function baseName(path: string): string {
   return path.slice(path.lastIndexOf("\\") + 1);
 }
 
+/** Whether `path` is `root` or below it. */
+function isUnder(path: string, root: string): boolean {
+  return key(path) === key(root) || key(path).startsWith(key(root) + "\\");
+}
+
+const MARKDOWN = /\.(md|markdown)$/i;
+
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
   readonly shown: number[] = [];
@@ -72,12 +90,14 @@ export class FakeBackend implements Backend, FakeControl {
   readonly titles: string[] = [];
   readonly fullscreen: boolean[] = [];
   readonly chromeColors: [string, string, boolean][] = [];
+  readonly retried: string[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc }>();
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
+  private readonly drops = new Set<(paths: string[]) => void>();
   private settings: Settings = { ...DEFAULT_SETTINGS };
-  private readonly library: LibraryPayload;
+  private library: LibraryPayload;
   private recent: RecentEntry[];
 
   constructor(
@@ -96,15 +116,31 @@ export class FakeBackend implements Backend, FakeControl {
           state: { state: "ready" },
           tree: fixtures.tree,
         },
+        {
+          path: OFFLINE_ROOT,
+          name: baseName(OFFLINE_ROOT),
+          state: { state: "unavailable", reason: `Couldn't reach ${OFFLINE_ROOT} within 3 s` },
+          tree: null,
+        },
       ],
     };
+    if (options.persist) {
+      try {
+        const saved = sessionStorage.getItem(SETTINGS_KEY);
+        if (saved !== null) {
+          this.settings = { ...this.settings, ...(JSON.parse(saved) as Partial<Settings>) };
+        }
+      } catch {
+        // Defaults, then.
+      }
+    }
   }
 
   startup(): Promise<StartupPayload> {
     const initial = this.options.initial;
     return Promise.resolve({
       settings: this.settings,
-      library: this.library,
+      library: structuredClone(this.library),
       recent: this.recent,
       initial: initial === undefined ? null : this.open(initial),
       version: "0.0.0-fake",
@@ -117,8 +153,19 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.open(path));
   }
 
-  openUserPath(path: string): Promise<OpenResult> {
-    return this.openDocument(path);
+  /** As Rust decides: a file opens; a folder joins the library unless it nests with a root. */
+  openUserPath(path: string): Promise<UserOpen> {
+    if (MARKDOWN.test(path) || this.docs.has(key(path))) {
+      return Promise.resolve({ doc: this.open(path), library: structuredClone(this.library) });
+    }
+    if (!this.library.roots.some((r) => isUnder(path, r.path) || isUnder(r.path, path))) {
+      this.addFolder(path);
+    }
+    const readme = `${path}\\README.md`;
+    return Promise.resolve({
+      doc: this.docs.has(key(readme)) ? this.open(readme) : null,
+      library: structuredClone(this.library),
+    });
   }
 
   removeRecent(path: string): Promise<RecentEntry[]> {
@@ -138,19 +185,35 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   getLibrary(): Promise<LibraryPayload> {
-    return Promise.resolve(this.library);
+    return Promise.resolve(structuredClone(this.library));
   }
 
-  addRoot(): Promise<LibraryPayload> {
+  addRoot(path: string): Promise<LibraryPayload> {
+    if (!this.library.roots.some((r) => key(r.path) === key(path))) {
+      this.addFolder(path);
+    }
     return this.getLibrary();
   }
 
-  removeRoot(): Promise<LibraryPayload> {
+  removeRoot(path: string): Promise<LibraryPayload> {
+    this.library.roots = this.library.roots.filter((r) => key(r.path) !== key(path));
     return this.getLibrary();
   }
 
-  retryRoot(): Promise<LibraryPayload> {
+  /** Records the retry; the root stays as it was. */
+  retryRoot(path: string): Promise<LibraryPayload> {
+    this.retried.push(path);
     return this.getLibrary();
+  }
+
+  /** A new root, still scanning: the fake never indexes it. */
+  private addFolder(path: string): void {
+    this.library.roots.push({
+      path,
+      name: baseName(path),
+      state: { state: "scanning" },
+      tree: null,
+    });
   }
 
   quickOpenCandidates(): Promise<Candidate[]> {
@@ -189,6 +252,13 @@ export class FakeBackend implements Backend, FakeControl {
   setSettings(patch: SettingsPatch): Promise<Settings> {
     const defined = Object.entries(patch).filter(([, v]) => v != null);
     this.settings = { ...this.settings, ...Object.fromEntries(defined) };
+    if (this.options.persist) {
+      try {
+        sessionStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings));
+      } catch {
+        // Kept for this page only.
+      }
+    }
     return Promise.resolve(this.settings);
   }
 
@@ -239,6 +309,19 @@ export class FakeBackend implements Backend, FakeControl {
     return () => {
       set.delete(listener);
     };
+  }
+
+  onDragDrop(cb: (paths: string[]) => void): () => void {
+    this.drops.add(cb);
+    return () => {
+      this.drops.delete(cb);
+    };
+  }
+
+  drop(paths: string[]): void {
+    for (const cb of [...this.drops]) {
+      cb(paths);
+    }
   }
 
   emit(event: BackendEvent, payload: unknown): void {

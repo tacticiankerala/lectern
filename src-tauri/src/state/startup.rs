@@ -1,5 +1,6 @@
 //! Startup and launches: the payload the UI asks for first, the document rendered during boot
-//! (or the launch that superseded it), and second launches forwarded once the UI is up.
+//! (or the launch that superseded it), second launches forwarded once the UI is up, and paths the
+//! user opens in the running app, which follow the same rules as a launch.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Weak};
 use std::thread;
 
-use lectern_core::ipc::{OpenRequest, OpenResult, StartupPayload};
+use lectern_core::ipc::{OpenRequest, OpenResult, StartupPayload, UserOpen};
 
 use super::doc::Early;
 use super::paths::path_string;
@@ -115,6 +116,31 @@ impl AppState {
         }
     }
 
+    /// Opens a path the user chose in the running app (the file dialog, a drop, Add folder) with
+    /// the same decision as a launch argument (`resolve_target`): its network host is trusted, a
+    /// file opens, and a folder joins the library unless it nests with a root, opening its README
+    /// when it has one. Touches the file system.
+    pub fn open_user_path(self: &Arc<Self>, path: &str) -> UserOpen {
+        // Numbered on arrival: an open made while the path resolves (a share can stall) is newer,
+        // and stays current. It counts as an open, like a launch, even when it opens nothing, so
+        // a boot render landing late never overrides it.
+        let seq = self.next_seq();
+        let target = self.resolve_target(Path::new(path));
+        self.finish_user_open(seq, target)
+    }
+
+    /// Opens what a user path resolved to, as the open numbered `seq`.
+    pub(super) fn finish_user_open(
+        self: &Arc<Self>,
+        seq: u64,
+        target: Option<PathBuf>,
+    ) -> UserOpen {
+        UserOpen {
+            doc: target.map(|doc| self.open_numbered(seq, &path_string(&doc))),
+            library: self.library_payload(),
+        }
+    }
+
     /// Hands a second launch's request, arriving after startup, to the forwarding thread, which
     /// checks for a folder off the main thread and then asks the UI to open the file.
     pub fn forward(&self, request: OpenRequest) {
@@ -156,7 +182,9 @@ pub(super) fn spawn_forwarder(state: Weak<AppState>) -> Sender<OpenRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::paths::same_path;
     use crate::state::test_support::*;
+    use crate::state::trust;
     use std::time::Duration;
 
     #[test]
@@ -254,6 +282,124 @@ mod tests {
         let outer = f.dir.0.clone();
         assert_eq!(f.state.resolve_target(&outer), None);
         assert_eq!(f.state.settings().library_roots, [path_string(&root)]);
+    }
+
+    fn user_roots(f: &Fixture) -> Vec<String> {
+        f.state.settings().library_roots
+    }
+
+    fn sidebar_roots(open: &UserOpen) -> Vec<String> {
+        open.library.roots.iter().map(|r| r.path.clone()).collect()
+    }
+
+    #[test]
+    fn a_file_the_user_chose_trusts_its_host_then_opens() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let chosen = r"\\lectern-chosen.invalid\share\plan.md";
+        let refusal = trust::refusal(chosen);
+        // Reached from a note, the host is refused untouched.
+        assert!(matches!(
+            f.state.open_document(chosen),
+            OpenResult::Err { error } if error.message == refusal
+        ));
+        // Chosen by the user, the host is trusted first, so the open is attempted: the file isn't
+        // there, but it isn't refused, and nothing joins the library.
+        let opened = f.state.open_user_path(chosen);
+        match opened.doc {
+            Some(OpenResult::Err { error }) => assert_ne!(error.message, refusal),
+            other => panic!("expected a failed open, got {other:?}"),
+        }
+        assert!(opened.library.roots.is_empty());
+        // The host stays trusted for the session.
+        assert!(f.state.trusts(r"\\LECTERN-CHOSEN.invalid\share\other.md"));
+        // A local file opens as `open_document` would, without becoming a root.
+        let doc = f.dir.file("notes/a.md", "# A");
+        let opened = f.state.open_user_path(&path_string(&doc));
+        assert_eq!(opened_path(opened.doc.as_ref().unwrap()), doc);
+        assert!(user_roots(&f).is_empty());
+        assert!(opened.library.roots.is_empty());
+    }
+
+    #[test]
+    fn a_folder_the_user_chose_outside_every_root_becomes_a_root_and_opens_its_readme() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let vault = f.dir.folder("vault");
+        let readme = f.dir.file("vault/README.md", "# Vault");
+        let opened = f.state.open_user_path(&path_string(&vault));
+        assert_eq!(opened_path(opened.doc.as_ref().unwrap()), readme);
+        assert_eq!(user_roots(&f), [path_string(&vault)]);
+        assert_eq!(sidebar_roots(&opened), [path_string(&vault)]);
+        // Without a README, the folder still joins the library and nothing opens.
+        let plain = f.dir.folder("plain");
+        let opened = f.state.open_user_path(&path_string(&plain));
+        assert!(opened.doc.is_none());
+        assert_eq!(
+            sidebar_roots(&opened),
+            [path_string(&vault), path_string(&plain)]
+        );
+    }
+
+    #[test]
+    fn a_folder_the_user_chose_inside_a_root_opens_its_readme_without_nesting() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let readme = dir.file("vault/work/a/README.md", "# A");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let inner = readme.parent().unwrap().to_owned();
+        let opened = f.state.open_user_path(&path_string(&inner));
+        assert_eq!(opened_path(opened.doc.as_ref().unwrap()), readme);
+        assert_eq!(user_roots(&f), [path_string(&root)]);
+        assert_eq!(sidebar_roots(&opened), [path_string(&root)]);
+    }
+
+    #[test]
+    fn a_folder_the_user_chose_that_is_or_holds_a_root_never_nests() {
+        let dir = TempDir::new();
+        let root = dir.folder("outer/vault");
+        let readme = dir.file("outer/vault/README.md", "# Vault");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        // The root itself, named in another case: its README opens.
+        let same = path_string(&root).to_uppercase();
+        let opened = f.state.open_user_path(&same);
+        assert!(same_path(
+            &opened_path(opened.doc.as_ref().unwrap()),
+            &readme
+        ));
+        // The folder holding it, which has no README: nothing opens, nothing is added.
+        let outer = root.parent().unwrap().to_owned();
+        let opened = f.state.open_user_path(&path_string(&outer));
+        assert!(opened.doc.is_none());
+        assert_eq!(user_roots(&f), [path_string(&root)]);
+        assert_eq!(sidebar_roots(&opened), [path_string(&root)]);
+    }
+
+    #[test]
+    fn a_user_path_that_resolves_slowly_never_replaces_a_newer_open() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let vault = f.dir.folder("vault");
+        f.dir.file("vault/README.md", "# Vault");
+        let newer = f.dir.file("notes/b.md", "# B");
+        // The folder arrives and is numbered; while it resolves (a stalled share), B opens.
+        let seq = f.state.next_seq();
+        let target = f.state.resolve_target(&vault);
+        f.state.open_document(&path_string(&newer));
+        let opened = f.state.finish_user_open(seq, target);
+        // The README still renders for the UI, which drops the stale answer, but B stays current.
+        assert!(matches!(opened.doc, Some(OpenResult::Ok { .. })));
+        assert_eq!(current(&f).0, newer);
+        assert_eq!(
+            lock(&f.state.state).reading.last_doc.as_deref(),
+            Some(path_string(&newer).as_str())
+        );
+        let last_watched = lock(&f.watched)
+            .iter()
+            .rev()
+            .find_map(|w| match w {
+                Watched::Doc(doc) => Some(doc.clone()),
+                Watched::Roots(_) => None,
+            })
+            .flatten();
+        assert_eq!(last_watched, Some(newer));
     }
 
     #[test]

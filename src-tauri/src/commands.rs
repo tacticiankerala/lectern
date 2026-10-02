@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, RecentEntry, SavedPosition,
-    Settings, SettingsPatch, StartupPayload,
+    Settings, SettingsPatch, StartupPayload, UserOpen,
 };
 use lectern_core::search::FileHits;
 use tauri::{State, WebviewWindow};
@@ -38,9 +38,10 @@ pub async fn open_document(path: String, state: Shared<'_>) -> Result<OpenResult
     blocking(state.inner(), move |s| s.open_document(&path)).await
 }
 
-/// Opens a file the user chose (the file dialog or a drop), trusting its network host first.
+/// Opens a file or folder the user chose (the file dialog, a drop, Add folder) as a launch argument
+/// would: its network host is trusted, and a folder joins the library unless it nests with a root.
 #[tauri::command]
-pub async fn open_user_path(path: String, state: Shared<'_>) -> Result<OpenResult, String> {
+pub async fn open_user_path(path: String, state: Shared<'_>) -> Result<UserOpen, String> {
     blocking(state.inner(), move |s| s.open_user_path(&path)).await
 }
 

@@ -115,3 +115,37 @@ describe("renderProperties", () => {
     expect(render(doc).classList.contains("collapsed")).toBe(true);
   });
 });
+
+describe("renderProperties with empty values", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("hides properties with nothing to show, but keeps false and 0", () => {
+    const host = render(
+      parsed([
+        { key: "prs", value: { kind: "list", value: [] } },
+        { key: "branch", value: { kind: "text", value: "" } },
+        { key: "owner", value: { kind: "text", value: "  " } },
+        { key: "tags", value: { kind: "list", value: [{ kind: "text", value: "" }] } },
+        { key: "draft", value: { kind: "bool", value: false } },
+        { key: "count", value: { kind: "number", value: "0" } },
+      ]),
+    );
+    expect([...host.querySelectorAll(".prop-key")].map((k) => k.textContent)).toEqual([
+      "draft",
+      "count",
+    ]);
+  });
+
+  it("hides the strip when every property is empty", () => {
+    const host = render(
+      parsed([
+        { key: "status", value: { kind: "text", value: "" } },
+        { key: "prs", value: { kind: "list", value: [] } },
+      ]),
+    );
+    expect(host.hidden).toBe(true);
+    expect(host.querySelector(".badge")).toBeNull();
+  });
+});

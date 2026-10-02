@@ -438,6 +438,19 @@ mod capability_tests {
         );
     }
 
+    /// Ctrl+O and Add folder use the dialog plugin's file and folder pickers.
+    #[test]
+    fn the_main_window_may_pick_files_and_folders() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        // `dialog:default` grants `allow-open`, among others.
+        assert!(caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "dialog:default" || p == "dialog:allow-open"));
+    }
+
     /// Focus mode puts the window in full screen.
     #[test]
     fn the_main_window_may_go_full_screen() {

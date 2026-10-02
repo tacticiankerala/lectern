@@ -1,4 +1,5 @@
-// Bundles the UI into dist/ (or dist-fake/ with --fake): app.js, app.css, index.html and fonts/.
+// Bundles the UI into dist/ (or dist-fake/ with --fake): app.js, the modules it loads on first use,
+// app.css, index.html and fonts/.
 // The fake build inlines dev/fixtures.json, which `npm run fixtures` writes.
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
@@ -24,6 +25,10 @@ if (fake) {
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
+// app.js loads before the first paint, so what is only needed later stays out of it: app.ts loads
+// these modules with `import("./<name>.js")` on first use, and each is bundled on its own (a shared
+// chunk would cost app.js a second request before it can run).
+const lazy = ["quick-open", "preferences", "menu"];
 await esbuild.build({
   entryPoints: [entry],
   outfile: path.join(outdir, "app.js"),
@@ -32,6 +37,16 @@ await esbuild.build({
   minify: true,
   target,
   define,
+  external: lazy.map((name) => `./${name}.js`),
+  logLevel: "warning",
+});
+await esbuild.build({
+  entryPoints: Object.fromEntries(lazy.map((name) => [name, path.join(root, `src/${name}.ts`)])),
+  outdir,
+  bundle: true,
+  format: "esm",
+  minify: true,
+  target,
   logLevel: "warning",
 });
 

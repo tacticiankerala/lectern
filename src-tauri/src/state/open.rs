@@ -23,26 +23,21 @@ impl AppState {
     /// touches it, and doesn't become the current document.
     pub fn open_document(self: &Arc<Self>, path: &str) -> OpenResult {
         if !self.trusts(path) {
-            return OpenResult::Err {
-                error: OpenError {
-                    kind: OpenErrorKind::Permission,
-                    message: trust::refusal(path),
-                    path: path.to_owned(),
-                },
-            };
+            return refused(path);
         }
         let seq = self.next_seq();
+        self.open_numbered(seq, path)
+    }
+
+    /// Opens `path` as the open numbered `seq`, which was numbered when it was asked for: a newer
+    /// open, numbered while this one waited, stays the current document.
+    pub(super) fn open_numbered(self: &Arc<Self>, seq: u64, path: &str) -> OpenResult {
+        if !self.trusts(path) {
+            return refused(path);
+        }
         let path = PathBuf::from(path);
         let result = self.load(&path);
         self.finish_open(seq, &path, result)
-    }
-
-    /// Opens a file the user chose (the file dialog or a drop). The user picked it, so its network
-    /// host is trusted for the session, as for a launch argument; then it opens like
-    /// `open_document`.
-    pub fn open_user_path(self: &Arc<Self>, path: &str) -> OpenResult {
-        write(&self.trust).opened_by_user(Path::new(path));
-        self.open_document(path)
     }
 
     pub(super) fn load(&self, path: &Path) -> Result<Rendered, OpenError> {
@@ -249,6 +244,17 @@ impl AppState {
     }
 }
 
+/// The answer for a path on a network host the user hasn't chosen.
+fn refused(path: &str) -> OpenResult {
+    OpenResult::Err {
+        error: OpenError {
+            kind: OpenErrorKind::Permission,
+            message: trust::refusal(path),
+            path: path.to_owned(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,32 +356,6 @@ mod tests {
         assert_eq!(f.host.doc_changes(), 1);
         rescan(&f, &root);
         assert_eq!(f.host.doc_changes(), 1);
-    }
-
-    #[test]
-    fn a_file_the_user_chose_trusts_its_host_before_it_opens() {
-        let f = fixture(profile(&[]), FakeHost::default());
-        let chosen = r"\\lectern-chosen.invalid\share\plan.md";
-        let refusal = trust::refusal(chosen);
-        // Reached from a note, the host is refused untouched.
-        assert!(matches!(
-            f.state.open_document(chosen),
-            OpenResult::Err { error } if error.message == refusal
-        ));
-        // Chosen by the user, the host is trusted first, so the open is attempted: the file isn't
-        // there, but it isn't refused.
-        match f.state.open_user_path(chosen) {
-            OpenResult::Err { error } => assert_ne!(error.message, refusal),
-            OpenResult::Ok { .. } => panic!("opened a file that doesn't exist"),
-        }
-        // The host stays trusted for the session.
-        assert!(f.state.trusts(r"\\LECTERN-CHOSEN.invalid\share\other.md"));
-        // A local file opens as `open_document` would.
-        let doc = f.dir.file("a.md", "# A");
-        assert_eq!(
-            opened_path(&f.state.open_user_path(&path_string(&doc))),
-            doc
-        );
     }
 
     #[test]

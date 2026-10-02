@@ -12,6 +12,7 @@ import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { StartupPayload } from "./generated/StartupPayload";
 import type { UpdateInfo } from "./generated/UpdateInfo";
+import type { UserOpen } from "./generated/UserOpen";
 
 export type BackendEvent =
   | "doc-changed"
@@ -46,10 +47,12 @@ export interface Backend {
   pickFile(): Promise<string | null>;
   pickFolder(): Promise<string | null>;
   /**
-   * Opens a file the user explicitly chose (the file dialog or a drop): Rust trusts its network
-   * host for the session, then opens it like `openDocument`.
+   * Opens a file or folder the user explicitly chose (the file dialog, Add folder or a drop) as a
+   * launch argument would: Rust trusts its network host for the session; a file opens like
+   * `openDocument`; a folder joins the library unless it nests with a root, and opens its README
+   * when it has one.
    */
-  openUserPath(path: string): Promise<OpenResult>;
+  openUserPath(path: string): Promise<UserOpen>;
   /** Drops `path` from the recent files, for good; returns the recent files left. */
   removeRecent(path: string): Promise<RecentEntry[]>;
   /** Sets the native window title (the title bar and the task switcher). */
@@ -57,6 +60,8 @@ export interface Backend {
   /** Puts the window in or out of full screen, for focus mode. */
   setFullscreen(on: boolean): Promise<void>;
   showWindow(): Promise<void>;
+  /** Calls `cb` with the paths of files or folders dropped on the window; returns the unsubscribe. */
+  onDragDrop(cb: (paths: string[]) => void): () => void;
   /** Subscribes to a backend event; returns the unsubscribe function. */
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- callers name the payload type
   on<T>(event: BackendEvent, cb: (payload: T) => void): () => void;

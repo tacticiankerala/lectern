@@ -1,18 +1,20 @@
-// The app: its state, startup, and opening documents into the layout.
+// The app: its state and settings, startup, and showing documents in the layout. Navigation
+// (navigation.ts), the library (library-controller.ts) and what the user asks for (actions.ts)
+// are its parts.
 //
 // Contracts with the Rust side (Task 8):
 // - The `open-request` and `doc-changed` listeners are registered before `startup`: Rust holds
 //   second launches until then and sends them as events. One arriving before startup finishes is
 //   applied after the first document.
-// - Navigations (startup's `initial`, opens, links, launches) are numbered, and the answer to an
-//   older one is dropped rather than rendered.
-// - `doc-changed` for the open document reloads it in place, keeping the reading position.
-//   Refreshes are numbered apart from navigations: one never cancels a navigation, and one that
-//   arrives while a navigation is in flight waits for it, applying only if it lands on that path.
+// - Navigations are numbered, refreshes apart from them (navigation.ts).
 // - `startupNotice` shows once, as a toast.
+// - The library sidebar renders after the first paint, so it never holds it up. Quick open,
+//   Preferences and the menus are separate modules, loaded on first use.
+import { Actions } from "./actions";
 import type { Backend } from "./backend";
-import { DocView, READER_INPUT } from "./doc-view";
-import { buildLayout, h, nextPaint, samePath, type Layout } from "./dom";
+import { renderBreadcrumbs } from "./breadcrumbs";
+import { DocView } from "./doc-view";
+import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import type { DocChanged } from "./generated/DocChanged";
 import type { DocPayload } from "./generated/DocPayload";
 import type { LibraryPayload } from "./generated/LibraryPayload";
@@ -23,18 +25,15 @@ import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
-import { installKeymap, type Action } from "./keymap";
+import { installKeymap } from "./keymap";
+import { LibraryController } from "./library-controller";
+import { Navigation } from "./navigation";
 import { Outline } from "./outline";
 import { trackProgress } from "./progress";
 import { renderProperties } from "./properties";
 import { ReadingPanel } from "./reading-panel";
-import {
-  applySettings,
-  bumpFontSize,
-  loadFonts,
-  loadRememberedFonts,
-  toggleThemeMode,
-} from "./themes";
+import { flowAnchor, keepFlow, type FlowAnchor } from "./reflow";
+import { applySettings, loadFonts, loadRememberedFonts } from "./themes";
 import { Toasts } from "./toast";
 import { renderError, renderWelcome } from "./welcome";
 
@@ -63,10 +62,8 @@ export const DEFAULT_SETTINGS: Settings = {
 const SAVE_DEBOUNCE_MS = 150;
 /** How long the first paint waits for the selected bundled fonts. */
 const FONT_WAIT_MS = 150;
-/** How long focus mode holds the reader's place while the window goes to or from full screen. */
-const HOLD_MS = 1500;
-/** The hold ends once the place has held still for this many frames after a resize. */
-const HOLD_STABLE_FRAMES = 3;
+/** As many recent files as Rust keeps. */
+const MAX_RECENT = 20;
 /** Settings that move the text, so the reading position is kept across them. */
 const REFLOWING: (keyof Settings)[] = [
   "fontSize",
@@ -93,17 +90,13 @@ export interface OpenOptions {
   slug?: string;
   /** A source line to scroll to. */
   line?: number;
-  /** Push the current document onto the history first (Task 11). */
+  /** A captured position to scroll back to (history). */
+  position?: SavedPosition;
+  /** Record the document on screen, with its position, on the history once this lands. */
   push?: boolean;
 }
 
 export type Change = "doc" | "settings" | "library";
-
-/** A reading spot held across a reflow: a block, and how far down it the pane's top falls. */
-interface FlowAnchor {
-  block: Element;
-  into: number;
-}
 
 export class App {
   readonly state: AppState = {
@@ -119,28 +112,27 @@ export class App {
   readonly view: DocView;
   /** Opens the search panel with a query. Task 12 provides it. */
   openSearch: (query: string) => void = () => undefined;
+  /** Opens the find bar. Task 12 provides it. */
+  openFind: () => void = () => undefined;
+  /** Checks for an update on request. Task 13 provides it. */
+  checkForUpdates: () => void = () => {
+    this.toast("Lectern can't check for updates yet.");
+  };
+  /** The reading panel ("Aa"). */
+  readonly panel: ReadingPanel;
+  readonly nav: Navigation;
+  readonly library: LibraryController;
+  readonly actions: Actions;
   private readonly toasts: Toasts;
   private readonly outline: Outline;
-  private readonly panel: ReadingPanel;
   /** The OS colour scheme, which `system` theme mode follows. */
   private readonly darkQuery: MediaQueryList | null =
     typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
-  private focusMode = false;
-  /** Ends the hold on the reader's place in progress, if any. */
-  private stopHold: (() => void) | null = null;
   /** Settings changes not yet saved, and the timer that saves them. */
   private unsaved: SettingsPatch = {};
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly updateProgress: () => void;
   private readonly listeners = new Map<Change, Set<() => void>>();
-  /** Bumped by every navigation; the answer to an older one is dropped. */
-  private navigations = 0;
-  /** The navigation waiting for its answer, if any. */
-  private pendingNavigation: number | null = null;
-  /** Bumped by every refresh, so only the latest one renders. */
-  private refreshes = 0;
-  /** Paths changed or removed while a navigation was in flight, settled once it lands. */
-  private readonly deferred = new Set<string>();
   /** The native window title last set. */
   private title = "";
   private started = false;
@@ -187,8 +179,12 @@ export class App {
     this.darkQuery?.addEventListener("change", () => {
       this.applySettings();
     });
+
+    this.nav = new Navigation(this);
+    this.library = new LibraryController(this);
+    this.actions = new Actions(this);
     // Once a test replaces the page's app, the old one stops listening.
-    installKeymap(root.ownerDocument, (action) => root.isConnected && this.run(action));
+    installKeymap(root.ownerDocument, (action) => root.isConnected && this.actions.run(action));
   }
 
   /** The element the document scrolls in. */
@@ -199,23 +195,22 @@ export class App {
   async start(): Promise<void> {
     this.backend.on<OpenRequest>("open-request", (request) => {
       if (this.started) {
-        void this.openRequested(request);
+        void this.nav.openRequested(request);
       } else {
         this.queued = request;
       }
     });
     this.backend.on<DocChanged>("doc-changed", (e) => {
-      this.changed(e.path);
+      this.nav.changed(e.path);
     });
     this.backend.on<DocChanged>("doc-removed", (e) => {
-      this.removed(e.path);
+      this.nav.removed(e.path);
     });
     this.backend.on<LibraryPayload>("library-updated", (library) => {
-      this.state.library = library;
-      this.emit("library");
+      this.library.setLibrary(library);
     });
 
-    const navigation = this.beginNavigation();
+    const navigation = this.nav.beginNavigation();
     let notice: string | null;
     let initial: OpenResult | null = null;
     // The fonts selected last time load while the startup payload is on its way.
@@ -237,14 +232,19 @@ export class App {
     // The theme and fonts are in place before the first paint, so nothing flashes.
     this.applySettings();
     const fonts = Promise.all([earlyFonts, loadFonts(this.state.settings)]);
-    if (this.endNavigation(navigation)) {
+    if (this.nav.endNavigation(navigation)) {
       this.show(initial);
-      this.settleDeferred();
+      this.nav.settleDeferred();
     }
     await Promise.race([fonts, delay(FONT_WAIT_MS)]);
     await nextPaint();
     this.backend.perfMark("first-paint");
+    // The sidebar fills in right after, before the window shows.
+    this.library.start();
     quietly(this.backend.showWindow());
+    // Nothing can be dropped on a window that isn't showing yet.
+    this.backend.onDragDrop((paths) => void this.nav.dropped(paths));
+    this.library.watchIndex();
     if (notice !== null) {
       this.toast(notice);
     }
@@ -252,35 +252,33 @@ export class App {
     const queued = this.queued;
     this.queued = null;
     if (queued) {
-      await this.openRequested(queued);
+      await this.nav.openRequested(queued);
     }
   }
 
   async open(path: string, opts: OpenOptions = {}): Promise<void> {
-    await this.load(() => this.backend.openDocument(path), opts);
+    await this.nav.open(path, opts);
   }
 
   /** Asks for a file and opens it, trusting its host: the user chose it. */
   async openFile(): Promise<void> {
     const path = await this.backend.pickFile();
     if (path !== null) {
-      await this.load(() => this.backend.openUserPath(path), { push: true });
+      await this.openUserPath(path);
     }
   }
 
-  /** Asks for a folder and adds it to the library. */
+  /** Asks for a folder and adds it to the library, opening its README if it has one. */
   async addFolder(): Promise<void> {
     const path = await this.backend.pickFolder();
-    if (path === null) {
-      return;
+    if (path !== null) {
+      await this.openUserPath(path);
     }
-    try {
-      this.state.library = await this.backend.addRoot(path);
-      this.emit("library");
-      this.toast(`Added ${path} to the library`);
-    } catch (e) {
-      this.toast(String(e));
-    }
+  }
+
+  /** Opens a file or folder the user chose, as a launch would (navigation.ts). */
+  async openUserPath(path: string): Promise<void> {
+    await this.nav.openUserPath(path);
   }
 
   toast(message: string): void {
@@ -299,7 +297,7 @@ export class App {
     this.state.settings = { ...this.state.settings, ...changes };
     this.applySettings();
     if (anchor) {
-      this.keepFlow(anchor);
+      keepFlow(this.scroller, anchor);
     }
     Object.assign(this.unsaved, changes);
     if (this.saveTimer !== null) {
@@ -326,144 +324,16 @@ export class App {
     }
   }
 
-  /**
-   * The block at the top of the pane and how far down it the top falls, as a fraction of its
-   * height, to hold across a reflow. Null at the very top, or with no document.
-   */
-  private flowAnchor(): FlowAnchor | null {
-    if (this.state.doc === null || this.scroller.scrollTop === 0) {
-      return null;
-    }
-    const top = this.scroller.getBoundingClientRect().top;
-    const blocks = this.layout.doc.children;
-    // Blocks come in page order: the first one reaching below the top, by binary search.
-    let lo = 0;
-    let hi = blocks.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if ((blocks[mid]?.getBoundingClientRect().bottom ?? Infinity) <= top) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    const block = blocks[lo];
-    if (!block) {
-      return null;
-    }
-    const rect = block.getBoundingClientRect();
-    return { block, into: rect.height > 0 ? (top - rect.top) / rect.height : 0 };
-  }
-
-  /**
-   * Scrolls the anchor's block back to where it was at the top, after the text has moved.
-   * Returns how far it had moved.
-   */
-  private keepFlow({ block, into }: FlowAnchor): number {
-    const rect = block.getBoundingClientRect();
-    const moved = rect.top + into * rect.height - this.scroller.getBoundingClientRect().top;
-    if (Math.abs(moved) > 0.5) {
-      this.scroller.scrollTop += moved;
-    }
-    return moved;
-  }
-
-  /**
-   * Holds the anchor at the top of the pane while the window goes to or from full screen, which
-   * resizes it some frames later: re-corrected every frame until it has held still for a few
-   * frames after a resize, or until HOLD_MS, or until the reader scrolls.
-   */
-  private holdFlow(anchor: FlowAnchor): void {
-    this.stopHold?.();
-    const started = performance.now();
-    let resized = false;
-    let stable = 0;
-    let frame = 0;
-    const onResize = (): void => {
-      resized = true;
-      stable = 0;
-    };
-    const stop = (): void => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener("resize", onResize);
-      for (const type of READER_INPUT) {
-        window.removeEventListener(type, stop, true);
-      }
-      if (this.stopHold === stop) {
-        this.stopHold = null;
-      }
-    };
-    const tick = (): void => {
-      if (!anchor.block.isConnected || performance.now() - started > HOLD_MS) {
-        stop();
-        return;
-      }
-      stable = Math.abs(this.keepFlow(anchor)) <= 1 ? stable + 1 : 0;
-      if (resized && stable >= HOLD_STABLE_FRAMES) {
-        stop();
-        return;
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    window.addEventListener("resize", onResize);
-    // Added while the key that toggled focus mode is still on its way, these see only later input.
-    for (const type of READER_INPUT) {
-      window.addEventListener(type, stop, { capture: true, passive: true });
-    }
-    frame = requestAnimationFrame(tick);
-    this.stopHold = stop;
-  }
-
-  private systemDark(): boolean {
+  systemDark(): boolean {
     return this.darkQuery?.matches ?? false;
   }
 
-  /** Runs a shortcut; false when it had nothing to do. */
-  private run(action: Action): boolean {
-    const s = this.state.settings;
-    switch (action) {
-      case "font-up":
-        this.updateSettings(bumpFontSize(s, 1), { debounce: true });
-        return true;
-      case "font-down":
-        this.updateSettings(bumpFontSize(s, -1), { debounce: true });
-        return true;
-      case "font-reset":
-        this.updateSettings(bumpFontSize(s, 0));
-        return true;
-      case "toggle-theme":
-        this.updateSettings(toggleThemeMode(s, this.systemDark()));
-        return true;
-      case "focus":
-        this.setFocusMode(!this.focusMode);
-        return true;
-      case "escape":
-        if (this.panel.isOpen) {
-          this.panel.close();
-          return true;
-        }
-        if (this.focusMode) {
-          this.setFocusMode(false);
-          return true;
-        }
-        return false;
-    }
-  }
-
   /**
-   * Focus mode: no header, sidebars or progress bar, full screen, at the same reading spot, held
-   * through the native resize.
+   * The block at the top of the pane and how far down it the top falls, to hold across a reflow.
+   * Null at the very top, or with no document.
    */
-  private setFocusMode(on: boolean): void {
-    this.focusMode = on;
-    this.panel.close();
-    const anchor = this.flowAnchor();
-    document.body.classList.toggle("focus", on);
-    if (anchor) {
-      this.keepFlow(anchor);
-      this.holdFlow(anchor);
-    }
-    quietly(this.backend.setFullscreen(on));
+  flowAnchor(): FlowAnchor | null {
+    return this.state.doc === null ? null : flowAnchor(this.scroller, this.layout.doc);
   }
 
   on(change: Change, cb: () => void): () => void {
@@ -475,7 +345,8 @@ export class App {
     };
   }
 
-  private emit(change: Change): void {
+  /** Tells the listeners of `on` that something changed. */
+  emit(change: Change): void {
     for (const cb of [...(this.listeners.get(change) ?? [])]) {
       cb();
     }
@@ -483,138 +354,18 @@ export class App {
 
   /** The current navigation's number, for a caller that awaits something before navigating. */
   get navigation(): number {
-    return this.navigations;
+    return this.nav.latest;
   }
 
-  /**
-   * Fetches a document and shows it unless a newer navigation started meanwhile, then sends the
-   * time from call to paint. True when it was shown.
-   */
-  private async load(fetch: () => Promise<OpenResult>, opts: OpenOptions): Promise<boolean> {
-    const t0 = performance.now();
-    const navigation = this.beginNavigation();
-    let result: OpenResult;
-    try {
-      result = await fetch();
-    } catch (e) {
-      if (this.endNavigation(navigation)) {
-        this.toast(String(e));
-        this.settleDeferred();
-      }
-      return false;
-    }
-    if (!this.endNavigation(navigation)) {
-      return false;
-    }
-    this.show(result, opts);
-    this.settleDeferred();
-    await nextPaint();
-    this.backend.perfMark("doc-switch", performance.now() - t0);
-    return true;
-  }
-
-  private beginNavigation(): number {
-    this.pendingNavigation = ++this.navigations;
-    return this.navigations;
-  }
-
-  /** True when `navigation` is still the latest, which then stops being pending. */
-  private endNavigation(navigation: number): boolean {
-    if (navigation !== this.navigations) {
-      return false;
-    }
-    this.pendingNavigation = null;
-    return true;
-  }
-
-  private async openRequested(request: OpenRequest): Promise<void> {
-    const shown = await this.load(() => this.backend.openDocument(request.path), { push: true });
-    if (shown && request.t0Ms !== null) {
-      this.backend.perfMark("warm-open", Date.now() - request.t0Ms);
-    }
-  }
-
-  /** The path on screen: the document's, or the one that failed to open. */
-  private currentPath(): string | null {
-    return this.state.doc?.path ?? this.state.error?.path ?? null;
-  }
-
-  private isCurrent(path: string): boolean {
-    const current = this.currentPath();
-    return current !== null && samePath(current, path);
-  }
-
-  /** `doc-changed`: reloads the document in place; mid-navigation, waits for it to land. */
-  private changed(path: string): void {
-    if (this.pendingNavigation !== null) {
-      this.deferred.add(path);
-    } else if (this.isCurrent(path)) {
-      void this.refresh(path);
-    }
-  }
-
-  /** `doc-removed`: the not-found state; mid-navigation, a refresh once it lands finds out. */
-  private removed(path: string): void {
-    if (this.pendingNavigation !== null) {
-      this.deferred.add(path);
-      return;
-    }
-    if (!this.isCurrent(path)) {
-      return;
-    }
-    // Any refresh still in flight is now out of date.
-    ++this.refreshes;
-    this.show({
-      status: "err",
-      error: { kind: "notFound", message: "It was moved or deleted while open.", path },
-    });
-  }
-
-  /** Refreshes a path changed during the navigation that just landed, if it landed there. */
-  private settleDeferred(): void {
-    const paths = [...this.deferred];
-    this.deferred.clear();
-    const path = paths.find((p) => this.isCurrent(p));
-    if (path !== undefined) {
-      void this.refresh(path);
-    }
-  }
-
-  /**
-   * Re-renders the document at `path` in place, keeping the reading position. A newer refresh,
-   * or any navigation started meanwhile, makes the answer obsolete.
-   */
-  private async refresh(path: string): Promise<void> {
-    const refresh = ++this.refreshes;
-    const navigation = this.navigations;
-    const before = this.state.doc;
-    const position = before ? this.view.captureAnchor() : undefined;
-    let result: OpenResult;
-    try {
-      result = await this.backend.openDocument(path);
-    } catch {
-      return;
-    }
-    if (refresh !== this.refreshes || navigation !== this.navigations) {
-      return;
-    }
-    if (before && result.status === "ok" && result.doc.html === before.html) {
-      // Only the frontmatter can have changed: the title and the properties.
-      this.state.doc = result.doc;
-      this.setTitle(result.doc.title);
-      renderProperties(this.layout.properties, result.doc);
-      return;
-    }
-    this.show(result, {}, position);
-  }
-
-  private show(result: OpenResult | null, opts: OpenOptions = {}, position?: SavedPosition): void {
+  /** Shows an open's result: the document, why it didn't open, or (for null) the welcome screen. */
+  show(result: OpenResult | null, opts: OpenOptions = {}, position?: SavedPosition): void {
     if (result?.status === "ok") {
       this.showDoc(result.doc, opts, position);
     } else {
       this.state.doc = null;
       this.state.error = result?.error ?? null;
       this.setTitle(null);
+      this.layout.breadcrumbs.replaceChildren();
       this.layout.properties.hidden = true;
       this.layout.banner.hidden = true;
       this.outline.clear();
@@ -633,8 +384,7 @@ export class App {
     this.state.doc = doc;
     this.state.error = null;
     this.view.render(doc);
-    this.setTitle(doc.title);
-    renderProperties(this.layout.properties, doc);
+    this.showMeta(doc);
     this.showBanner(doc.lossy);
     this.outline.render(doc.outline, this.layout.doc);
     if (position) {
@@ -646,6 +396,25 @@ export class App {
     } else {
       this.scroller.scrollTop = 0;
     }
+  }
+
+  /**
+   * What surrounds the body: the title, breadcrumbs and properties (with the task count), and
+   * the document's place at the top of the recent files.
+   */
+  showMeta(doc: DocPayload): void {
+    this.state.recent = [
+      { path: doc.path, title: doc.title, openedMs: Date.now() },
+      ...this.state.recent.filter((r) => !samePath(r.path, doc.path)),
+    ].slice(0, MAX_RECENT);
+    this.setTitle(doc.title);
+    renderBreadcrumbs(this.layout.breadcrumbs, doc.breadcrumbs, {
+      open: (readme) => void this.open(readme, { push: true }),
+      reveal: (folder) => {
+        this.library.revealFolder(folder);
+      },
+    });
+    renderProperties(this.layout.properties, doc);
   }
 
   /** The native window title: the document's, or just Lectern. */
@@ -701,7 +470,7 @@ export class App {
     }
   }
 
-  private async reveal(path: string): Promise<void> {
+  async reveal(path: string): Promise<void> {
     try {
       await this.backend.revealInExplorer(path);
     } catch (e) {
@@ -749,11 +518,4 @@ export class App {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Runs a promise for its effect, logging a failure instead of leaving it unhandled. */
-function quietly(promise: Promise<unknown>): void {
-  promise.catch((e: unknown) => {
-    console.warn(e);
-  });
 }

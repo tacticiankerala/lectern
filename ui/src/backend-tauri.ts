@@ -16,6 +16,7 @@ import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { StartupPayload } from "./generated/StartupPayload";
 import type { UpdateInfo } from "./generated/UpdateInfo";
+import type { UserOpen } from "./generated/UserOpen";
 
 /** The one window's label, as in tauri.conf.json. */
 const MAIN_WINDOW = "main";
@@ -34,7 +35,7 @@ export class TauriBackend implements Backend {
     return invoke("open_document", { path });
   }
 
-  openUserPath(path: string): Promise<OpenResult> {
+  openUserPath(path: string): Promise<UserOpen> {
     return invoke("open_user_path", { path });
   }
 
@@ -140,6 +141,22 @@ export class TauriBackend implements Backend {
 
   showWindow(): Promise<void> {
     return invoke("show_window");
+  }
+
+  /**
+   * The webview's drop event, which `getCurrentWebview().onDragDropEvent` wraps, heard through
+   * `listen`: the webview module would add to the bundle loaded before first paint. Not awaited
+   * by `startup`, as nothing is dropped before the window shows.
+   */
+  onDragDrop(cb: (paths: string[]) => void): () => void {
+    const unlisten = listen<{ paths: string[] }>("tauri://drag-drop", (e) => {
+      cb(e.payload.paths);
+    });
+    return () => {
+      void unlisten.then((stop) => {
+        stop();
+      });
+    };
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- callers name the payload type

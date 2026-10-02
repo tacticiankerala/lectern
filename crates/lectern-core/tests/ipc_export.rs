@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
     DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult,
-    RecentEntry, RootState, SettingsPatch, StartupPayload,
+    RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
 };
 use serde_json::json;
 use ts_rs::{Config, TS};
@@ -48,6 +48,7 @@ fn ts_bindings_exported() {
         "OutlineItem",
         "Frontmatter",
         "PropValue",
+        "UserOpen",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -84,6 +85,14 @@ fn ts_unions_follow_the_serde_tags() {
     assert_eq!(
         decl::<FollowResult>(),
         r#"type FollowResult = { "action": "openDoc", path: string, anchor: string | null, line: number | null, } | { "action": "opened" } | { "action": "notFound", message: string, };"#
+    );
+}
+
+#[test]
+fn user_open_may_open_nothing() {
+    assert_eq!(
+        decl::<UserOpen>(),
+        r#"type UserOpen = { doc: OpenResult | null, library: LibraryPayload, };"#
     );
 }
 

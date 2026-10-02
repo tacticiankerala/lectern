@@ -7,7 +7,10 @@ import { FakeBackend, type Fixtures } from "./backend-fake";
 declare const __LX_FIXTURES__: Fixtures;
 
 const open = new URLSearchParams(location.search).get("open");
-const backend = new FakeBackend(__LX_FIXTURES__, open === null ? {} : { initial: open });
+const backend = new FakeBackend(
+  __LX_FIXTURES__,
+  open === null ? { persist: true } : { initial: open, persist: true },
+);
 window.__fake = backend;
 const app = new App(backend, byId("lx-app"));
 await app.start();

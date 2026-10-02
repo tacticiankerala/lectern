@@ -214,6 +214,17 @@ pub struct LibraryPayload {
     pub roots: Vec<RootView>,
 }
 
+/// What a path the user chose (the file dialog, a drop, Add folder) opened: a file opens; a folder
+/// joins the library unless it nests with a root, and opens its README when it has one. The
+/// library comes back as it now is.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UserOpen {
+    pub doc: Option<OpenResult>,
+    pub library: LibraryPayload,
+}
+
 /// A file offered by quick open.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "camelCase")]

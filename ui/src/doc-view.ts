@@ -19,6 +19,8 @@ const STABLE_FRAMES = 3;
 const STABLE_PX = 2;
 /** ...or after this long. */
 const ANCHOR_MS = 1000;
+/** How many screens below a heading `layoutBelow` lays out at most. */
+const LAYOUT_SCREENS = 4;
 /** Input that means the reader is scrolling: anchoring stops rather than fight it. */
 export const READER_INPUT = ["wheel", "keydown", "touchstart", "pointerdown"] as const;
 const COPIED_MS = 1200;
@@ -100,13 +102,18 @@ export class DocView {
     const max = scroller.scrollHeight - scroller.clientHeight;
     let headingId: string | null = null;
     let offset = 0;
+    let above: HTMLElement | null = null;
     for (const heading of this.host.querySelectorAll<HTMLElement>(HEADINGS)) {
-      const headingTop = heading.getBoundingClientRect().top;
-      if (headingTop > top + 1) {
+      if (heading.getBoundingClientRect().top > top + 1) {
         break;
       }
-      headingId = heading.id;
-      offset = top - headingTop;
+      above = heading;
+    }
+    if (above) {
+      // Measured with the blocks between at their real height, as `restore` places it.
+      this.layoutBelow(above, top - above.getBoundingClientRect().top);
+      headingId = above.id;
+      offset = top - above.getBoundingClientRect().top;
     }
     let line: number | null = null;
     for (const block of this.host.children) {
@@ -122,6 +129,7 @@ export class DocView {
   restore(p: SavedPosition): void {
     const heading = p.headingId === null ? null : findById(this.host, p.headingId);
     if (heading) {
+      this.layoutBelow(heading, p.offset);
       this.placeAt(heading, -p.offset);
       return;
     }
@@ -132,6 +140,31 @@ export class DocView {
     }
     const scroller = this.app.scroller;
     scroller.scrollTop = p.fraction * (scroller.scrollHeight - scroller.clientHeight);
+  }
+
+  /**
+   * Lays out for real the blocks from `heading` to a screen below `offset`. Off screen they keep
+   * content-visibility's estimated height, so with a long stretch between the heading and the
+   * saved spot (a long section), placing the heading alone would land the reader far off it.
+   * Only within a few screens of the heading, so a long document with few headings never lays
+   * out whole.
+   */
+  private layoutBelow(heading: HTMLElement, offset: number): void {
+    const screen = this.app.scroller.clientHeight;
+    if (offset > LAYOUT_SCREENS * screen) {
+      return;
+    }
+    let block: Element | null = heading;
+    while (block && block.parentElement !== this.host) {
+      block = block.parentElement;
+    }
+    const end = heading.getBoundingClientRect().top + offset + screen;
+    for (; block instanceof HTMLElement; block = block.nextElementSibling) {
+      block.style.contentVisibility = "visible";
+      if (block.getBoundingClientRect().bottom >= end) {
+        break;
+      }
+    }
   }
 
   /** The element whose source starts last at or before `line`. */
