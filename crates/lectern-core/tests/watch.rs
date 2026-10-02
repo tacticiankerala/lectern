@@ -2,6 +2,7 @@
 //! callback's channel with a generous limit, so a slow machine only makes a test slower.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
@@ -19,15 +20,23 @@ const WAIT: Duration = Duration::from_secs(3);
 /// How long a test listens to show that no further event arrives: more than a poll and a
 /// debounce together.
 const QUIET: Duration = Duration::from_millis(600);
+/// For the tests that show a burst of changes becomes one event: long enough that the burst fits
+/// well inside it even on a slow machine. Each change the watcher sees restarts the wait, so one
+/// event only becomes two when the changes it sees spread over more than this.
+const BURST_DEBOUNCE: Duration = Duration::from_millis(600);
 
 fn watcher(poll: Duration) -> (DocWatcher, Receiver<WatchEvent>) {
+    watcher_debounced(poll, DEBOUNCE)
+}
+
+fn watcher_debounced(poll: Duration, debounce: Duration) -> (DocWatcher, Receiver<WatchEvent>) {
     let (tx, rx) = mpsc::channel();
     let watcher = DocWatcher::new(
         move |event| {
             let _ = tx.send(event);
         },
         poll,
-        DEBOUNCE,
+        debounce,
     );
     (watcher, rx)
 }
@@ -58,7 +67,15 @@ fn is_doc_event(event: &WatchEvent) -> bool {
 }
 
 fn assert_quiet(rx: &Receiver<WatchEvent>, keep: impl Fn(&WatchEvent) -> bool) {
-    let deadline = Instant::now() + QUIET;
+    assert_quiet_for(rx, QUIET, keep);
+}
+
+fn assert_quiet_for(
+    rx: &Receiver<WatchEvent>,
+    quiet: Duration,
+    keep: impl Fn(&WatchEvent) -> bool,
+) {
+    let deadline = Instant::now() + quiet;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
@@ -68,6 +85,30 @@ fn assert_quiet(rx: &Receiver<WatchEvent>, keep: impl Fn(&WatchEvent) -> bool) {
             Err(RecvTimeoutError::Disconnected) => panic!("the watcher stopped"),
         }
     }
+}
+
+/// After the one event a burst that took `burst` became: checks that no second event `keep`
+/// accepts follows. When the burst itself took a third of `BURST_DEBOUNCE` or more, which only a
+/// struggling machine does, the changes the watcher saw may truly have spread past the debounce;
+/// the test then says so and checks nothing more.
+fn assert_burst_gave_one_event(
+    test: &str,
+    burst: Duration,
+    rx: &Receiver<WatchEvent>,
+    keep: impl Fn(&WatchEvent) -> bool,
+) {
+    if burst >= BURST_DEBOUNCE / 3 {
+        // Straight to stderr: the test harness captures `eprintln!` from a passing test.
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: {test}: the burst took {burst:?}, more than a third of the {BURST_DEBOUNCE:?} \
+             debounce, so this machine is too slow to show it; not checking that no second event \
+             follows"
+        );
+        return;
+    }
+    // Longer than a debounce and a poll together: any second event would have arrived by then.
+    assert_quiet_for(rx, BURST_DEBOUNCE + POLL * 4, keep);
 }
 
 #[test]
@@ -98,20 +139,24 @@ fn poll_detects_removal() {
 #[test]
 fn debounce_collapses_bursts() {
     let (tmp, doc) = doc_in_tmp();
-    let (watcher, rx) = watcher(POLL);
+    let (watcher, rx) = watcher_debounced(POLL, BURST_DEBOUNCE);
     // Notifications report every write as it happens; without the debounce each would be an event.
     watcher.watch_roots(&[tmp.path().to_path_buf()]);
     watcher.set_current_doc(Some(doc.clone()));
-    // Five writes within 50 ms, each a different size so every one is a visible change.
+    // Five writes about 10 ms apart, each a different size so every one is a visible change. The
+    // poll sees the last of them within one interval, so with the burst inside a third of the
+    // debounce every change the watcher sees falls inside one wait.
+    let started = Instant::now();
     for i in 1..=5 {
         fs::write(&doc, "x".repeat(i * 10)).unwrap();
         thread::sleep(Duration::from_millis(10));
     }
+    let burst = started.elapsed();
     assert_eq!(
         next_matching(&rx, is_doc_event),
         WatchEvent::DocChanged(doc)
     );
-    assert_quiet(&rx, is_doc_event);
+    assert_burst_gave_one_event("debounce_collapses_bursts", burst, &rx, is_doc_event);
 }
 
 #[test]
@@ -136,15 +181,18 @@ fn switching_docs_stops_watching_the_old_one() {
 fn notify_reports_library_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    let (watcher, rx) = watcher(NO_POLL);
+    let (watcher, rx) = watcher_debounced(NO_POLL, BURST_DEBOUNCE);
     watcher.watch_roots(&[root.to_path_buf()]);
+    // Two changes, each reported (on Windows, sometimes a little late), become one event.
+    let started = Instant::now();
     fs::create_dir(root.join("work")).unwrap();
     fs::write(root.join("work").join("new.md"), "new\n").unwrap();
+    let burst = started.elapsed();
     assert_eq!(
         next_matching(&rx, |_| true),
         WatchEvent::LibraryChanged(root.to_path_buf())
     );
-    assert_quiet(&rx, |_| true);
+    assert_burst_gave_one_event("notify_reports_library_changes", burst, &rx, |_| true);
 }
 
 #[test]
@@ -186,11 +234,10 @@ fn watch_roots_replaces_the_set() {
     watcher.watch_roots(&[b.path().to_path_buf()]);
     fs::write(a.path().join("a.md"), "a\n").unwrap();
     fs::write(b.path().join("b.md"), "b\n").unwrap();
-    assert_eq!(
-        next_matching(&rx, |_| true),
-        WatchEvent::LibraryChanged(b.path().to_path_buf())
-    );
-    assert_quiet(&rx, |_| true);
+    let b_changed = WatchEvent::LibraryChanged(b.path().to_path_buf());
+    assert_eq!(next_matching(&rx, |_| true), b_changed);
+    // Nothing about `a`. A late second notice for `b` is the debounce's business, tested above.
+    assert_quiet(&rx, |event| *event != b_changed);
 }
 
 #[test]

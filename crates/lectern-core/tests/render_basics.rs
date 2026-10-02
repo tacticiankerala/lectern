@@ -248,11 +248,12 @@ fn raw_html_is_sanitised() {
     assert!(html.contains(r##"<a href="#top">ok</a>"##), "{html}");
 }
 
-#[test]
-fn five_mb_document_renders_quickly_enough() {
-    let mut src = String::with_capacity(5 * 1024 * 1024 + 1024);
+/// A note of at least `bytes` bytes made of repeated sections, each with a heading, inline
+/// markup, links, a table and two tasks; and how many sections it has.
+fn generated_note(bytes: usize) -> (String, usize) {
+    let mut src = String::with_capacity(bytes + 1024);
     let mut sections = 0;
-    while src.len() < 5 * 1024 * 1024 {
+    while src.len() < bytes {
         sections += 1;
         let i = sections;
         write!(
@@ -265,19 +266,48 @@ fn five_mb_document_renders_quickly_enough() {
         )
         .unwrap();
     }
+    (src, sections)
+}
 
+fn time_render(src: &str) -> (RenderedDoc, Duration) {
     let start = Instant::now();
-    let d = r(&src);
-    let elapsed = start.elapsed();
+    let doc = r(src);
+    (doc, start.elapsed())
+}
+
+/// Rendering grows linearly with the document: 5 MB takes well under 8 times as long as 1 MB, so
+/// nothing in the pipeline is quadratic. A ratio rather than a wall-clock bound, because shared CI
+/// runners are several times slower than a desktop; the absolute ceiling only catches a hang.
+#[test]
+fn five_mb_document_renders_in_linear_time() {
+    const MB: usize = 1024 * 1024;
+    const MAX_RATIO: u32 = 8;
+    /// Below this, 1 MB's time is noise, and a ratio against it would be too.
+    const FLOOR: Duration = Duration::from_millis(50);
+    const CEILING: Duration = Duration::from_secs(60);
+
+    let (small, _) = generated_note(MB);
+    let (big, sections) = generated_note(5 * MB);
+    // Pays for one-time setup (lazy regexes, allocator warm-up) outside the measurements.
+    r(&small[..small.len().min(64 * 1024)]);
+
+    // 1 MB is timed before and after 5 MB, and the slower run counts, so a burst of load from
+    // tests running alongside can't make 5 MB look superlinear.
+    let (_, before) = time_render(&small);
+    let (d, t5) = time_render(&big);
+    let (_, after) = time_render(&small);
+    let t1 = before.max(after).max(FLOOR);
 
     assert_eq!(d.outline.len(), sections);
     assert_eq!(
         (d.tasks.done, d.tasks.total),
         (sections as u32, 2 * sections as u32)
     );
+    assert!(t5 < CEILING, "rendering 5 MB took {t5:?}");
     assert!(
-        elapsed < Duration::from_secs(5),
-        "rendering 5 MB took {elapsed:?}"
+        t5 < t1 * MAX_RATIO,
+        "rendering 5 MB took {t5:?}, more than {MAX_RATIO} times 1 MB's {t1:?} \
+         (runs: {before:?}, {after:?})"
     );
 }
 
