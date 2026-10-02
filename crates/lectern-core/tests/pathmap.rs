@@ -101,14 +101,11 @@ fn map_user_mapping_takes_the_longest_whole_folder_prefix() {
 
 #[test]
 fn map_windows_user_mapping_ignores_case_and_separators() {
-    let m = mapper(&[(r"C:\Old", r"D:\New"), (r"\\nas\Shared\", r"S:\")]);
+    let m = mapper(&[(r"C:\Old", r"D:\New"), (r"\\nas\share\", r"S:\")]);
     for raw in [r"c:\old\a.md", "C:/Old/a.md", r"C:\OLD/a.md"] {
         assert_eq!(m.map(raw, None), unverified(r"D:\New\a.md"), "{raw}");
     }
-    assert_eq!(
-        m.map("//nas/shared/x.md", None),
-        unverified(r"S:\x.md")
-    );
+    assert_eq!(m.map("//NAS/share/x.md", None), unverified(r"S:\x.md"));
     // Whole folders only: `C:\Older` is not under `C:\Old`.
     assert_eq!(m.map(r"c:\older\a.md", None), unverified(r"c:\older\a.md"));
 }
@@ -143,15 +140,15 @@ fn map_windows_paths_as_written() {
         unverified(r"C:\Users\a.txt")
     );
     assert_eq!(
-        m.map(r"\\nas\Shared\x.md", None),
-        unverified(r"\\nas\Shared\x.md")
+        m.map(r"\\nas\share\x.md", None),
+        unverified(r"\\nas\share\x.md")
     );
 }
 
 #[test]
 fn map_relative_paths_is_unresolved() {
     let m = PathMapper {
-        wsl_distro: Some("Ubuntu-26.04".into()),
+        wsl_distro: Some("Ubuntu".into()),
         ..PathMapper::default()
     };
     assert_eq!(m.map("notes/a.md", None), Mapped::Unresolved);
@@ -220,12 +217,12 @@ fn map_user_mapping_onto_an_indexed_file_is_verified() {
 #[test]
 fn map_wsl_fallback() {
     let m = PathMapper {
-        wsl_distro: Some("Ubuntu-26.04".into()),
+        wsl_distro: Some("Ubuntu".into()),
         ..PathMapper::default()
     };
     assert_eq!(
         m.map("/home/dev/projects/app/k.rb", None),
-        unverified(r"\\wsl.localhost\Ubuntu-26.04\home\dev\projects\app\k.rb")
+        unverified(r"\\wsl.localhost\Ubuntu\home\dev\projects\app\k.rb")
     );
 }
 
@@ -240,10 +237,7 @@ fn map_without_wsl_is_unresolved() {
 #[test]
 fn unc_hosts_are_read_from_either_separator_and_verbatim_paths() {
     use lectern_core::library::pathmap::{unc_host, unc_host_trusted};
-    assert_eq!(
-        unc_host(r"\\nas\Shared\a.md").as_deref(),
-        Some("nas")
-    );
+    assert_eq!(unc_host(r"\\NAS\Share\a.md").as_deref(), Some("nas"));
     assert_eq!(unc_host("//server/share/a.md").as_deref(), Some("server"));
     assert_eq!(
         unc_host(r"\\?\UNC\Server\share\a").as_deref(),
@@ -255,9 +249,9 @@ fn unc_hosts_are_read_from_either_separator_and_verbatim_paths() {
     assert_eq!(unc_host("/home/me/a.md"), None);
     assert_eq!(unc_host(r"\\"), None);
     let trusted = ["nas".to_owned(), "wsl.localhost".to_owned()];
-    assert!(unc_host_trusted(r"\\nas\Shared\x.png", &trusted));
+    assert!(unc_host_trusted(r"\\NAS\Share\x.png", &trusted));
     assert!(unc_host_trusted(r"\\wsl.localhost\Ubuntu\a.md", &trusted));
-    assert!(unc_host_trusted(r"S:\Agents\x.png", &trusted));
+    assert!(unc_host_trusted(r"S:\Notes\x.png", &trusted));
     assert!(!unc_host_trusted(r"\\attacker\s\x.png", &trusted));
     assert!(!unc_host_trusted(r"\\?\UNC\attacker\s\x.png", &trusted));
     assert!(!unc_host_trusted(r"\\.\pipe\x", &trusted));

@@ -250,7 +250,7 @@ mod tests {
         Trust::new(&Settings {
             library_roots: vec![
                 r"S:\Notes\My Vault\dev".to_owned(),
-                r"\\nas\Shared\notes".to_owned(),
+                r"\\nas\share\notes".to_owned(),
             ],
             ..Settings::default()
         })
@@ -258,7 +258,7 @@ mod tests {
 
     fn scope() -> AssetScope {
         let mut scope = AssetScope::default();
-        scope.set_roots(&[r"S:\Notes\My Vault\dev", r"\\nas\Shared\notes"]);
+        scope.set_roots(&[r"S:\Notes\My Vault\dev", r"\\nas\share\notes"]);
         scope.add_folder(Path::new(r"C:\Users\me\Downloads\trip"));
         scope
     }
@@ -277,10 +277,10 @@ mod tests {
             })
         );
         assert_eq!(
-            check(r"s:/Notes/My Vault/dev/a.svg").map(|f| f.content_type),
+            check(r"s:/notes/my vault/dev/a.svg").map(|f| f.content_type),
             Ok("image/svg+xml")
         );
-        assert!(check(r"\\nas\Shared\notes\pics\a.jpg").is_ok());
+        assert!(check(r"\\NAS\Share\notes\pics\a.jpg").is_ok());
         assert!(check(r"C:\Users\me\Downloads\trip\photos\day1.webp").is_ok());
         // `.` and a `..` that stays inside are fine.
         assert_eq!(
@@ -395,11 +395,9 @@ mod tests {
                 body: vec![1, 2, 3],
             }
         );
-        let missing = serve(
-            "S%3A%5CNotes%5CMy%20Vault%5Cdev%5Cgone.png",
-            check,
-            |_| Err(io::Error::from(io::ErrorKind::NotFound)),
-        );
+        let missing = serve("S%3A%5CNotes%5CMy%20Vault%5Cdev%5Cgone.png", check, |_| {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        });
         assert_eq!(missing, AssetResponse::empty(404));
     }
 }

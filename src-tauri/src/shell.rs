@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use lectern_core::ipc::EditorPref;
+use lectern_core::library::MARKDOWN_EXTENSIONS;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -81,7 +82,7 @@ pub fn file_kind(path: &str) -> FileKind {
         return FileKind::Other;
     };
     let is = |list: &[&str]| list.iter().any(|e| ext.eq_ignore_ascii_case(e));
-    if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") {
+    if is(MARKDOWN_EXTENSIONS) {
         FileKind::Markdown
     } else if is(CODE) {
         FileKind::Code
@@ -338,8 +339,8 @@ mod tests {
             r"C:\x\a.png",
             "C:/x/a.png",
             r"S:\Notes\My Vault\dev\a b.md",
-            r"\\nas\Shared\a.pdf",
-            r"\\wsl.localhost\Ubuntu-26.04\home\me\a.md",
+            r"\\nas\share\a.pdf",
+            r"\\wsl.localhost\Ubuntu\home\me\a.md",
             r"C:\notes\résumé notes.md",
         ] {
             assert_eq!(local_path(good), Some(good), "{good}");
@@ -371,6 +372,8 @@ mod tests {
     fn files_are_sorted_into_markdown_code_viewable_and_other() {
         assert_eq!(file_kind(r"C:\x\a.md"), FileKind::Markdown);
         assert_eq!(file_kind(r"C:\x\a.MARKDOWN"), FileKind::Markdown);
+        assert_eq!(file_kind(r"C:\x\a.mdown"), FileKind::Markdown);
+        assert_eq!(file_kind(r"C:\x\a.MKD"), FileKind::Markdown);
         assert_eq!(file_kind(r"C:\x\a.js"), FileKind::Code);
         assert_eq!(file_kind(r"C:\x\a.py"), FileKind::Code);
         assert_eq!(file_kind(r"C:\x\.env"), FileKind::Code);
@@ -467,10 +470,10 @@ mod tests {
             command: r#""C:\Tools\ed.exe" +{line} "{path}""#.to_owned(),
         };
         assert_eq!(
-            editor_launch(&pref, r"S:\My Vault\a b.rb", 17, None).unwrap(),
+            editor_launch(&pref, r"S:\Notes\My Vault\a b.rb", 17, None).unwrap(),
             EditorLaunch::Run {
                 program: r"C:\Tools\ed.exe".to_owned(),
-                args: vec!["+17".to_owned(), r"S:\My Vault\a b.rb".to_owned()],
+                args: vec!["+17".to_owned(), r"S:\Notes\My Vault\a b.rb".to_owned()],
             }
         );
     }

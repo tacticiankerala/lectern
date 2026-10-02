@@ -124,6 +124,7 @@ fn builder() -> Builder<'static> {
 /// app, is dropped: a `srcset` goes, and an `<img>` keeps only its alt text, marked
 /// `img-blocked`. A raw link into the app becomes a broken link.
 pub(crate) fn clean(html: &str, images: ImageSources) -> String {
+    let html = encode_drive_srcs(html);
     let mut builder = builder();
     builder.attribute_filter(move |element, attribute, value| {
         let resolved = match (element, attribute) {
@@ -147,7 +148,121 @@ pub(crate) fn clean(html: &str, images: ImageSources) -> String {
             ImageSrc::Blocked => None,
         }
     });
-    lazy_images(builder.clean(html).to_string())
+    lazy_images(builder.clean(&html).to_string())
+}
+
+/// `html` with the drive colon of each raw `<img src>` percent-encoded (`C:/x.png` becomes
+/// `C%3A/x.png`), as `format_image` writes Markdown images. ammonia reads `C:` as a URL scheme and
+/// drops the attribute before the filter sees it; encoded, it stays a relative path, which
+/// `ImageSources::resolve` decodes and judges like any other, trust checks and all. Only a drive
+/// letter, a colon and a separator are touched, so no other scheme gets through.
+///
+/// comrak escapes every `<` in text, so each one left starts a tag. Tags are read as the HTML
+/// tokenizer reads them, quoted values and all, so an `<img` inside another tag's attribute is
+/// never taken for an image; like the parser, only an element's first `src` counts.
+fn encode_drive_srcs(html: &str) -> Cow<'_, str> {
+    let b = html.as_bytes();
+    if !b
+        .windows(4)
+        .any(|w| w[0] == b'<' && w[1..].eq_ignore_ascii_case(b"img"))
+    {
+        return Cow::Borrowed(html);
+    }
+    let mut colons = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = html[at..].find('<') {
+        let name_start = at + offset + 1;
+        let name_end = name_start
+            + b[name_start..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .count();
+        if name_end == name_start {
+            at = name_start;
+            continue;
+        }
+        let is_img = html[name_start..name_end].eq_ignore_ascii_case("img");
+        let mut seen_src = false;
+        at = read_attributes(b, name_end, |name, value_start, value| {
+            if !is_img || seen_src || !name.eq_ignore_ascii_case(b"src") {
+                return;
+            }
+            seen_src = true;
+            let lead = value.iter().take_while(|c| c.is_ascii_whitespace()).count();
+            if let [drive, b':', b'/' | b'\\', ..] = value[lead..] {
+                if drive.is_ascii_alphabetic() {
+                    colons.push(value_start + lead + 1);
+                }
+            }
+        });
+    }
+    if colons.is_empty() {
+        return Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len() + 2 * colons.len());
+    let mut copied = 0;
+    for colon in colons {
+        out.push_str(&html[copied..colon]);
+        out.push_str("%3A");
+        copied = colon + 1;
+    }
+    out.push_str(&html[copied..]);
+    Cow::Owned(out)
+}
+
+/// Reads a start tag's attributes from `at` (just past its name) to the end of the tag, calling
+/// `attribute` with each one's name, where its value starts, and the value (empty without one).
+/// Returns where the tag ends: past its `>`, or the end of `b`.
+fn read_attributes(
+    b: &[u8],
+    mut at: usize,
+    mut attribute: impl FnMut(&[u8], usize, &[u8]),
+) -> usize {
+    let skip = |at: &mut usize, skip: &dyn Fn(u8) -> bool| {
+        while *at < b.len() && skip(b[*at]) {
+            *at += 1;
+        }
+    };
+    loop {
+        skip(&mut at, &|c| c.is_ascii_whitespace() || c == b'/');
+        if at >= b.len() {
+            return at;
+        }
+        if b[at] == b'>' {
+            return at + 1;
+        }
+        // A name runs to whitespace, `/`, `>` or `=`; a leading `=` is part of it.
+        let name_start = at;
+        at += 1;
+        skip(&mut at, &|c| {
+            !(c.is_ascii_whitespace() || matches!(c, b'/' | b'>' | b'='))
+        });
+        let name = &b[name_start..at];
+        skip(&mut at, &|c| c.is_ascii_whitespace());
+        if b.get(at) != Some(&b'=') {
+            attribute(name, at, &[]);
+            continue;
+        }
+        at += 1;
+        skip(&mut at, &|c| c.is_ascii_whitespace());
+        let (value_start, value_end) = match b.get(at) {
+            Some(&quote @ (b'"' | b'\'')) => {
+                let start = at + 1;
+                let end = b[start..]
+                    .iter()
+                    .position(|&c| c == quote)
+                    .map_or(b.len(), |i| start + i);
+                at = (end + 1).min(b.len());
+                (start, end)
+            }
+            _ => {
+                let start = at;
+                skip(&mut at, &|c| !(c.is_ascii_whitespace() || c == b'>'));
+                (start, at)
+            }
+        };
+        attribute(name, value_start, &b[value_start..value_end]);
+    }
 }
 
 /// Adds `loading="lazy"` and `decoding="async"` to each `<img>` that doesn't set them, turns a
@@ -306,5 +421,26 @@ mod tests {
             lazy_images("<p>&lt;img&gt;</p>".to_owned()),
             "<p>&lt;img&gt;</p>"
         );
+    }
+
+    #[test]
+    fn only_drive_colons_in_an_images_first_src_are_encoded() {
+        assert_eq!(
+            encode_drive_srcs(r#"<p><img alt=">" src=c:\x.png><Img SRC = 'D:/y.png'></p>"#),
+            r#"<p><img alt=">" src=c%3A\x.png><Img SRC = 'D%3A/y.png'></p>"#
+        );
+        for untouched in [
+            r#"<img src="javascript:alert(1)">"#,
+            r#"<img src="ab:/x.png"><img src="C:x.png"><img src="1:/x.png">"#,
+            r#"<img data-src="C:/x.png"><a href="C:/x.png"><imgx src="C:/x.png">"#,
+            r#"<img src="x.png" src="C:/x.png">"#,
+            r#"<div title="<img src='C:/x.png'>">"#,
+            "<p>&lt;img src=\"C:/x.png\"&gt;</p>",
+        ] {
+            assert!(
+                matches!(encode_drive_srcs(untouched), Cow::Borrowed(_)),
+                "{untouched}"
+            );
+        }
     }
 }

@@ -18,7 +18,7 @@ pub struct Trust {
     /// Hosts of the configured roots and mapping targets, and WSL's.
     configured: HashSet<String>,
     /// Each configured root's canonical host, by the root's path key, learnt once the root has
-    /// answered (`S:\…` turns out to be `\\nas\Shared\…`).
+    /// answered (`S:\…` turns out to be `\\nas\share\…`).
     canonical: HashMap<String, String>,
     /// Hosts of files the user launched Lectern with, for this session.
     opened: HashSet<String>,
@@ -133,10 +133,10 @@ mod tests {
     #[test]
     fn roots_mappings_and_wsl_are_trusted_and_nothing_else() {
         let trust = Trust::new(&settings(
-            &[r"\\nas\Shared\dev", r"S:\Notes\My Vault\dev"],
+            &[r"\\NAS\Share\dev", r"S:\Notes\My Vault\dev"],
             &[r"\\nas2\notes"],
         ));
-        assert!(trust.allows(r"\\nas\shared\dev\a.md"));
+        assert!(trust.allows(r"\\nas\share\dev\a.md"));
         assert!(trust.allows(r"\\NAS2\notes\b.png"));
         assert!(trust.allows(r"\\wsl.localhost\Ubuntu\home\a.md"));
         assert!(trust.allows(r"\\wsl$\Ubuntu\home\a.md"));
@@ -151,13 +151,13 @@ mod tests {
     fn a_roots_canonical_host_is_trusted_until_the_root_goes() {
         let mut trust = Trust::new(&settings(&[r"S:\Notes\My Vault\dev"], &[]));
         let root = Path::new(r"S:\Notes\My Vault\dev");
-        assert!(!trust.allows(r"\\nas\Shared\x.png"));
-        let canonical = PathBuf::from(r"\\?\UNC\nas\Shared\Notes\My Vault\dev");
+        assert!(!trust.allows(r"\\nas\share\x.png"));
+        let canonical = PathBuf::from(r"\\?\UNC\nas\share\Notes\My Vault\dev");
         assert!(trust.learn_root(root, &canonical));
         assert!(!trust.learn_root(root, &canonical));
-        assert!(trust.allows(r"\\nas\Shared\x.png"));
+        assert!(trust.allows(r"\\nas\share\x.png"));
         assert!(trust.configure(&settings(&[], &[])));
-        assert!(!trust.allows(r"\\nas\Shared\x.png"));
+        assert!(!trust.allows(r"\\nas\share\x.png"));
     }
 
     #[test]

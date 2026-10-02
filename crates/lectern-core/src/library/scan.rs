@@ -15,22 +15,42 @@ use jwalk::{DirEntry, Parallelism, WalkDirGeneric};
 use rayon::prelude::*;
 
 use super::ignore::is_ignored;
-use super::{join_rel, FileEntry, RootIndex};
+use super::{is_markdown, join_rel, FileEntry, RootIndex};
 use crate::frontmatter::{parse_frontmatter, Frontmatter, PropValue};
 
 /// How much of each Markdown file `read_heads` reads.
 const HEAD_BYTES: usize = 4096;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
+/// The file cap for an ad-hoc root: the folder of a document opened outside every library root,
+/// which may be any folder at all (Downloads, a drive's root).
+pub const ADHOC_MAX_FILES: usize = 20_000;
+/// The file cap for a library root the user added: only a safety net. Every extension is indexed,
+/// so a root holding code needs room well past its notes.
+pub const ROOT_MAX_FILES: usize = 200_000;
+
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
-    /// The walk stops after recording this many files.
+    /// The walk stops after recording this many files, and marks the index truncated.
     pub max_files: usize,
 }
 
+impl ScanOptions {
+    /// The options for a root: the ad-hoc cap for an ad-hoc root, else the library root cap.
+    pub fn for_root(adhoc: bool) -> Self {
+        let max_files = if adhoc {
+            ADHOC_MAX_FILES
+        } else {
+            ROOT_MAX_FILES
+        };
+        Self { max_files }
+    }
+}
+
+/// A library root's options.
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { max_files: 20_000 }
+        Self::for_root(false)
     }
 }
 
@@ -45,9 +65,10 @@ struct Stat {
 type Walk = WalkDirGeneric<((), Option<Stat>)>;
 type WalkEntry = DirEntry<((), Option<Stat>)>;
 
-/// Walks `root` and records every file that isn't ignored, up to `opts.max_files`. Reads no file
-/// contents. Fails when the root is missing, isn't a directory or can't be listed; errors below
-/// the root (an unreadable folder, a file deleted mid-walk) skip that entry.
+/// Walks `root` and records every file that isn't ignored, up to `opts.max_files`; reaching the cap
+/// marks the index `truncated`. Reads no file contents. Fails when the root is missing, isn't a
+/// directory or can't be listed; errors below the root (an unreadable folder, a file deleted
+/// mid-walk) skip that entry.
 pub fn scan_root(root: &Path, opts: &ScanOptions) -> io::Result<RootIndex> {
     // jwalk's own read of the root is the only one, so a root that vanishes or disconnects is
     // reported by the walk itself rather than slipping in after a separate check.
@@ -72,11 +93,10 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> io::Result<RootIndex> {
             }
         });
     let entries = walk.into_iter().map(|entry| file_of(root, entry));
-    Ok(RootIndex::new(
-        root.to_path_buf(),
-        collect_files(entries, opts.max_files)?,
-        unix_millis(SystemTime::now()),
-    ))
+    let (files, truncated) = collect_files(entries, opts.max_files)?;
+    let mut index = RootIndex::new(root.to_path_buf(), files, unix_millis(SystemTime::now()));
+    index.truncated = truncated;
+    Ok(index)
 }
 
 /// The file an entry records, `None` for the root, directories and skipped entries. Errors for
@@ -111,19 +131,20 @@ fn file_of(root: &Path, entry: jwalk::Result<WalkEntry>) -> io::Result<Option<Fi
 }
 
 /// Gathers files until `max_files`, pulling nothing more once the cap is reached. Dropping the
-/// walk then stops jwalk's workers, which may have read only a few folders ahead.
+/// walk then stops jwalk's workers, which may have read only a few folders ahead. True alongside
+/// the files when the cap was reached: there may be more that weren't recorded.
 fn collect_files(
     entries: impl IntoIterator<Item = io::Result<Option<FileEntry>>>,
     max_files: usize,
-) -> io::Result<Vec<FileEntry>> {
+) -> io::Result<(Vec<FileEntry>, bool)> {
     let mut files = Vec::new();
     for entry in entries {
         files.extend(entry?);
         if files.len() >= max_files {
-            break;
+            return Ok((files, true));
         }
     }
-    Ok(files)
+    Ok((files, false))
 }
 
 fn io_error(e: &jwalk::Error) -> io::Error {
@@ -156,13 +177,6 @@ fn rel_path(root: &Path, entry: &WalkEntry) -> Option<String> {
     }
     rel.push_str(entry.file_name.to_str()?);
     Some(rel)
-}
-
-pub(crate) fn is_markdown(rel: &str) -> bool {
-    Path::new(rel)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
 
 fn unix_millis(t: SystemTime) -> i64 {
@@ -321,15 +335,24 @@ mod tests {
 
     #[test]
     fn collect_stops_pulling_once_the_cap_is_reached() {
-        let files = collect_files(walk_of(&["a.md"]), 1).unwrap();
-        assert_eq!(files.len(), 1);
-        let files = collect_files(walk_of(&["a.md", "b.md", "c.md"]), 3).unwrap();
-        assert_eq!(files.len(), 3);
+        let (files, truncated) = collect_files(walk_of(&["a.md"]), 1).unwrap();
+        assert_eq!((files.len(), truncated), (1, true));
+        let (files, truncated) = collect_files(walk_of(&["a.md", "b.md", "c.md"]), 3).unwrap();
+        assert_eq!((files.len(), truncated), (3, true));
     }
 
     #[test]
     fn collect_with_no_room_stops_after_the_root() {
-        assert!(collect_files(walk_of(&[]), 0).unwrap().is_empty());
+        let (files, truncated) = collect_files(walk_of(&[]), 0).unwrap();
+        assert!(files.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn collect_below_the_cap_is_not_truncated() {
+        let entries = [Ok(None), Ok(Some(file("a.md"))), Ok(Some(file("b.md")))];
+        let (files, truncated) = collect_files(entries, 3).unwrap();
+        assert_eq!((files.len(), truncated), (2, false));
     }
 
     #[test]
@@ -337,7 +360,7 @@ mod tests {
         let lost = io::Error::new(io::ErrorKind::NotFound, "gone");
         let err = collect_files([Err(lost)], 10).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        let files = collect_files([Ok(None), Ok(Some(file("a.md"))), Ok(None)], 10).unwrap();
+        let (files, _) = collect_files([Ok(None), Ok(Some(file("a.md"))), Ok(None)], 10).unwrap();
         assert_eq!(files.len(), 1);
     }
 }

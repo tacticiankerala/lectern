@@ -30,6 +30,8 @@ pub(super) struct Root {
     pub(super) gen: u64,
     pub(super) state: RootState,
     pub(super) tree: Option<TreeNode>,
+    /// Its index stopped at the scan's file cap.
+    pub(super) truncated: bool,
     pub(super) scanning: bool,
     /// A change came in during the scan, so it runs again.
     pub(super) rescan: bool,
@@ -59,6 +61,7 @@ impl Library {
             gen: self.next_gen,
             state: RootState::Scanning,
             tree: None,
+            truncated: false,
             scanning: false,
             rescan: false,
             needs_watch: false,
@@ -112,6 +115,7 @@ impl Library {
                     name: root_name(&r.path),
                     state: r.state.clone(),
                     tree: r.tree.clone(),
+                    truncated: r.truncated,
                 })
                 .collect(),
         }
@@ -200,8 +204,6 @@ impl AppState {
         Ok(self.library_payload())
     }
 
-    /// Adds a folder from the command line or a second launch as a library root, without
-    /// waiting for its scan.
     /// Adds a folder from the command line or a second launch as a library root, without
     /// waiting for its scan, unless it is already a root, sits in one or holds one.
     pub(super) fn add_folder(self: &Arc<Self>, folder: &Path) {
@@ -385,9 +387,6 @@ impl AppState {
         self.watch.roots(roots);
     }
 
-    /// Lets the asset protocol serve files below `dir`, for images in documents. Tauri
-    /// canonicalises `dir` (`S:\…` becomes `\\?\UNC\server\share\…`, the form requests are
-    /// matched in), so call it only once the folder has answered, and never under a lock.
     /// Takes the root's "needs watching" mark; true when it had one.
     pub(super) fn take_needs_watch(&self, root: &Path, gen: u64) -> bool {
         lock(&self.library)
@@ -408,6 +407,7 @@ pub(super) fn folder_becomes_root(folder: &Path, roots: &[PathBuf]) -> bool {
 mod tests {
     use super::*;
     use crate::state::test_support::*;
+    use lectern_core::library::RootIndex;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -476,11 +476,11 @@ mod tests {
             &roots
         ));
         assert!(!folder_becomes_root(
-            Path::new(r"s:\Notes\My Vault\DEV\"),
+            Path::new(r"s:\notes\my vault\DEV\"),
             &roots
         ));
-        assert!(!folder_becomes_root(Path::new(r"S:\Agents"), &roots));
-        assert!(folder_becomes_root(Path::new(r"S:\Agents"), &[]));
+        assert!(!folder_becomes_root(Path::new(r"S:\Notes"), &roots));
+        assert!(folder_becomes_root(Path::new(r"S:\Notes"), &[]));
     }
 
     #[test]
@@ -522,6 +522,25 @@ mod tests {
             library.roots[0].state,
             RootState::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn a_root_indexed_only_up_to_the_cap_says_so() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let root = f.dir.folder("vault");
+        f.dir.file("vault/a.md", "# A");
+        f.state.add_root(&path_string(&root)).unwrap();
+        wait_until("the root is indexed", || settled(&f, &root));
+        assert!(!f.state.library_payload().roots[0].truncated);
+        let gen = lock(&f.state.library).find_mut(&root).unwrap().gen;
+        let mut capped = RootIndex::new(root.clone(), Vec::new(), 0);
+        capped.truncated = true;
+        f.state.install(&root, gen, capped, RootState::Ready);
+        assert!(f.state.library_payload().roots[0].truncated);
+        let told = lock(&f.host.events)
+            .iter()
+            .any(|e| matches!(e, UiEvent::LibraryUpdated(library) if library.roots[0].truncated));
+        assert!(told, "the UI heard nothing");
     }
 
     #[test]

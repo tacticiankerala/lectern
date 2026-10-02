@@ -39,11 +39,11 @@ fn equals_and_space_forms() {
         "--perf-log=C:\\t\\p.jsonl",
         "--perf-t0",
         "42",
-        "S:\\My Vault\\notes.md",
+        "S:\\Notes\\My Vault\\notes.md",
     ]);
     assert_eq!(a.perf_log, Some(PathBuf::from("C:\\t\\p.jsonl")));
     assert_eq!(a.perf_t0_ms, Some(42.0));
-    assert_eq!(a.path, Some(PathBuf::from("S:\\My Vault\\notes.md")));
+    assert_eq!(a.path, Some(PathBuf::from("S:\\Notes\\My Vault\\notes.md")));
     assert!(!a.exit_after_paint);
 }
 
@@ -59,12 +59,12 @@ fn unknown_flags_with_values_are_ignored() {
         "lectern.exe",
         "--remote-debugging-port=9222",
         "--enable-features=msWebView2",
-        "\\\\nas\\Shared\\résumé.md",
+        "\\\\nas\\share\\résumé.md",
     ]);
     assert_eq!(
         a,
         Args {
-            path: Some(PathBuf::from("\\\\nas\\Shared\\résumé.md")),
+            path: Some(PathBuf::from("\\\\nas\\share\\résumé.md")),
             ..Args::default()
         }
     );

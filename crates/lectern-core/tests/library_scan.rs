@@ -6,7 +6,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lectern_core::library::ignore::is_ignored;
-use lectern_core::library::scan::{probe_root, probe_with, read_heads, scan_root, ScanOptions};
+use lectern_core::library::scan::{
+    probe_root, probe_with, read_heads, scan_root, ScanOptions, ADHOC_MAX_FILES, ROOT_MAX_FILES,
+};
 use lectern_core::library::snapshot::{load_snapshot, save_snapshot, snapshot_path};
 use lectern_core::library::{FileEntry, LibraryIndex, RootIndex};
 
@@ -122,14 +124,21 @@ fn scan_prunes_ignored_dirs_and_keeps_hidden_files() {
 }
 
 #[test]
-fn scan_treats_md_and_markdown_extensions_case_insensitively() {
+fn scan_treats_every_markdown_extension_case_insensitively() {
     let (_tmp, vault) = common::vault_copy();
-    fs::write(vault.join("LOUD.MD"), "# loud\n").unwrap();
-    fs::write(vault.join("long.markdown"), "# long\n").unwrap();
-    fs::write(vault.join("plain.txt"), "plain\n").unwrap();
+    for (name, text) in [
+        ("LOUD.MD", "# loud\n"),
+        ("long.markdown", "# long\n"),
+        ("old.mdown", "# old\n"),
+        ("SHORT.MKD", "# short\n"),
+        ("plain.txt", "plain\n"),
+    ] {
+        fs::write(vault.join(name), text).unwrap();
+    }
     let r = scan(&vault);
-    assert!(entry(&r, "LOUD.MD").is_md);
-    assert!(entry(&r, "long.markdown").is_md);
+    for md in ["LOUD.MD", "long.markdown", "old.mdown", "SHORT.MKD"] {
+        assert!(entry(&r, md).is_md, "{md}");
+    }
     assert!(!entry(&r, "plain.txt").is_md);
 }
 
@@ -197,8 +206,33 @@ fn scan_errs_on_an_unlistable_root_but_skips_unlistable_folders() {
 }
 
 #[test]
-fn scan_default_cap_is_20_000() {
-    assert_eq!(ScanOptions::default().max_files, 20_000);
+fn ad_hoc_roots_are_capped_at_20_000_files_and_library_roots_at_200_000() {
+    assert_eq!(ADHOC_MAX_FILES, 20_000);
+    assert_eq!(ROOT_MAX_FILES, 200_000);
+    assert_eq!(ScanOptions::for_root(true).max_files, ADHOC_MAX_FILES);
+    assert_eq!(ScanOptions::for_root(false).max_files, ROOT_MAX_FILES);
+    assert_eq!(ScanOptions::default().max_files, ROOT_MAX_FILES);
+}
+
+/// A code-heavy folder past the ad-hoc cap: as an ad-hoc root it stops at 20,000 files and says
+/// so; as a library root every file is indexed.
+#[test]
+fn a_library_root_indexes_past_the_ad_hoc_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let total = ADHOC_MAX_FILES + 1;
+    for dir in 0..10 {
+        fs::create_dir(root.join(format!("src{dir}"))).unwrap();
+    }
+    for n in 0..total {
+        fs::File::create(root.join(format!("src{}/f{n}.rs", n % 10))).unwrap();
+    }
+    let adhoc = scan_root(root, &ScanOptions::for_root(true)).unwrap();
+    assert_eq!(adhoc.files.len(), ADHOC_MAX_FILES);
+    assert!(adhoc.truncated);
+    let library = scan_root(root, &ScanOptions::for_root(false)).unwrap();
+    assert_eq!(library.files.len(), total);
+    assert!(!library.truncated);
 }
 
 #[test]
@@ -206,6 +240,21 @@ fn max_files_cap() {
     let (_tmp, vault) = common::vault_copy();
     let r = scan_root(&vault, &ScanOptions { max_files: 3 }).unwrap();
     assert_eq!(r.files.len(), 3);
+    assert!(r.truncated);
+    assert!(!scan(&vault).truncated);
+}
+
+#[test]
+fn a_truncated_index_stays_truncated_in_its_snapshot() {
+    let (tmp, vault) = common::vault_copy();
+    let dir = tmp.path().join("snapshots");
+    let r = scan_root(&vault, &ScanOptions { max_files: 3 }).unwrap();
+    save_snapshot(&dir, &r).unwrap();
+    assert!(load_snapshot(&dir, &vault).unwrap().truncated);
+    // A snapshot from before the flag existed loads as complete.
+    let older = serde_json::json!({ "root": vault, "files": [], "scanned_at_ms": 1 });
+    fs::write(snapshot_path(&dir, &vault), older.to_string()).unwrap();
+    assert!(!load_snapshot(&dir, &vault).unwrap().truncated);
 }
 
 #[test]

@@ -303,6 +303,7 @@ impl AppState {
             *write(&self.mapper) = Arc::new(mapper_for(&settings, self.wsl_distro.clone()));
             self.reconfigure_trust();
             self.index_changed(None);
+            self.refresh_current_now();
         }
         if roots_changed {
             for (root, gen) in self.sync_roots() {
@@ -558,6 +559,38 @@ mod tests {
         assert!(trusted.contains("lectern-mapped"), "{trusted}");
     }
 
+    /// A new mapping changes where the open document's links point, so it is rendered again even
+    /// though the index already covers it and nothing marked it stale.
+    #[test]
+    fn changing_the_path_mappings_refreshes_the_open_document() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let doc = dir.file("vault/a.md", "[x](/home/me/shared/x.md)\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.state.window_shown();
+        wait_until("the root is indexed", || settled(&f, &root));
+        let html = |f: &Fixture| match f.state.open_document(&path_string(&doc)) {
+            OpenResult::Ok { doc } => doc.html,
+            OpenResult::Err { error } => panic!("{}", error.message),
+        };
+        assert!(html(&f).contains(r#"data-target="/home/me/shared/x.md""#));
+        assert!(!current(&f).1, "the document is stale");
+        let before = f.host.doc_changes();
+        f.state.set_settings(SettingsPatch {
+            path_mappings: Some(vec![lectern_core::ipc::PathMapping {
+                from: "/home/me/shared".to_owned(),
+                to: r"S:\Notes\My Vault".to_owned(),
+            }]),
+            ..SettingsPatch::default()
+        });
+        assert_eq!(f.host.doc_changes(), before + 1);
+        let mapped = html(&f);
+        assert!(
+            mapped.contains(r#"data-target="S:\Notes\My Vault\x.md""#),
+            "{mapped}"
+        );
+    }
+
     #[test]
     fn images_under_a_root_are_served_from_the_start() {
         let dir = TempDir::new();
@@ -579,6 +612,32 @@ mod tests {
                 .status,
             404
         );
+    }
+
+    /// A raw `<img>` naming an image by its drive path loads through the image protocol when the
+    /// image lies under a library root.
+    #[cfg(windows)]
+    #[test]
+    fn raw_html_images_by_drive_path_load_under_a_root() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let logo = dir.file("vault/img/logo.png", "png bytes");
+        let src = path_string(&logo).replace('\\', "/");
+        let doc = dir.file(
+            "vault/notes/doc.md",
+            &format!("<img src=\"{src}\" alt=\"logo\">\n"),
+        );
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let html = match f.state.open_document(&path_string(&doc)) {
+            OpenResult::Ok { doc } => doc.html,
+            OpenResult::Err { error } => panic!("{}", error.message),
+        };
+        let logo = std::path::Path::new(&src);
+        let url = asset_url(crate::state::doc::ASSET_BASE, logo);
+        assert!(html.contains(&format!(r#"src="{url}""#)), "{html}");
+        let response = f.state.serve_asset(&asset_url("", logo));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"png bytes");
     }
 
     #[test]

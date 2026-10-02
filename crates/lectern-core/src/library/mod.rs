@@ -12,12 +12,30 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// The extensions of the files Lectern treats as Markdown notes, the ones its installer
+/// registers. Scanning, link routing and the app's file kinds read this list, and the UI's file
+/// picker gets it from `ui/src/generated/markdown-extensions.ts`, which the core tests write.
+pub const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+
+/// Whether `path` names a Markdown file: its extension is one of `MARKDOWN_EXTENSIONS`, in any
+/// letter case.
+pub fn is_markdown(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            MARKDOWN_EXTENSIONS
+                .iter()
+                .any(|md| ext.eq_ignore_ascii_case(md))
+        })
+}
+
 /// One file under a library root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     /// The path relative to the root, always `/`-separated.
     pub rel: String,
-    /// A `.md` or `.markdown` file.
+    /// A Markdown file (see `MARKDOWN_EXTENSIONS`).
     pub is_md: bool,
     /// Last modified, in milliseconds since the Unix epoch.
     pub mtime_ms: i64,
@@ -35,6 +53,9 @@ pub struct RootIndex {
     pub files: Vec<FileEntry>,
     /// When the walk ran, in milliseconds since the Unix epoch.
     pub scanned_at_ms: i64,
+    /// The walk stopped at its file cap, so files past it are missing from the index.
+    #[serde(default)]
+    pub truncated: bool,
     /// Built by `finalize`; never persisted.
     #[serde(skip)]
     lookup: Lookup,
@@ -62,6 +83,7 @@ impl RootIndex {
             root,
             files,
             scanned_at_ms,
+            truncated: false,
             lookup: Lookup::default(),
         };
         index.finalize();

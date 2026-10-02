@@ -19,7 +19,7 @@ fontSize: number,
  */
 lineHeight: number, 
 /**
- * 50–120 characters, or full width.
+ * 60–160 characters, or full width.
  */
 measure: Measure, codeWrap: boolean, libraryVisible: boolean, outlineVisible: boolean, libraryWidth: number, outlineWidth: number, libraryRoots: Array<string>, pathMappings: Array<PathMapping>, editor: EditorPref, autoUpdate: boolean, 
 /**

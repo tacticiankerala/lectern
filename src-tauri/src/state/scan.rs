@@ -75,7 +75,7 @@ impl AppState {
             if self.take_needs_watch(root, gen) {
                 self.watch_user_roots();
             }
-            // Its canonical host (`S:\…` is `\\nas\Shared\…`) is the user's too. The probe
+            // Its canonical host (`S:\…` is `\\nas\share\…`) is the user's too. The probe
             // proved the share answers, so this won't stall.
             if let Ok(canonical) = fs::canonicalize(root) {
                 if write(&self.trust).learn_root(root, &canonical) {
@@ -84,7 +84,8 @@ impl AppState {
             }
         }
         let started = Instant::now();
-        let mut index = match scan_root(root, &ScanOptions::default()) {
+        let opts = ScanOptions::for_root(adhoc);
+        let mut index = match scan_root(root, &opts) {
             Ok(index) => index,
             Err(e) => {
                 log::warn!("couldn't scan {}: {e}", root.display());
@@ -95,6 +96,13 @@ impl AppState {
             }
         };
         let walked = started.elapsed();
+        if index.truncated {
+            log::warn!(
+                "only the first {} files of {} were indexed",
+                opts.max_files,
+                root.display()
+            );
+        }
         // A root showing no tree yet gets one now; a snapshot's tree stays until the heads are in.
         if !self.has_tree(root, gen) {
             self.install(root, gen, index.clone(), RootState::Scanning);
@@ -173,6 +181,7 @@ impl AppState {
             };
             slot.tree = Some(tree);
             slot.state = state;
+            slot.truncated = index.truncated;
             let adhoc = slot.adhoc;
             let mut next = (*lib.index).clone();
             let key = path_key(root);

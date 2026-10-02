@@ -113,7 +113,7 @@ mod tests {
             r"C:\pics\a.png",
             r"S:\Notes\My Vault\x.md",
             // A UNC path reads as an authority, but a real host is never one of ours.
-            r"\\nas\Shared\a.png",
+            r"\\nas\share\a.png",
             r"\\server\share\x.png",
             "/home/me/a.png",
             "notes.md:12",

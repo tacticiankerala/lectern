@@ -2,8 +2,8 @@
 //! as the markup the reading view follows:
 //! - `data-kind`: `doc`, `file`, `path`, `external`, `anchor` or `broken`;
 //! - `data-target`: the absolute path a `doc`, `file` or `path` link opens;
-//! - `data-anchor`: the heading part of a `doc` link as written (percent-decoded), for an exact
-//!   `id` match;
+//! - `data-anchor`: the heading part of a `doc` or `path` link as written (percent-decoded), for
+//!   an exact `id` match;
 //! - `data-slug`: that heading, or an in-page link's fragment, slugged as heading ids are, for
 //!   when no `id` matches exactly;
 //! - `data-line`: the line a `doc`, `file` or `path` link cites.
@@ -26,8 +26,7 @@ use crate::library::pathmap::{
     PathMapper,
 };
 use crate::library::resolve::{resolve_relative, resolve_wikilink, WikiResolution};
-use crate::library::scan::is_markdown;
-use crate::library::LibraryIndex;
+use crate::library::{is_markdown, LibraryIndex};
 
 /// Inline code that names a file: an optional drive, UNC, `/`, `./` or `../` prefix, a folder
 /// separator, a 1–6 character extension and an optional `:line` or `:line:col`. No spaces.
@@ -104,8 +103,13 @@ enum Target {
     },
     /// Any other file the index holds, opened with the shell.
     File { path: PathBuf, line: Option<u32> },
-    /// A path that may not exist, checked when it's followed.
-    Path { path: PathBuf, line: Option<u32> },
+    /// A path that may not exist, checked when it's followed. `anchor` is the heading part as
+    /// written, for when it turns out to be a note.
+    Path {
+        path: PathBuf,
+        anchor: Option<String>,
+        line: Option<u32>,
+    },
 }
 
 /// What a Markdown link's href points at.
@@ -188,7 +192,11 @@ impl<'c> Links<'c> {
                 line,
             }
         } else {
-            Target::Path { path: joined, line }
+            Target::Path {
+                path: joined,
+                anchor,
+                line,
+            }
         }
     }
 
@@ -199,11 +207,14 @@ impl<'c> Links<'c> {
             Mapped::Verified(found) if self.images.trusts(&found) => {
                 local_target(found, anchor, line)
             }
-            Mapped::Verified(mapped) | Mapped::Unverified(mapped) => {
-                Target::Path { path: mapped, line }
-            }
+            Mapped::Verified(mapped) | Mapped::Unverified(mapped) => Target::Path {
+                path: mapped,
+                anchor,
+                line,
+            },
             Mapped::Unresolved => Target::Path {
                 path: PathBuf::from(path),
+                anchor,
                 line,
             },
         }
@@ -603,7 +614,7 @@ fn write_target<T>(context: &mut Context<'_, '_, T>, target: &Target) -> fmt::Re
     let (kind, path, anchor, line) = match target {
         Target::Doc { path, anchor, line } => ("doc", path, anchor.as_deref(), line),
         Target::File { path, line } => ("file", path, None, line),
-        Target::Path { path, line } => ("path", path, None, line),
+        Target::Path { path, anchor, line } => ("path", path, anchor.as_deref(), line),
     };
     write!(context, " data-kind=\"{kind}\"")?;
     write_attribute(context, "data-target", &path.to_string_lossy())?;
@@ -700,8 +711,8 @@ mod tests {
             ImageSrc::Blocked
         );
         assert_eq!(
-            images.resolve(r"\\nas\Shared\x.png"),
-            ImageSrc::Asset("asset:%5C%5Cnas%5CShared%5Cx.png".to_owned())
+            images.resolve(r"\\NAS\Share\x.png"),
+            ImageSrc::Asset("asset:%5C%5CNAS%5CShare%5Cx.png".to_owned())
         );
         assert_eq!(
             images.resolve(r"C:\pics\a.png"),
@@ -820,7 +831,7 @@ mod tests {
             r"C:\Users\a.txt",
             r"C:\x y.md",
             r"S:\Notes\My Vault\x.md",
-            r"\\nas\Shared\x.md",
+            r"\\nas\share\x.md",
             "README.md",
             "README.md:12",
         ] {

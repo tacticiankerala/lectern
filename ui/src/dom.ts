@@ -1,7 +1,11 @@
 // DOM helpers and the app's layout. Chrome ids carry the `lx-` prefix: document headings get slug
 // ids and raw HTML may carry ids, so lookups inside a document are scoped to it (`findById`).
+import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 
-/** The layout inside `#lx-app`, which Task 10 styles and Tasks 11–12 attach to. */
+/**
+ * The layout inside `#lx-app`: the header, progress bar, library, document pane, outline,
+ * overlays and toasts, which the stylesheets place and the app's modules fill.
+ */
 const LAYOUT = `
 <header id="lx-header"><nav id="lx-history-nav"></nav><nav id="lx-breadcrumbs"></nav><div id="lx-header-actions"></div></header>
 <div id="lx-progress"></div>
@@ -110,6 +114,9 @@ export function samePath(a: string, b: string): boolean {
   const key = (p: string) => p.toLowerCase().replaceAll("/", "\\");
   return key(a) === key(b);
 }
+
+/** A path ending in one of the core's Markdown extensions, in any letter case. */
+export const MARKDOWN_PATH = new RegExp(`\\.(?:${MARKDOWN_EXTENSIONS.join("|")})$`, "i");
 
 /** Runs a promise for its effect, logging a failure instead of leaving it unhandled. */
 export function quietly(promise: Promise<unknown>): void {

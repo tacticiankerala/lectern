@@ -128,7 +128,7 @@ You need [Rust](https://rustup.rs/) (stable, with the MSVC toolchain and the Vis
 git clone https://github.com/tacticiankerala/lectern
 cd lectern
 npm ci --prefix ui
-npx --prefix ui tauri build --no-bundle
+npm --prefix ui run tauri -- build --no-bundle
 ```
 
 The app is `target\release\lectern.exe`. Leaving out `--no-bundle` builds the installer too, which also signs the update files, so it needs `TAURI_SIGNING_PRIVATE_KEY` set.
@@ -142,7 +142,7 @@ rustup target add x86_64-pc-windows-msvc
 cargo install --locked cargo-xwin
 # clang-cl and llvm-rc, from an LLVM release, must be on PATH: they compile the Windows resource file.
 npm ci --prefix ui
-npx --prefix ui tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle
+npm --prefix ui run tauri -- build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle
 ```
 
 The app is `target/x86_64-pc-windows-msvc/release/lectern.exe`. Copy it to the Windows side, under `/mnt/c/…`, to run it.

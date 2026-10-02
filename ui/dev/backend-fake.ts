@@ -5,6 +5,7 @@
 // smart case, line by line.
 import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
+import { MARKDOWN_PATH } from "../src/dom";
 import type { Candidate } from "../src/generated/Candidate";
 import type { Crumb } from "../src/generated/Crumb";
 import type { DocPayload } from "../src/generated/DocPayload";
@@ -113,8 +114,6 @@ function isUnder(path: string, root: string): boolean {
   return key(path) === key(root) || key(path).startsWith(key(root) + "\\");
 }
 
-const MARKDOWN = /\.(md|markdown)$/i;
-
 /**
  * A matching line's snippet, as Rust cuts it: up to 60 characters either side of the first hit,
  * with `…` where the line goes on, every hit inside marked.
@@ -195,12 +194,14 @@ export class FakeBackend implements Backend, FakeControl {
           name: fixtures.tree.name,
           state: { state: "ready" },
           tree: fixtures.tree,
+          truncated: false,
         },
         {
           path: OFFLINE_ROOT,
           name: baseName(OFFLINE_ROOT),
           state: { state: "unavailable", reason: `Couldn't reach ${OFFLINE_ROOT} within 3 s` },
           tree: null,
+          truncated: false,
         },
       ],
     };
@@ -243,7 +244,7 @@ export class FakeBackend implements Backend, FakeControl {
 
   /** As Rust decides: a file opens; a folder joins the library unless it nests with a root. */
   openUserPath(path: string): Promise<UserOpen> {
-    if (MARKDOWN.test(path) || this.docs.has(key(path))) {
+    if (MARKDOWN_PATH.test(path) || this.docs.has(key(path))) {
       return Promise.resolve({ doc: this.open(path), library: structuredClone(this.library) });
     }
     if (!this.library.roots.some((r) => isUnder(path, r.path) || isUnder(r.path, path))) {
@@ -301,6 +302,7 @@ export class FakeBackend implements Backend, FakeControl {
       name: baseName(path),
       state: { state: "scanning" },
       tree: null,
+      truncated: false,
     });
   }
 
@@ -333,7 +335,7 @@ export class FakeBackend implements Backend, FakeControl {
         }
       });
       if (total === 0) return null;
-      const nameMatch = name.test(baseName(path).replace(/\.(md|markdown)$/i, ""));
+      const nameMatch = name.test(baseName(path).replace(MARKDOWN_PATH, ""));
       const rel = path.slice(this.fixtures.root.length + 1).replaceAll("\\", "/");
       return { path, title: doc.title, rel, nameMatch, hits: lines, total };
     });
@@ -494,7 +496,7 @@ export class FakeBackend implements Backend, FakeControl {
           outline: [],
           frontmatter: null,
           tasks: { done: 0, total: 0 },
-          title: baseName(path).replace(/\.(md|markdown)$/i, ""),
+          title: baseName(path).replace(MARKDOWN_PATH, ""),
           wordCount: 0,
           hasUnresolvedWikilinks: false,
         };

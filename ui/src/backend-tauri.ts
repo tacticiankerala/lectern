@@ -9,6 +9,7 @@ import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { LibraryPayload } from "./generated/LibraryPayload";
+import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
@@ -132,7 +133,7 @@ export class TauriBackend implements Backend {
     return open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+      filters: [{ name: "Markdown", extensions: [...MARKDOWN_EXTENSIONS] }],
     });
   }
 

@@ -206,10 +206,10 @@ mod tests {
             FollowPlan::NotFound(refusal)
         );
         // A trusted host goes through.
-        let t = target(FollowKind::File, r"\\nas\Shared\a.png", None, None);
+        let t = target(FollowKind::File, r"\\nas\share\a.png", None, None);
         assert_eq!(
             plan_follow(&t, unmapped, untrusted, unchecked),
-            FollowPlan::OpenFile(r"\\nas\Shared\a.png".to_owned())
+            FollowPlan::OpenFile(r"\\nas\share\a.png".to_owned())
         );
     }
 

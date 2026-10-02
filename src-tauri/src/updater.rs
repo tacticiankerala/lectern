@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn paths_compare_case_insensitively_with_either_separator() {
         assert!(!portable(
-            r"c:\Users\me\appdata\local\lectern\Lectern.EXE",
+            r"c:\users\ME\appdata\local\lectern\Lectern.EXE",
             Some(r"C:\Users\me\AppData\Local\Lectern\"),
             None,
         ));
@@ -318,7 +318,7 @@ mod tests {
             None,
         ));
         assert!(!portable(
-            r"C:\Users\me\APPDATA\LOCAL\LECTERN\lectern.exe",
+            r"C:\USERS\ME\APPDATA\LOCAL\LECTERN\lectern.exe",
             None,
             Some(LOCAL),
         ));
@@ -326,17 +326,13 @@ mod tests {
 
     #[test]
     fn a_copy_on_a_share_is_portable_unless_installed_there() {
-        let exe = r"\\nas\Shared\Tools\lectern.exe";
+        let exe = r"\\nas\share\Tools\lectern.exe";
         assert!(portable(exe, Some(RECORDED), Some(LOCAL)));
         assert!(portable(exe, None, Some(LOCAL)));
+        assert!(!portable(exe, Some(r"\\NAS\share\tools"), Some(LOCAL)));
         assert!(!portable(
-            exe,
-            Some(r"\\nas\shared\tools"),
-            Some(LOCAL)
-        ));
-        assert!(!portable(
-            r"\\?\UNC\nas\Shared\Tools\lectern.exe",
-            Some(r"\\nas\Shared\Tools"),
+            r"\\?\UNC\nas\share\Tools\lectern.exe",
+            Some(r"\\nas\share\Tools"),
             None,
         ));
     }

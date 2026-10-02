@@ -323,9 +323,9 @@ fn asset_url_encodes_spaces_unicode_unc() {
     assert_eq!(
         asset_url(
             "http://lxasset.localhost/",
-            std::path::Path::new(r"\\nas\Shared\it's (1).png")
+            std::path::Path::new(r"\\nas\share\it's (1).png")
         ),
-        "http://lxasset.localhost/%5C%5Cnas%5CShared%5Cit's%20(1).png"
+        "http://lxasset.localhost/%5C%5Cnas%5Cshare%5Cit's%20(1).png"
     );
 }
 

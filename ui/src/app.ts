@@ -2,7 +2,7 @@
 // (navigation.ts), the library (library-controller.ts) and what the user asks for (actions.ts)
 // are its parts.
 //
-// Contracts with the Rust side (Task 8):
+// Contracts with the Rust side:
 // - The `open-request` and `doc-changed` listeners are registered before `startup`: Rust holds
 //   second launches until then and sends them as events. One arriving before startup finishes is
 //   applied after the first document.

@@ -229,6 +229,26 @@ impl AppState {
         }
     }
 
+    /// Asks the UI to reload the current document, stale or not, once the window has shown it.
+    /// After the path mappings change, any link or image it resolved may point elsewhere, even
+    /// in a document the index already covers. A document that failed to open is left alone.
+    pub(super) fn refresh_current_now(&self) {
+        if !self.ui_shown.is_open() {
+            return;
+        }
+        let gen = self.index_gen.load(Ordering::SeqCst);
+        let path = lock(&self.current)
+            .as_mut()
+            .filter(|c| c.doc.is_some())
+            .map(|c| {
+                c.refreshed_at = Some(gen);
+                c.path.clone()
+            });
+        if let Some(path) = path {
+            self.host.emit(UiEvent::DocChanged(path));
+        }
+    }
+
     /// Drops `path` from the recent files, for good; returns the recent files left.
     pub fn remove_recent(&self, path: &str) -> Vec<RecentEntry> {
         let mut state = lock(&self.state);

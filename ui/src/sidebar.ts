@@ -171,7 +171,10 @@ export class Sidebar {
     }
   }
 
-  /** A root's section: its row (name, badge, state) and, unless collapsed, its tree. */
+  /**
+   * A root's section: its row (name, badge, state), a note when its index stopped at the file
+   * cap, and, unless collapsed, its tree.
+   */
   private section(root: RootView): HTMLElement {
     const node: TreeNode = root.tree ?? {
       name: root.name,
@@ -203,6 +206,15 @@ export class Sidebar {
           { class: "lib-unavailable" },
           h("span", { class: "lib-root-state" }, root.state.reason),
           retry,
+        ),
+      );
+    }
+    if (root.truncated) {
+      section.append(
+        h(
+          "p",
+          { class: "lib-truncated", role: "note" },
+          "This folder holds too many files to index them all. Some are missing from the library, quick open and search.",
         ),
       );
     }

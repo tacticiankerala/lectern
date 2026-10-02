@@ -1,5 +1,5 @@
 // What the document area shows without a document: the welcome screen, or why a file didn't open.
-import { h } from "./dom";
+import { MARKDOWN_PATH, h } from "./dom";
 import type { OpenError } from "./generated/OpenError";
 import type { RecentEntry } from "./generated/RecentEntry";
 
@@ -32,8 +32,6 @@ const SHORTCUTS: [string, string][] = [
   ["F11", "Focus mode"],
   ["Ctrl+E", "Open in editor"],
 ];
-
-const MARKDOWN = /\.(md|markdown)$/i;
 
 const ERROR_TITLES: Record<OpenError["kind"], string> = {
   notFound: "This file isn't there",
@@ -124,7 +122,7 @@ export function renderError(host: HTMLElement, error: OpenError, actions: ErrorA
   if (error.kind === "binary") {
     // Rust would open a Markdown-named file in the reader again, so that one is revealed instead.
     buttons.push(
-      MARKDOWN.test(error.path)
+      MARKDOWN_PATH.test(error.path)
         ? button("Reveal in Explorer", actions.reveal)
         : button("Open with default app", actions.openWithDefaultApp),
     );

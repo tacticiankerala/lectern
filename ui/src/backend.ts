@@ -15,12 +15,7 @@ import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
 
 export type BackendEvent =
-  | "doc-changed"
-  | "doc-removed"
-  | "open-request"
-  | "library-updated"
-  | "index-ready"
-  | "update-available";
+  "doc-changed" | "doc-removed" | "open-request" | "library-updated" | "index-ready";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */

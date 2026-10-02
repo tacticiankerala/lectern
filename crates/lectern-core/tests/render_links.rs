@@ -88,7 +88,7 @@ impl Vault {
 
 fn wsl_mapper() -> PathMapper {
     PathMapper {
-        wsl_distro: Some("Ubuntu-26.04".into()),
+        wsl_distro: Some("Ubuntu".into()),
         ..PathMapper::default()
     }
 }
@@ -314,7 +314,7 @@ fn absolute_links_map_or_stay_unverified() {
         .html;
     assert_has(
         &html,
-        r##"href="#" data-kind="path" data-target="\\wsl.localhost\Ubuntu-26.04\home\dev\projects\app\k.rb" data-line="17">k</a>"##,
+        r##"href="#" data-kind="path" data-target="\\wsl.localhost\Ubuntu\home\dev\projects\app\k.rb" data-line="17">k</a>"##,
     );
     assert_has(
         &html,
@@ -330,6 +330,63 @@ fn absolute_links_map_or_stay_unverified() {
         &html,
         r#"data-kind="path" data-target="/home/dev/projects/app/k.rb" data-line="17">k</a>"#,
     );
+}
+
+/// A link to a note outside the index keeps its heading, before and after indexing, so following
+/// it lands on that heading.
+#[test]
+fn unindexed_absolute_links_keep_their_heading() {
+    let v = Vault::new();
+    let src = "[Jump](C:/outside/other.md#details) [Up](/home/dev/notes/x.md#Next%20steps)\n";
+    for html in [
+        v.render("README.md", src).html,
+        v.render_unindexed("README.md", src).html,
+    ] {
+        assert_has(
+            &html,
+            r#"data-kind="path" data-target="C:/outside/other.md" data-anchor="details" data-slug="details">Jump</a>"#,
+        );
+        assert_has(
+            &html,
+            r#"data-kind="path" data-target="/home/dev/notes/x.md" data-anchor="Next steps" data-slug="next-steps">Up</a>"#,
+        );
+    }
+}
+
+/// Every extension the installer registers links as a note: indexed or not, relative or not.
+#[test]
+fn every_markdown_extension_links_as_a_note() {
+    let v = Vault::new();
+    std::fs::write(v.path("work/old.mdown"), "# Old\n").unwrap();
+    std::fs::write(v.path("work/short.MKD"), "# Short\n").unwrap();
+    let ix = common::index_of(&v.root);
+    let src = "[old](work/old.mdown) [short](work/short.MKD#top) [gone](work/gone.mkd)\n";
+    let html = v
+        .render_with("README.md", src, Some(&ix), &PathMapper::default())
+        .html;
+    assert_has(
+        &html,
+        &format!(
+            r#"class="link-doc" data-kind="doc" data-target="{}">old</a>"#,
+            v.abs("work/old.mdown")
+        ),
+    );
+    assert_has(
+        &html,
+        &format!(
+            r#"class="link-doc" data-kind="doc" data-target="{}" data-anchor="top" data-slug="top">short</a>"#,
+            v.abs("work/short.MKD")
+        ),
+    );
+    assert_has(
+        &html,
+        &format!(
+            r#"class="link-doc" data-kind="doc" data-target="{}">gone</a>"#,
+            v.abs("work/gone.mkd")
+        ),
+    );
+    let html = v.render_unindexed("README.md", src).html;
+    assert_eq!(html.matches(r#"data-kind="doc""#).count(), 3, "{html}");
 }
 
 #[test]
@@ -466,7 +523,7 @@ fn inline_code_files_and_absolute_paths() {
     );
     assert_has(
         &html,
-        r#"class="code-link" data-kind="path" data-target="\\wsl.localhost\Ubuntu-26.04\home\dev\projects\app\k.rb" data-line="17"><code"#,
+        r#"class="code-link" data-kind="path" data-target="\\wsl.localhost\Ubuntu\home\dev\projects\app\k.rb" data-line="17"><code"#,
     );
     assert_has(
         &html,
@@ -821,7 +878,7 @@ fn images_on_trusted_network_hosts_and_drives_load() {
     let html = v
         .render_trusting(
             "friends/readme-style.md",
-            r"![nas](\\\\nas\Shared\x.png) ![drive](C:\pics\a.png) ![other](\\\\evil\s\x.png)",
+            r"![nas](\\\\NAS\Share\x.png) ![drive](C:\pics\a.png) ![other](\\\\evil\s\x.png)",
             Some(&v.ix),
             &PathMapper::default(),
             &trusted,
@@ -829,11 +886,55 @@ fn images_on_trusted_network_hosts_and_drives_load() {
         .html;
     assert_has(
         &html,
-        &asset_url(ASSET_BASE, Path::new(r"\\nas\Shared\x.png")),
+        &asset_url(ASSET_BASE, Path::new(r"\\NAS\Share\x.png")),
     );
     assert_has(&html, &asset_url(ASSET_BASE, Path::new(r"C:\pics\a.png")));
     assert_lacks(&html, "evil");
     assert_has(&html, r#"class="img-blocked""#);
+}
+
+/// A raw `<img>` naming a file by its drive path loads it however it's quoted, cased or padded,
+/// as a `<source srcset>` does; network hosts are still judged, and only the first `src` counts.
+#[test]
+fn raw_html_drive_paths_load() {
+    let v = Vault::new();
+    let src = concat!(
+        r#"<img src="C:/vault/logo.png" alt="fwd"> <img alt="back" src='C:\vault\logo.png'> <IMG SRC= d:/pics/a.png ALT="bare">"#,
+        "\n\n",
+        r#"<picture><source srcset="C:/vault/logo.png 2x"><img src=" C:/vault/logo.png " alt="padded"></picture>"#,
+        "\n\n",
+        r#"<img src="\\attacker.example\s\x.png" alt="unc"> <img src="\\attacker.example\s\y.png" src="C:/x.png" alt="first">"#,
+        "\n\n",
+        r#"<div title="<img src='C:/vault/logo.png'>">x</div>"#,
+        "\n",
+    );
+    let html = v.render("friends/readme-style.md", src).html;
+    let url = |p: &str| asset_url(ASSET_BASE, Path::new(p));
+    assert_has(
+        &html,
+        &format!(r#"<img src="{}" alt="fwd""#, url("C:/vault/logo.png")),
+    );
+    assert_has(
+        &html,
+        &format!(r#"<img alt="back" src="{}""#, url(r"C:\vault\logo.png")),
+    );
+    assert_has(
+        &html,
+        &format!(r#"<img src="{}" alt="bare""#, url("d:/pics/a.png")),
+    );
+    assert_has(
+        &html,
+        &format!(r#"<source srcset="{} 2x">"#, url("C:/vault/logo.png")),
+    );
+    assert_has(
+        &html,
+        &format!(r#"<img src="{}" alt="padded""#, url("C:/vault/logo.png")),
+    );
+    assert_has(&html, r#"<img alt="unc" class="img-blocked""#);
+    assert_has(&html, r#"<img alt="first" class="img-blocked""#);
+    assert_lacks(&html, "attacker");
+    // An `<img` inside an attribute value is text, left as written.
+    assert_has(&html, "src='C:/vault/logo.png'");
 }
 
 #[test]

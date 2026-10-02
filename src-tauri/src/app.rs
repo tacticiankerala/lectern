@@ -520,9 +520,10 @@ mod bundle_tests {
         assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
         assert_eq!(bundle["windows"]["nsis"]["installMode"], "currentUser");
         let association = &bundle["fileAssociations"][0];
+        // The same list the core scans, links and opens as Markdown.
         assert_eq!(
             association["ext"],
-            serde_json::json!(["md", "markdown", "mdown", "mkd"])
+            serde_json::json!(lectern_core::library::MARKDOWN_EXTENSIONS)
         );
         assert_eq!(association["role"], "Viewer");
         assert_eq!(association["mimeType"], "text/markdown");

@@ -76,7 +76,7 @@ pub struct Settings {
     pub font_size: u8,
     /// 1.3–2.0.
     pub line_height: f64,
-    /// 50–120 characters, or full width.
+    /// 60–160 characters, or full width.
     pub measure: Measure,
     pub code_wrap: bool,
     pub library_visible: bool,
@@ -208,6 +208,9 @@ pub struct RootView {
     pub name: String,
     pub state: RootState,
     pub tree: Option<TreeNode>,
+    /// The last scan stopped at the file cap, so some files are missing from the tree, quick
+    /// open, search and link resolution.
+    pub truncated: bool,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]

@@ -5,4 +5,9 @@ import type { TreeNode } from "./TreeNode";
 /**
  * One library root in the sidebar. `tree` is absent until a scan or snapshot provides one.
  */
-export type RootView = { path: string, name: string, state: RootState, tree: TreeNode | null, };
+export type RootView = { path: string, name: string, state: RootState, tree: TreeNode | null, 
+/**
+ * The last scan stopped at the file cap, so some files are missing from the tree, quick
+ * open, search and link resolution.
+ */
+truncated: boolean, };

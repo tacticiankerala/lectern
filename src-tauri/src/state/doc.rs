@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn crumbs_match_the_root_whatever_its_case_or_trailing_separator() {
         let doc = Path::new(r"S:\Notes\My Vault\dev\HOME.md");
-        let crumbs = breadcrumbs(doc, Path::new(r"s:\Notes\My Vault\DEV\"), |_| None);
+        let crumbs = breadcrumbs(doc, Path::new(r"s:\notes\my vault\DEV\"), |_| None);
         assert_eq!(names(&crumbs), ["DEV", "HOME.md"]);
     }
 
@@ -257,10 +257,10 @@ mod tests {
         let crumbs = breadcrumbs(Path::new(r"C:\notes\a.md"), Path::new(r"C:\"), |_| None);
         assert_eq!(names(&crumbs), [r"C:\", "notes", "a.md"]);
         let crumbs = breadcrumbs(
-            Path::new(r"\\nas\Shared\a.md"),
-            Path::new(r"\\nas\Shared"),
+            Path::new(r"\\nas\share\a.md"),
+            Path::new(r"\\nas\share"),
             |_| None,
         );
-        assert_eq!(names(&crumbs), [r"\\nas\Shared", "a.md"]);
+        assert_eq!(names(&crumbs), [r"\\nas\share", "a.md"]);
     }
 }
