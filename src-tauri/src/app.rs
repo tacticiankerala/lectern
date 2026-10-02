@@ -21,6 +21,7 @@ use crate::events::TauriHost;
 use crate::state::{
     AppState, AssetResponse, Boot, Early, OpenQueue, Profile, Slot, Timings, WatchControl,
 };
+use crate::updater::{self, Updates};
 use crate::{commands, win};
 
 /// The label of the one window, as in `tauri.conf.json`.
@@ -87,6 +88,8 @@ pub fn run(context: tauri::Context, launch: Launch) {
             on_second_launch(app, &forwarded, argv, &cwd);
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Endpoint, public key and install mode come from `plugins.updater` in tauri.conf.json.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Local images in documents, at `http://lxasset.localhost/<encoded path>`.
         .register_asynchronous_uri_scheme_protocol("lxasset", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -121,6 +124,8 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::list_system_fonts,
             commands::perf_mark,
             commands::show_window,
+            commands::check_update,
+            commands::install_update,
         ])
         .on_window_event(on_window_event)
         .setup(move |app| setup(app, launch, opens))
@@ -160,6 +165,8 @@ fn setup(
             );
         }
     }
+    let portable = updater::detect_portable(&app.package_info().name);
+    app.manage(Updates::new(portable));
     let state = AppState::new(
         Boot {
             config_dir: launch.dirs.config,
@@ -170,6 +177,7 @@ fn setup(
             early: launch.early,
             opens,
             timings: Timings::default(),
+            portable,
         },
         Arc::new(TauriHost(app.handle().clone())),
         |weak| {
@@ -451,6 +459,21 @@ mod capability_tests {
             .any(|p| p == "dialog:default" || p == "dialog:allow-open"));
     }
 
+    /// The UI updates through Lectern's own `check_update` and `install_update`, which decide
+    /// between installing and opening the Releases page; it never reaches the updater directly.
+    #[test]
+    fn the_ui_has_no_direct_access_to_the_updater() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let permissions = caps["permissions"].as_array().unwrap();
+        assert!(
+            !permissions.iter().any(|p| p
+                .as_str()
+                .is_some_and(|p| p.starts_with("updater:") || p.starts_with("process:"))),
+            "{permissions:?}"
+        );
+    }
+
     /// Focus mode puts the window in full screen.
     #[test]
     fn the_main_window_may_go_full_screen() {
@@ -461,6 +484,97 @@ mod capability_tests {
             .unwrap()
             .iter()
             .any(|p| p == "core:window:allow-set-fullscreen"));
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    fn config() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap()
+    }
+
+    /// A per-user installer (no admin rights; `updater::is_portable` relies on its folder) that
+    /// offers Lectern as a viewer for Markdown files.
+    #[test]
+    fn the_installer_is_per_user_and_registers_markdown_files() {
+        let bundle = &config()["bundle"];
+        assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
+        assert_eq!(bundle["windows"]["nsis"]["installMode"], "currentUser");
+        let association = &bundle["fileAssociations"][0];
+        assert_eq!(
+            association["ext"],
+            serde_json::json!(["md", "markdown", "mdown", "mkd"])
+        );
+        assert_eq!(association["role"], "Viewer");
+        assert_eq!(association["mimeType"], "text/markdown");
+    }
+
+    /// Lectern's own class (a generic name could be another app's, which either uninstaller would
+    /// delete), shown in Explorer as "Markdown document".
+    #[test]
+    fn the_association_has_a_class_of_its_own() {
+        let association = &config()["bundle"]["fileAssociations"][0];
+        assert_eq!(association["name"], "Lectern.Markdown");
+        assert_eq!(association["description"], "Markdown document");
+    }
+
+    /// For every extension, the installer hooks remember the default class to restore (before an
+    /// install or uninstall), add Lectern to "Open with", and put everything back after an
+    /// uninstall, all under the association's class.
+    #[test]
+    fn the_installer_hooks_cover_every_associated_extension() {
+        let bundle = &config()["bundle"];
+        assert_eq!(
+            bundle["windows"]["nsis"]["installerHooks"],
+            "windows/installer-hooks.nsh"
+        );
+        let hooks = include_str!("../windows/installer-hooks.nsh");
+        let association = &bundle["fileAssociations"][0];
+        let class = association["name"].as_str().unwrap();
+        for used in [
+            format!(r#"OpenWithProgids" "{class}""#),
+            format!(r#""{class}_original""#),
+            format!(r#""{class}_backup""#),
+            format!(r#""={class}""#),
+        ] {
+            assert!(hooks.contains(&used), "{used}");
+        }
+        let hook = |name: &str| {
+            let start = hooks.find(&format!("!macro {name}\n")).unwrap();
+            &hooks[start..start + hooks[start..].find("!macroend").unwrap()]
+        };
+        for ext in association["ext"].as_array().unwrap() {
+            let ext = ext.as_str().unwrap();
+            for (name, step) in [
+                ("NSIS_HOOK_PREINSTALL", "LECTERN_REMEMBER_DEFAULT"),
+                ("NSIS_HOOK_POSTINSTALL", "LECTERN_OPEN_WITH"),
+                ("NSIS_HOOK_PREUNINSTALL", "LECTERN_REMEMBER_DEFAULT"),
+                ("NSIS_HOOK_POSTUNINSTALL", "LECTERN_RESTORE_DEFAULT"),
+            ] {
+                assert!(
+                    hook(name).contains(&format!(r#"{step} "{ext}""#)),
+                    "{name} {step} {ext}"
+                );
+            }
+        }
+    }
+
+    /// Updates come signed from the latest GitHub release and install with a progress bar only.
+    #[test]
+    fn updates_come_signed_from_github_releases() {
+        let config = config();
+        assert_eq!(config["bundle"]["createUpdaterArtifacts"], true);
+        let updater = &config["plugins"]["updater"];
+        assert_eq!(
+            updater["endpoints"],
+            serde_json::json!([
+                "https://github.com/tacticiankerala/lectern/releases/latest/download/latest.json"
+            ])
+        );
+        assert!(updater["pubkey"]
+            .as_str()
+            .is_some_and(|key| key.len() > 100));
+        assert_eq!(updater["windows"]["installMode"], "passive");
     }
 }
 

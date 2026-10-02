@@ -51,7 +51,7 @@ impl AppState {
             recent,
             initial,
             version: lectern_core::version().to_owned(),
-            portable: false,
+            portable: self.portable,
             startup_notice: lock(&self.notice).take(),
         };
         self.perf.mark("startup-ready", None);

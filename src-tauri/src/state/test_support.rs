@@ -179,6 +179,7 @@ pub(super) fn fixture_in(dir: TempDir, profile: Profile, host: FakeHost) -> Fixt
             root: Duration::from_secs(5),
             scan_delay: Duration::ZERO,
         },
+        portable: false,
     };
     let fake_watch = Arc::clone(&watched);
     let state = AppState::new(boot, Arc::clone(&host) as Arc<dyn Host>, move |_| {

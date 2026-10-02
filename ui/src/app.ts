@@ -9,8 +9,8 @@
 // - Navigations are numbered, refreshes apart from them (navigation.ts).
 // - `startupNotice` shows once, as a toast.
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
-//   Preferences, the menus, find in page and full-text search are separate modules, loaded on
-//   first use.
+//   Preferences, the menus, find in page, full-text search, update checks and About are separate
+//   modules, loaded on first use. The automatic update check runs 5 s after the first paint.
 // - The reading position is saved once scrolling stops for a moment and when the document is
 //   left; a document opened without an anchor or line goes back to its saved position.
 import { Actions } from "./actions";
@@ -70,6 +70,8 @@ const FONT_WAIT_MS = 150;
 const MAX_RECENT = 20;
 /** How long scrolling must stop before the reading position is saved. */
 const POSITION_SAVE_MS = 400;
+/** How long after the first paint the automatic update check waits. */
+const UPDATE_CHECK_DELAY_MS = 5000;
 /** Settings that move the text, so the reading position is kept across them. */
 const REFLOWING: (keyof Settings)[] = [
   "fontSize",
@@ -129,10 +131,6 @@ export class App {
   /** Opens the find bar, searching for `prefill` when given. */
   openFind = (prefill?: string): void => {
     void this.actions.showFind(prefill);
-  };
-  /** Checks for an update on request. Task 13 provides it. */
-  checkForUpdates: () => void = () => {
-    this.toast("Lectern can't check for updates yet.");
   };
   /** The reading panel ("Aa"). */
   readonly panel: ReadingPanel;
@@ -270,6 +268,12 @@ export class App {
     // Nothing can be dropped on a window that isn't showing yet.
     this.backend.onDragDrop((paths) => void this.nav.dropped(paths));
     this.library.watchIndex();
+    // Off unless the setting is on when the time comes; not for an app a test has replaced.
+    setTimeout(() => {
+      if (this.layout.app.isConnected && this.state.settings.autoUpdate) {
+        quietly(this.actions.checkForUpdates(false));
+      }
+    }, UPDATE_CHECK_DELAY_MS);
     if (notice !== null) {
       this.toast(notice);
     }

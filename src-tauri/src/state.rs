@@ -115,6 +115,8 @@ pub struct Boot {
     pub early: Arc<Slot<Early>>,
     pub opens: Arc<OpenQueue>,
     pub timings: Timings,
+    /// Not running from the folder Lectern was installed in (`updater::detect_portable`).
+    pub portable: bool,
 }
 
 pub struct AppState {
@@ -123,6 +125,7 @@ pub struct AppState {
     perf: Arc<PerfLog>,
     exit_after_paint: bool,
     timings: Timings,
+    portable: bool,
     settings: RwLock<Settings>,
     /// The network hosts Lectern may reach.
     trust: RwLock<Trust>,
@@ -186,6 +189,7 @@ impl AppState {
             perf: boot.perf,
             exit_after_paint: boot.exit_after_paint,
             timings: boot.timings,
+            portable: boot.portable,
             mapper: RwLock::new(Arc::new(mapper_for(&settings, wsl_distro.clone()))),
             trust: RwLock::new(Trust::new(&settings)),
             // Every configured root from the start, so a document's images load at once.

@@ -1,5 +1,6 @@
 //! Windows integrations: the process start time, the boot mutex that tells a second launch apart,
-//! title-bar colours through DWM, DirectWrite font families and the default WSL distribution.
+//! title-bar colours through DWM, DirectWrite font families, the default WSL distribution and
+//! reading the current user's registry.
 //! Handing files to the shell or an editor is in `shell.rs`.
 //!
 //! Lectern targets Windows only, so this module is compiled unconditionally.
@@ -62,6 +63,12 @@ pub fn wsl_default_distro() -> Option<String> {
         "DistributionName",
     )
     .filter(|name| !name.is_empty())
+}
+
+/// A `REG_SZ` value under `HKEY_CURRENT_USER`, or `None` when the key or value is missing or of
+/// another type.
+pub fn current_user_string(subkey: &str, value: &str) -> Option<String> {
+    registry_string(HKEY_CURRENT_USER, subkey, value)
 }
 
 /// A `REG_SZ` value, or `None` when the key or value is missing or of another type.

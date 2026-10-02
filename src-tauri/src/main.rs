@@ -14,6 +14,7 @@ mod events;
 mod logging;
 mod shell;
 mod state;
+mod updater;
 mod win;
 
 use std::path::PathBuf;

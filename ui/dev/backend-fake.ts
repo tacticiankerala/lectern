@@ -85,6 +85,12 @@ export interface FakeControl {
   readonly fullscreen: boolean[];
   /** Every title-bar colouring, as `[bg, fg, dark]`, in order. */
   readonly chromeColors: [string, string, boolean][];
+  /** What `checkUpdate` finds. */
+  update: UpdateInfo | null;
+  /** When set, `checkUpdate` fails with this message, as Rust's command would. */
+  updateError: string | null;
+  /** Every `checkUpdate` and `installUpdate` call, in order. */
+  readonly updateCalls: ("check" | "install")[];
 }
 
 declare global {
@@ -153,6 +159,9 @@ export class FakeBackend implements Backend, FakeControl {
   readonly fullscreen: boolean[] = [];
   readonly chromeColors: [string, string, boolean][] = [];
   readonly retried: string[] = [];
+  update: UpdateInfo | null = null;
+  updateError: string | null = null;
+  readonly updateCalls: ("check" | "install")[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
@@ -406,10 +415,17 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   checkUpdate(): Promise<UpdateInfo | null> {
-    return Promise.resolve(null);
+    this.updateCalls.push("check");
+    if (this.updateError !== null) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(this.updateError);
+    }
+    return Promise.resolve(this.update);
   }
 
   installUpdate(): Promise<void> {
+    this.updateCalls.push("install");
     return Promise.resolve();
   }
 

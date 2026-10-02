@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, RecentEntry, SavedPosition,
-    Settings, SettingsPatch, StartupPayload, UserOpen,
+    Settings, SettingsPatch, StartupPayload, UpdateInfo, UserOpen,
 };
 use lectern_core::search::FileHits;
-use tauri::{State, WebviewWindow};
+use tauri::{AppHandle, State, WebviewWindow};
 
 use crate::state::AppState;
+use crate::updater::{self, Updates};
 use crate::{app, win};
 
 type Shared<'a> = State<'a, Arc<AppState>>;
@@ -136,6 +137,21 @@ pub async fn list_system_fonts() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn perf_mark(name: String, ms: Option<f64>, state: Shared<'_>) -> Result<(), String> {
     blocking(state.inner(), move |s| s.perf_mark(&name, ms)).await
+}
+
+/// Asks GitHub Releases for a newer Lectern.
+#[tauri::command]
+pub async fn check_update(
+    app: AppHandle,
+    updates: State<'_, Updates>,
+) -> Result<Option<UpdateInfo>, String> {
+    updater::check(&app, &updates).await
+}
+
+/// Installs the update found (and restarts), or for a portable copy opens the Releases page.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, updates: State<'_, Updates>) -> Result<(), String> {
+    updater::install(&app, &updates).await
 }
 
 #[tauri::command]

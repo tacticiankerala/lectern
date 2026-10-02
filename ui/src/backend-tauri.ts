@@ -112,11 +112,12 @@ export class TauriBackend implements Backend {
     return invoke("list_system_fonts");
   }
 
-  /** The updater commands arrive with Task 13. */
+  /** Asks GitHub Releases for a newer Lectern (Rust's updater). */
   checkUpdate(): Promise<UpdateInfo | null> {
     return invoke("check_update");
   }
 
+  /** Installs the update found and restarts, or, for a portable copy, opens the Releases page. */
   installUpdate(): Promise<void> {
     return invoke("install_update");
   }

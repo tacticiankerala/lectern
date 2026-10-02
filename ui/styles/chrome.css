@@ -131,6 +131,30 @@ button.crumb:hover {
   stroke-linejoin: round;
 }
 
+/* An update: a quiet pill before the header's buttons. */
+.update-pill {
+  align-self: center;
+  height: 22px;
+  margin-right: 4px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font: 600 12px / 1 var(--ui-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.update-pill:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.update-pill:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
 #lx-progress {
   position: fixed;
   top: var(--header-h);
@@ -1126,6 +1150,73 @@ body.resizing {
   font-size: 12px;
 }
 
+/* ---- About (the ⋯ menu), on the Preferences backdrop ---- */
+
+.about {
+  position: relative;
+  width: min(380px, 100%);
+  padding: 26px 28px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 24px 60px -16px rgb(0 0 0 / 0.4);
+  text-align: center;
+  animation: panel-in 0.14s ease-out;
+}
+
+.about-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.about-mark {
+  line-height: 0;
+}
+
+.about h2 {
+  margin: 10px 0 2px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.about p {
+  margin: 0 0 8px;
+}
+
+.about-version,
+.about-legal,
+.about-fonts {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.about-version {
+  font-variant-numeric: tabular-nums;
+}
+
+.about-link {
+  margin: 2px 0 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  cursor: pointer;
+}
+
+.about-link:hover {
+  text-decoration: underline;
+}
+
+.about-fonts {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 /* ---- Toasts ---- */
 
 #lx-toasts {
@@ -1658,7 +1749,8 @@ body.focus #lx-doc-pane {
   .quick-open,
   .search-panel,
   .find-bar,
-  .prefs {
+  .prefs,
+  .about {
     animation: none;
   }
 

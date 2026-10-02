@@ -1,6 +1,7 @@
 // What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
-// quick open, Preferences, find in page and full-text search (all loaded on first use), focus mode
-// and the sidebars' widths.
+// quick open, Preferences, find in page, full-text search, update checks and About (all loaded on
+// first use), focus mode and the sidebars' widths.
+import type { About } from "./about";
 import type { App } from "./app";
 import { quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
@@ -14,6 +15,7 @@ import type { QuickOpen } from "./quick-open";
 import { FlowHold, keepFlow } from "./reflow";
 import type { SearchPanel } from "./search-panel";
 import { bumpFontSize, toggleThemeMode } from "./themes";
+import type { Updater } from "./update";
 
 /** The sidebars' widths, in pixels, as the resizers allow them. */
 const WIDTHS = {
@@ -27,6 +29,8 @@ export class Actions {
   private preferences: Preferences | null = null;
   private search: SearchPanel | null = null;
   private find: FindBar | null = null;
+  private updater: Updater | null = null;
+  private about: About | null = null;
   /** The menu open, if any. */
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
@@ -127,6 +131,7 @@ export class Actions {
           this.quickOpen,
           this.search,
           this.preferences,
+          this.about,
           this.app.panel,
           this.find,
         ]) {
@@ -168,8 +173,7 @@ export class Actions {
       recent: () => this.app.state.recent,
       open: (path) => void this.app.open(path, { push: true }),
     });
-    this.preferences?.close();
-    this.search?.close();
+    this.closeOverlays(this.quickOpen);
     this.quickOpen.open(query);
   }
 
@@ -181,9 +185,7 @@ export class Actions {
       search: (q) => this.app.backend.search(q),
       open: (path, line, q) => void this.openResult(path, line, q),
     });
-    this.quickOpen?.close();
-    this.preferences?.close();
-    this.app.panel.close();
+    this.closeOverlays(this.search);
     this.search.open(query);
   }
 
@@ -214,10 +216,7 @@ export class Actions {
         this.app.on("doc", cb);
       },
     });
-    this.quickOpen?.close();
-    this.search?.close();
-    this.preferences?.close();
-    this.app.panel.close();
+    this.closeOverlays(this.find);
     this.find.open(prefill, near);
   }
 
@@ -236,10 +235,73 @@ export class Actions {
       removeRoot: (path) => void this.app.library.removeRoot(path),
       retryRoot: (path) => void this.app.library.retryRoot(path),
     });
-    this.quickOpen?.close();
-    this.search?.close();
-    this.app.panel.close();
+    this.closeOverlays(this.preferences);
     this.preferences.open();
+  }
+
+  /**
+   * Checks for an update: on request (`manual`), always, saying what it found; else at most once
+   * a day and quietly. An update shows as a pill in the header.
+   */
+  async checkForUpdates(manual: boolean): Promise<void> {
+    const { Updater } = await import("./update.js");
+    this.updater ??= new Updater(this.app.layout.headerActions, {
+      checkUpdate: () => this.app.backend.checkUpdate(),
+      installUpdate: () => this.app.backend.installUpdate(),
+      toast: (message) => {
+        this.app.toast(message);
+      },
+    });
+    await (manual ? this.updater.checkNow() : this.updater.checkAutomatically());
+  }
+
+  private async showAbout(): Promise<void> {
+    this.menu?.close(false);
+    const { About } = await import("./about.js");
+    this.about ??= new About(this.app.layout.overlayRoot, {
+      version: () => this.app.state.version,
+      portable: () => this.app.state.portable,
+      openLink: (url) => void this.openLink(url),
+    });
+    this.closeOverlays(this.about);
+    this.about.open();
+  }
+
+  /**
+   * Before `opening` opens: closes the menu and every other overlay (quick open, search,
+   * Preferences, About, the reading panel), so only one is ever on top. The find bar stays: it
+   * sits above the document rather than over it, as before.
+   */
+  private closeOverlays(opening: { close(): void }): void {
+    this.menu?.close(false);
+    for (const overlay of [
+      this.quickOpen,
+      this.search,
+      this.preferences,
+      this.about,
+      this.app.panel,
+    ]) {
+      if (overlay !== opening) {
+        overlay?.close();
+      }
+    }
+  }
+
+  /** Opens a web page in the browser, through Rust, which opens only web and mail links. */
+  private async openLink(url: string): Promise<void> {
+    try {
+      const result = await this.app.backend.follow({
+        kind: "external",
+        target: url,
+        line: null,
+        anchor: null,
+      });
+      if (result.action === "notFound") {
+        this.app.toast(result.message);
+      }
+    } catch (e) {
+      this.app.toast(String(e));
+    }
   }
 
   /** Opens a menu, replacing any other; it forgets itself once closed. */
@@ -295,15 +357,10 @@ export class Actions {
         {
           label: "Check for updates",
           run: () => {
-            this.app.checkForUpdates();
+            quietly(this.checkForUpdates(true));
           },
         },
-        {
-          label: "About Lectern",
-          run: () => {
-            this.app.toast(`Lectern ${this.app.state.version}: a Markdown reader. MIT licence.`);
-          },
-        },
+        { label: "About Lectern", run: () => void this.showAbout() },
       ],
       this.moreButton,
     );
