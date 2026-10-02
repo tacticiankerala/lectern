@@ -1,0 +1,19 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/notes/résumé notes.md
+---
+title: Résumé notes
+words: 35
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter: none
+outline:
+  h1 #résumé-notes Résumé notes
+---- html ----
+<h1 id="résumé-notes" data-sourcepos="1:1-1:16">Résumé notes</h1>
+<p data-sourcepos="3:1-3:124">A note whose file name has an accent and a space. The README links to it both as a Markdown link and as an inline code path.</p>
+<ul data-sourcepos="5:1-6:23">
+<li data-sourcepos="5:1-5:21">Café visits: three</li>
+<li data-sourcepos="6:1-6:23">Naïve estimates: two</li>
+</ul>

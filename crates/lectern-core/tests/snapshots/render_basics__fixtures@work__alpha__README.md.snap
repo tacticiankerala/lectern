@@ -1,0 +1,45 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/work/alpha/README.md
+---
+title: Alpha
+words: 53
+tasks: 2/4
+unresolved wikilinks: false
+frontmatter:
+  status: Text("blocked")
+  started: Date("2026-01-01")
+outline:
+  h1 #alpha Alpha
+    h2 #tasks Tasks
+    h2 #files Files
+---- html ----
+<h1 id="alpha" data-sourcepos="6:1-6:7">Alpha</h1>
+<p data-sourcepos="8:1-8:43">Blocked on a review from the platform team.</p>
+<h2 id="tasks" data-sourcepos="10:1-10:8">Tasks</h2>
+<ul data-sourcepos="12:1-15:28">
+<li data-sourcepos="12:1-12:20"><input type="checkbox" checked="" disabled=""> Draft the plan</li>
+<li data-sourcepos="13:1-13:27"><input type="checkbox" checked="" disabled=""> Write the first notes</li>
+<li data-sourcepos="14:1-14:26"><input type="checkbox" disabled=""> Ship the first slice</li>
+<li data-sourcepos="15:1-16:0"><input type="checkbox" disabled=""> Archive the old branch</li>
+</ul>
+<h2 id="files" data-sourcepos="17:1-17:8">Files</h2>
+<div class="table-wrap"><table data-sourcepos="19:1-22:77">
+<thead>
+<tr data-sourcepos="19:1-19:16">
+<th data-sourcepos="19:2-19:7">File</th>
+<th data-sourcepos="19:9-19:15">Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="21:1-21:69">
+<td data-sourcepos="21:2-21:33"><code data-sourcepos="21:3-21:32">plans/2026-01-01-big-plan.md</code></td>
+<td data-sourcepos="21:35-21:68">The full plan<br>with every step</td>
+</tr>
+<tr data-sourcepos="22:1-22:77">
+<td data-sourcepos="22:2-22:30"><code data-sourcepos="22:3-22:29">notes/2026-01-02-notes.md</code></td>
+<td data-sourcepos="22:32-22:76">Pipes in a cell: <code data-sourcepos="22:50-22:56">a | b</code>, and either | or</td>
+</tr>
+</tbody>
+</table></div>

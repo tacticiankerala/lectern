@@ -1,0 +1,68 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: "common::redact_vault(&describe(&doc), &vault)"
+input_file: fixtures/vault/friends/readme-style.md
+---
+title: Readme style
+words: 53
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter: none
+outline:
+  h1 #readme-style Readme style
+---- html ----
+<p align="center">
+  <img src="http://lxasset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="Lectern logo" width="64" height="64" loading="lazy" decoding="async">
+</p>
+<h1 id="readme-style" data-sourcepos="5:1-5:14">Readme style</h1>
+<p data-sourcepos="7:1-7:21"><img data-sourcepos="7:1-7:21" src="http://lxasset.localhost/[vault]%2Ffriends%2Fimg%2Flogo.png" alt="logo" loading="lazy" decoding="async"></p>
+<p data-sourcepos="9:1-9:80"><a data-sourcepos="9:1-9:80" href="https://example.com/ci" data-kind="external"><img data-sourcepos="9:2-9:55" src="https://example.com/badges/build-passing.svg" alt="build" loading="lazy" decoding="async"></a></p>
+<div class="markdown-alert markdown-alert-note" data-sourcepos="11:1-12:50">
+<p class="markdown-alert-title">Note</p>
+<p data-sourcepos="12:3-12:50">Lectern only reads notes. It never changes them.</p>
+</div>
+<div class="markdown-alert markdown-alert-warning" data-sourcepos="14:1-15:38">
+<p class="markdown-alert-title">Warning</p>
+<p data-sourcepos="15:3-15:38">Remote images load over the network.</p>
+</div>
+<p data-sourcepos="17:1-17:33">Every claim here is invented.<sup data-sourcepos="17:30-17:33" class="footnote-ref"><a href="#fn-1" id="fnref-1" data-footnote-ref="">1</a></sup></p>
+<div class="table-wrap"><table data-sourcepos="19:1-23:34">
+<thead>
+<tr data-sourcepos="19:1-19:40">
+<th data-sourcepos="19:2-19:10" align="left">Version</th>
+<th data-sourcepos="19:12-19:23" align="center">Highlights</th>
+<th data-sourcepos="19:25-19:39" align="right">Download size</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="21:1-21:33">
+<td data-sourcepos="21:2-21:8" align="left">0.3.0</td>
+<td data-sourcepos="21:10-21:23" align="center">Faster start</td>
+<td data-sourcepos="21:25-21:32" align="right">4.9 MB</td>
+</tr>
+<tr data-sourcepos="22:1-22:32">
+<td data-sourcepos="22:2-22:8" align="left">0.2.0</td>
+<td data-sourcepos="22:10-22:22" align="center">Dark themes</td>
+<td data-sourcepos="22:24-22:31" align="right">5.1 MB</td>
+</tr>
+<tr data-sourcepos="23:1-23:34">
+<td data-sourcepos="23:2-23:8" align="left">0.1.0</td>
+<td data-sourcepos="23:10-23:24" align="center">First release</td>
+<td data-sourcepos="23:26-23:33" align="right">5.2 MB</td>
+</tr>
+</tbody>
+</table></div>
+<div class="code-block" data-lang="mermaid" data-sourcepos="25:1-29:3"><div class="code-head"><span class="code-lang">mermaid</span><button type="button" class="code-copy" aria-label="Copy code">Copy</button></div><div class="code-note">Diagram rendering isn't supported yet</div><pre><code class="language-mermaid">graph TD
+  Library --&gt; Index
+  Index --&gt; Render
+</code></pre></div>
+<p data-sourcepos="31:1-33:2">$$
+\sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+$$</p>
+<section data-sourcepos="35:1-35:30" class="footnotes" data-footnotes="">
+<ol>
+<li data-sourcepos="35:1-35:30" id="fn-1">
+<p data-sourcepos="35:7-35:30">Including this footnote. <a href="#fnref-1" class="footnote-backref" data-footnote-backref="" data-footnote-backref-idx="1" aria-label="Back to reference 1">↩</a></p>
+</li>
+</ol>
+</section>

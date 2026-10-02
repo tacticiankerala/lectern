@@ -1,0 +1,18 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/archive/beta/README.md
+---
+title: Beta
+words: 13
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter:
+  status: Text("done")
+  started: Date("2025-11-03")
+  updated: Date("2025-12-19")
+outline:
+  h1 #beta Beta
+---- html ----
+<h1 id="beta" data-sourcepos="7:1-7:6">Beta</h1>
+<p data-sourcepos="9:1-9:71">Shipped and archived. Links that still point at <code data-sourcepos="9:49-9:60">work/beta/</code> are stale.</p>

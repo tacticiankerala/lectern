@@ -1,0 +1,103 @@
+/* The bundled OFL fonts (ui/fonts, licences in ui/fonts/LICENSES), variable and Latin-subset. A
+   face downloads only when text set in it is laid out, or when themes.ts loads the selected ones,
+   so unselected fonts cost nothing.
+
+   An installed copy wins through local(), but only by a name its variable build alone carries
+   (Inter, Source Serif 4). Atkinson Hyperlegible Next, Literata and JetBrains Mono share their
+   names with their static builds, and a static Regular answering a weight range would draw every
+   weight with one face, losing bold; those use the bundled files only.
+
+   The url()s are relative to the bundle (dist/app.css next to dist/fonts/), not to this file;
+   build.mjs leaves them alone. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src:
+    local("Inter Variable"),
+    local("InterVariable"),
+    url("fonts/Inter-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src:
+    local("Inter Variable Italic"),
+    local("InterVariableItalic"),
+    url("fonts/Inter-Variable-Italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("fonts/AtkinsonHyperlegibleNext-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Atkinson Hyperlegible Next";
+  font-style: italic;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("fonts/AtkinsonHyperlegibleNext-Variable-Italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("fonts/Literata-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Literata";
+  font-style: italic;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("fonts/Literata-Variable-Italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src:
+    local("Source Serif 4 Variable"),
+    local("SourceSerif4Variable-Roman"),
+    url("fonts/SourceSerif4Variable-Roman.ttf.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Source Serif 4";
+  font-style: italic;
+  font-weight: 200 900;
+  font-display: swap;
+  src:
+    local("Source Serif 4 Variable Italic"),
+    local("SourceSerif4Variable-Italic"),
+    url("fonts/SourceSerif4Variable-Italic.ttf.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("fonts/JetBrainsMono-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("fonts/JetBrainsMono-Variable-Italic.woff2") format("woff2");
+}

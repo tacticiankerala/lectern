@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/lectern-core", "src-tauri"]
+default-members = ["crates/lectern-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tacticiankerala/lectern"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"
+
+# Debug builds (and `cargo test`) parse, highlight and sanitise large notes at a usable speed.
+[profile.dev.package.ammonia]
+opt-level = 2
+[profile.dev.package.html5ever]
+opt-level = 2
+[profile.dev.package.markup5ever]
+opt-level = 2
+[profile.dev.package.tendril]
+opt-level = 2
+[profile.dev.package.string_cache]
+opt-level = 2
+[profile.dev.package.comrak]
+opt-level = 2
+[profile.dev.package.syntect]
+opt-level = 2
+[profile.dev.package.fancy-regex]
+opt-level = 2
+[profile.dev.package.regex-automata]
+opt-level = 2
+[profile.dev.package.regex-syntax]
+opt-level = 2

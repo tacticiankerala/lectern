@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lectern",
+  "version": "0.1.0",
+  "identifier": "io.github.tacticiankerala.lectern",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lectern",
+        "visible": false,
+        "width": 1280,
+        "height": 860,
+        "backgroundColor": "#1e1f22"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://lxasset.localhost https: data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Sreenath Nannatt",
+    "copyright": "© 2026 Sreenath Nannatt",
+    "category": "Productivity",
+    "shortDescription": "A fast, native Markdown reader for Windows",
+    "longDescription": "Lectern is a fast, native Markdown reader for Windows. It renders notes and Obsidian vaults faithfully (tables, task lists, highlighted code, frontmatter and wikilinks) with a library sidebar, an outline, full-text search and eight reading themes.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["md", "markdown", "mdown", "mkd"],
+        "name": "Lectern.Markdown",
+        "description": "Markdown document",
+        "role": "Viewer",
+        "mimeType": "text/markdown"
+      }
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/tacticiankerala/lectern/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1OUM0Q0RBQzI2MThCMjIKUldRaWkySEMya3ljOVFGaG9FaDFrOXAwR3BVRWloeXJ4b1QwZE56S0lrT1lnVEhlWm4yZjQzcHkK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

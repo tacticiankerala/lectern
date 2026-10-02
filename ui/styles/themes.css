@@ -1,0 +1,288 @@
+/* The eight themes (spec §8): one block of custom properties each, chosen by html[data-theme].
+   Background, text and accent are the spec's anchors. `--bg` and `--fg` are mirrored in
+   src/themes.ts (the reading panel's swatches) and in src-tauri/src/app.rs (the window and title
+   bar before the page paints); tests pin all three to this file.
+
+   Contrast floors, checked by test/themes.test.ts: text ≥ 7:1 and muted text ≥ 4.5:1 on `--bg`;
+   every syntax colour ≥ 4.5:1 on `--code-bg`.
+
+   Catppuccin and Nord use their official palettes. Where an official colour misses the 4.5:1 floor
+   it keeps its hue and chroma and only its OKLCH lightness moves, as little as passes; each such
+   value names its source. */
+
+/* ---- Paper: warm paper, iron-gall ink, sienna. The code is set in printer's inks: indigo,
+   verdigris, madder, plum and teal. ---- */
+html[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #f8f5ee;
+  --bg-elev: #f0ebe1;
+  --fg: #2b2a27;
+  --fg-muted: #6b6559;
+  --accent: #9a5b2e;
+  --border: #e2dbcd;
+  --code-bg: #f0ebe0;
+  --code-fg: #2b2a27;
+  --link: #93542a;
+  --selection: rgb(154 91 46 / 0.2);
+  --mark: rgb(236 190 76 / 0.42);
+  --badge-active: #3b7340;
+  --badge-blocked: #a8392c;
+  --badge-parked: #6f6a60;
+  --badge-done: #335f99;
+  --syn-keyword: #3d4a8c;
+  --syn-string: #3a6a45;
+  --syn-number: #a2432a;
+  --syn-comment: #70685b;
+  --syn-function: #86481c;
+  --syn-type: #22657a;
+  --syn-variable: #2b2a27;
+  --syn-constant: #7d3f74;
+  --syn-operator: #5f5a50;
+  --syn-punctuation: #6b6559;
+  --syn-tag: #a2432a;
+  --syn-attribute: #7a5713;
+  --syn-inserted: #3a6a45;
+  --syn-deleted: #a2432a;
+}
+
+/* ---- Daylight: crisp white and graphite text, with GitHub's familiar code colours. ---- */
+html[data-theme="daylight"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-elev: #f6f8fa;
+  --fg: #1f2328;
+  --fg-muted: #59636e;
+  --accent: #0969da;
+  --border: #d1d9e0;
+  --code-bg: #f6f8fa;
+  --code-fg: #1f2328;
+  --link: #0969da;
+  --selection: rgb(9 105 218 / 0.18);
+  --mark: rgb(255 212 59 / 0.45);
+  --badge-active: #1a7f37;
+  --badge-blocked: #cf222e;
+  --badge-parked: #59636e;
+  --badge-done: #0969da;
+  --syn-keyword: #cf222e;
+  --syn-string: #0a3069;
+  --syn-number: #0550ae;
+  --syn-comment: #59636e;
+  --syn-function: #6639ba;
+  --syn-type: #953800;
+  --syn-variable: #1f2328;
+  --syn-constant: #0550ae;
+  --syn-operator: #cf222e;
+  --syn-punctuation: #424a53;
+  --syn-tag: #116329;
+  --syn-attribute: #0550ae;
+  --syn-inserted: #116329;
+  --syn-deleted: #82071e;
+}
+
+/* ---- Sepia: a book page in brown ink. Aged inks for code: oxblood, olive, rust, slate blue,
+   mulberry. ---- */
+html[data-theme="sepia"] {
+  color-scheme: light;
+  --bg: #f4ecd8;
+  --bg-elev: #ebe1c9;
+  --fg: #433422;
+  --fg-muted: #6b5a43;
+  --accent: #8b4513;
+  --border: #dccfb2;
+  --code-bg: #ebe1c8;
+  --code-fg: #433422;
+  --link: #8b4513;
+  --selection: rgb(139 69 19 / 0.2);
+  --mark: rgb(222 168 56 / 0.4);
+  --badge-active: #4d6625;
+  --badge-blocked: #a03a22;
+  --badge-parked: #6f6250;
+  --badge-done: #3c5d7c;
+  --syn-keyword: #7a2d2d;
+  --syn-string: #4c601d;
+  --syn-number: #94440f;
+  --syn-comment: #716048;
+  --syn-function: #2c5870;
+  --syn-type: #7f4413;
+  --syn-variable: #433422;
+  --syn-constant: #843a62;
+  --syn-operator: #5e4d37;
+  --syn-punctuation: #6b5a43;
+  --syn-tag: #7a2d2d;
+  --syn-attribute: #6e5410;
+  --syn-inserted: #4c601d;
+  --syn-deleted: #9a3320;
+}
+
+/* ---- Catppuccin Latte (official palette; roles from Catppuccin's style guide). Code sits on
+   Mantle, where most Latte accents miss 4.5:1, so those are darkened. ---- */
+html[data-theme="latte"] {
+  color-scheme: light;
+  --bg: #eff1f5; /* Base */
+  --bg-elev: #e6e9ef; /* Mantle */
+  --fg: #4c4f69; /* Text */
+  --fg-muted: #5c5f77; /* Subtext 1 */
+  --accent: #8839ef; /* Mauve */
+  --border: #ccd0da; /* Surface 0 */
+  --code-bg: #e6e9ef; /* Mantle */
+  --code-fg: #4c4f69; /* Text */
+  --link: #135cea; /* Blue #1e66f5, darkened */
+  --selection: rgb(124 127 147 / 0.25); /* Overlay 2 */
+  --mark: rgb(223 142 29 / 0.3); /* Yellow */
+  --badge-active: #1f7802; /* Green #40a02b, darkened */
+  --badge-blocked: #d20f39; /* Red */
+  --badge-parked: #636679; /* Overlay 2 #7c7f93, darkened */
+  --badge-done: #135cea; /* Blue, darkened */
+  --syn-keyword: #8636ec; /* Mauve #8839ef, darkened */
+  --syn-string: #1f7802; /* Green, darkened */
+  --syn-number: #b24509; /* Peach #fe640b, darkened */
+  --syn-comment: #636679; /* Overlay 2, darkened */
+  --syn-function: #135cea; /* Blue, darkened */
+  --syn-type: #935a02; /* Yellow #df8e1d, darkened */
+  --syn-variable: #4c4f69; /* Text */
+  --syn-constant: #b24509; /* Peach, darkened */
+  --syn-operator: #076e9a; /* Sky #04a5e5, darkened */
+  --syn-punctuation: #636679; /* Overlay 2, darkened */
+  --syn-tag: #135cea; /* Blue, darkened */
+  --syn-attribute: #935a02; /* Yellow, darkened */
+  --syn-inserted: #1f7802; /* Green, darkened */
+  --syn-deleted: #cf0637; /* Red #d20f39, darkened */
+}
+
+/* ---- Graphite: neutral grey without a blue cast, low glare, cornflower accent; muted pastels
+   for code. ---- */
+html[data-theme="graphite"] {
+  color-scheme: dark;
+  --bg: #1e1f22;
+  --bg-elev: #25262a;
+  --fg: #d7d8db;
+  --fg-muted: #9a9da5;
+  --accent: #7aa2f7;
+  --border: #34363c;
+  --code-bg: #26282c;
+  --code-fg: #d7d8db;
+  --link: #7aa2f7;
+  --selection: rgb(122 162 247 / 0.3);
+  --mark: rgb(224 175 104 / 0.32);
+  --badge-active: #6cc287;
+  --badge-blocked: #ec7f86;
+  --badge-parked: #9a9da5;
+  --badge-done: #7aa2f7;
+  --syn-keyword: #b9a3e3;
+  --syn-string: #a3c48f;
+  --syn-number: #dfa67e;
+  --syn-comment: #8f939d;
+  --syn-function: #7aa2f7;
+  --syn-type: #74bcc0;
+  --syn-variable: #d7d8db;
+  --syn-constant: #dd9fb1;
+  --syn-operator: #a9adb6;
+  --syn-punctuation: #9a9da5;
+  --syn-tag: #e59393;
+  --syn-attribute: #d9bf86;
+  --syn-inserted: #93c99a;
+  --syn-deleted: #e59393;
+}
+
+/* ---- Midnight: true black for OLED, text softened off white; the panels barely lift. ---- */
+html[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-elev: #0d0d10;
+  --fg: #cfcfd4;
+  --fg-muted: #8e8e96;
+  --accent: #8ab4f8;
+  --border: #232327;
+  --code-bg: #101013;
+  --code-fg: #cfcfd4;
+  --link: #8ab4f8;
+  --selection: rgb(138 180 248 / 0.3);
+  --mark: rgb(253 214 99 / 0.3);
+  --badge-active: #81c995;
+  --badge-blocked: #f28b82;
+  --badge-parked: #8e8e96;
+  --badge-done: #8ab4f8;
+  --syn-keyword: #c58af9;
+  --syn-string: #81c995;
+  --syn-number: #fcad70;
+  --syn-comment: #8e939b;
+  --syn-function: #8ab4f8;
+  --syn-type: #78d9ec;
+  --syn-variable: #cfcfd4;
+  --syn-constant: #ff8bcb;
+  --syn-operator: #aeb0b8;
+  --syn-punctuation: #8e8e96;
+  --syn-tag: #f28b82;
+  --syn-attribute: #fdd663;
+  --syn-inserted: #81c995;
+  --syn-deleted: #f28b82;
+}
+
+/* ---- Nord (official palette; roles from Nord's own editor themes). Code blocks sit on Polar
+   Night like the page, outlined, which keeps Nord's keyword blue at full strength. ---- */
+html[data-theme="nord"] {
+  color-scheme: dark;
+  --bg: #2e3440; /* nord0 */
+  --bg-elev: #3b4252; /* nord1 */
+  --fg: #e5e9f0; /* nord5 */
+  --fg-muted: #a4b0c6; /* nord3 #4c566a, lightened */
+  --accent: #88c0d0; /* nord8 */
+  --border: #434c5e; /* nord2 */
+  --code-bg: #2e3440; /* nord0 */
+  --code-fg: #d8dee9; /* nord4 */
+  --link: #88c0d0; /* nord8 */
+  --selection: rgb(76 86 106 / 0.8); /* nord3 */
+  --mark: rgb(235 203 139 / 0.28); /* nord13 */
+  --badge-active: #a3be8c; /* nord14 */
+  --badge-blocked: #e28189; /* nord11 #bf616a, lightened */
+  --badge-parked: #d8dee9; /* nord4 */
+  --badge-done: #81a1c1; /* nord9 */
+  --syn-keyword: #81a1c1; /* nord9 */
+  --syn-string: #a3be8c; /* nord14 */
+  --syn-number: #b892b1; /* nord15 #b48ead, lightened */
+  --syn-comment: #909eba; /* nord3 bright #616e88, lightened */
+  --syn-function: #88c0d0; /* nord8 */
+  --syn-type: #8fbcbb; /* nord7 */
+  --syn-variable: #d8dee9; /* nord4 */
+  --syn-constant: #81a1c1; /* nord9 */
+  --syn-operator: #81a1c1; /* nord9 */
+  --syn-punctuation: #d8dee9; /* nord4 */
+  --syn-tag: #81a1c1; /* nord9 */
+  --syn-attribute: #8fbcbb; /* nord7 */
+  --syn-inserted: #a3be8c; /* nord14 */
+  --syn-deleted: #e28189; /* nord11, lightened */
+}
+
+/* ---- Catppuccin Mocha (official palette; roles from Catppuccin's style guide). ---- */
+html[data-theme="mocha"] {
+  color-scheme: dark;
+  --bg: #1e1e2e; /* Base */
+  --bg-elev: #181825; /* Mantle */
+  --fg: #cdd6f4; /* Text */
+  --fg-muted: #a6adc8; /* Subtext 0 */
+  --accent: #cba6f7; /* Mauve */
+  --border: #313244; /* Surface 0 */
+  --code-bg: #181825; /* Mantle */
+  --code-fg: #cdd6f4; /* Text */
+  --link: #89b4fa; /* Blue */
+  --selection: rgb(147 153 178 / 0.25); /* Overlay 2 */
+  --mark: rgb(249 226 175 / 0.25); /* Yellow */
+  --badge-active: #a6e3a1; /* Green */
+  --badge-blocked: #f38ba8; /* Red */
+  --badge-parked: #9399b2; /* Overlay 2 */
+  --badge-done: #89b4fa; /* Blue */
+  --syn-keyword: #cba6f7; /* Mauve */
+  --syn-string: #a6e3a1; /* Green */
+  --syn-number: #fab387; /* Peach */
+  --syn-comment: #9399b2; /* Overlay 2 */
+  --syn-function: #89b4fa; /* Blue */
+  --syn-type: #f9e2af; /* Yellow */
+  --syn-variable: #cdd6f4; /* Text */
+  --syn-constant: #fab387; /* Peach */
+  --syn-operator: #89dceb; /* Sky */
+  --syn-punctuation: #9399b2; /* Overlay 2 */
+  --syn-tag: #89b4fa; /* Blue */
+  --syn-attribute: #f9e2af; /* Yellow */
+  --syn-inserted: #a6e3a1; /* Green */
+  --syn-deleted: #f38ba8; /* Red */
+}

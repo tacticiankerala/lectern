@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Lectern's icon: an open book resting on a lectern, in Paper's paper and sienna on a warm
+       dark plate. Drawn on a 16-unit grid (64 per unit), so its edges land on whole pixels at 16,
+       32 and 48 px. The icon set is generated from this file by the Tauri CLI's "icon" command. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2e231b"/>
+      <stop offset="1" stop-color="#1b140f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#plate)"/>
+  <path d="M128 192 Q384 176 512 320 L512 640 Q384 560 128 576 Z" fill="#f4e8d2"/>
+  <path d="M896 192 Q640 176 512 320 L512 640 Q640 560 896 576 Z" fill="#dcc29c"/>
+  <rect x="96" y="640" width="832" height="64" rx="16" fill="#9a5b2e"/>
+  <rect x="448" y="704" width="128" height="128" fill="#9a5b2e"/>
+  <rect x="256" y="832" width="512" height="64" rx="32" fill="#9a5b2e"/>
+</svg>

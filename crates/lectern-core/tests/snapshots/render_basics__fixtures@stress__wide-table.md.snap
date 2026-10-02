@@ -1,0 +1,58 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/stress/wide-table.md
+---
+title: Wide table
+words: 297
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter: none
+outline:
+  h1 #wide-table Wide table
+---- html ----
+<h1 id="wide-table" data-sourcepos="1:1-1:12">Wide table</h1>
+<p data-sourcepos="3:1-3:66">Seven columns, one 800-character cell and one 1,372-character row.</p>
+<div class="table-wrap"><table data-sourcepos="5:1-9:79">
+<thead>
+<tr data-sourcepos="5:1-5:58">
+<th data-sourcepos="5:2-5:7">Area</th>
+<th data-sourcepos="5:9-5:15">Owner</th>
+<th data-sourcepos="5:17-5:24">Status</th>
+<th data-sourcepos="5:26-5:32">Since</th>
+<th data-sourcepos="5:34-5:39">Path</th>
+<th data-sourcepos="5:41-5:49">Summary</th>
+<th data-sourcepos="5:51-5:57">Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="7:1-7:89">
+<td data-sourcepos="7:2-7:10">library</td>
+<td data-sourcepos="7:12-7:21">platform</td>
+<td data-sourcepos="7:23-7:28">done</td>
+<td data-sourcepos="7:30-7:41">2025-12-01</td>
+<td data-sourcepos="7:43-7:65"><code data-sourcepos="7:44-7:64">src/library/scan.rs</code></td>
+<td data-sourcepos="7:67-7:81">Parallel walk</td>
+<td data-sourcepos="7:83-7:88">Fast</td>
+</tr>
+<tr data-sourcepos="8:1-8:1372">
+<td data-sourcepos="8:2-8:9">search</td>
+<td data-sourcepos="8:11-8:20">platform</td>
+<td data-sourcepos="8:22-8:32">in review</td>
+<td data-sourcepos="8:34-8:45">2026-01-01</td>
+<td data-sourcepos="8:47-8:69"><code data-sourcepos="8:48-8:68">src/search/index.rs</code></td>
+<td data-sourcepos="8:71-8:872">The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes.</td>
+<td data-sourcepos="8:874-8:1371">The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show the library before the walk finishes. The indexer walks every root in parallel, records each file it meets, keeps Markdown files apart for the tree, reads the first few kilobytes of each note for its name and status, and writes a snapshot so the next launch can show.</td>
+</tr>
+<tr data-sourcepos="9:1-9:79">
+<td data-sourcepos="9:2-9:9">render</td>
+<td data-sourcepos="9:11-9:16">core</td>
+<td data-sourcepos="9:18-9:23">todo</td>
+<td data-sourcepos="9:25-9:36">2026-01-10</td>
+<td data-sourcepos="9:38-9:58"><code data-sourcepos="9:39-9:57">src/render/mod.rs</code></td>
+<td data-sourcepos="9:60-9:72">Post-passes</td>
+<td data-sourcepos="9:74-9:78">—</td>
+</tr>
+</tbody>
+</table></div>
+<p data-sourcepos="11:1-11:58">A paragraph after the table, to check the layout recovers.</p>

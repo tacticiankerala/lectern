@@ -1,0 +1,17 @@
+---
+source: crates/lectern-core/tests/render_basics.rs
+expression: describe(&doc)
+input_file: fixtures/vault/memory/feedback_incremental_prs.md
+---
+title: feedback_incremental_prs
+words: 22
+tasks: 0/0
+unresolved wikilinks: false
+frontmatter:
+  name: Text("feedback-incremental-prs")
+  description: Text("Quoted \"escaped\" text")
+  metadata.type: Text("feedback")
+  metadata.modified: DateTime("2026-01-01T10:00:00Z")
+outline:
+---- html ----
+<p data-sourcepos="9:1-9:119">Keep each pull request small enough to review in one sitting. Stack follow-ups on top instead of growing the first one.</p>

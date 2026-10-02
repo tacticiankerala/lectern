@@ -1,0 +1,8 @@
+dist/
+dist-fake/
+node_modules/
+test-results/
+playwright-report/
+dev/fixtures.json
+src/generated/
+package-lock.json
