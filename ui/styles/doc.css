@@ -21,6 +21,16 @@
   margin-top: 0;
 }
 
+/* Find in page (find.ts): every match, and the current one. */
+::highlight(find) {
+  background: var(--mark);
+}
+
+::highlight(find-current) {
+  background: var(--accent);
+  color: var(--bg);
+}
+
 /* ---- Text ---- */
 
 .doc p,

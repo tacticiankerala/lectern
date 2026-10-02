@@ -1,5 +1,6 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
-// buttons, tags and images, and scrolling to anchors, lines and saved positions.
+// buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
+// after the text for its last heading to reach the top.
 //
 // Anchor contract (ruling R16): links carry the fragment as written (`href="#Frag"` in-page,
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
@@ -11,27 +12,22 @@ import type { FollowKind } from "./generated/FollowKind";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { SavedPosition } from "./generated/SavedPosition";
+import { blockAt, capture, restore } from "./position";
+import { placeAt } from "./reflow";
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
-/** Anchoring ends once the target has held still (within 2 px) for this many frames... */
-const STABLE_FRAMES = 3;
-const STABLE_PX = 2;
-/** ...or after this long. */
-const ANCHOR_MS = 1000;
-/** How many screens below a heading `layoutBelow` lays out at most. */
-const LAYOUT_SCREENS = 4;
-/** Input that means the reader is scrolling: anchoring stops rather than fight it. */
-export const READER_INPUT = ["wheel", "keydown", "touchstart", "pointerdown"] as const;
 const COPIED_MS = 1200;
 const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
 
 export class DocView {
   private readonly copyTimers = new WeakMap<HTMLElement, number>();
-  /** Stops the anchoring in progress, if any. */
-  private stopAnchoring: (() => void) | null = null;
   /** Bumped by every followed link, so only the latest click navigates. */
   private follows = 0;
+  /** The document's last heading, which the room after the text lets reach the top. */
+  private lastHeading: HTMLElement | null = null;
+  /** The room after the text, in pixels, as last set. */
+  private room = -1;
 
   constructor(
     private readonly host: HTMLElement,
@@ -56,6 +52,14 @@ export class DocView {
       },
       true,
     );
+    // Lazy layout, reflows and resizes move the last heading or the pane's height.
+    if (typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => {
+        this.fitRoom();
+      });
+      observer.observe(host);
+      observer.observe(app.scroller, { box: "border-box" });
+    }
   }
 
   render(doc: DocPayload): void {
@@ -63,6 +67,29 @@ export class DocView {
     // A blocked image has no src to fail: it shows its placeholder straight away.
     for (const img of this.host.querySelectorAll<HTMLImageElement>("img.img-blocked")) {
       placeholder(img);
+    }
+    const headings = this.host.querySelectorAll<HTMLElement>(HEADINGS);
+    this.lastHeading = headings[headings.length - 1] ?? null;
+    // Before anything scrolls, so a spot near the end can be reached.
+    this.fitRoom();
+  }
+
+  /**
+   * Leaves room after the text for its last heading to reach the top of the pane, as any other
+   * can: just enough, so a document without headings, or one whose last section fills a screen,
+   * ends where its text does.
+   */
+  private fitRoom(): void {
+    const scroller = this.app.scroller;
+    const last = this.lastHeading;
+    let room = 0;
+    if (last?.isConnected) {
+      const below = this.host.getBoundingClientRect().bottom - last.getBoundingClientRect().top;
+      room = Math.max(0, Math.round(scroller.clientHeight - TOP_GAP - below));
+    }
+    if (room !== this.room) {
+      this.room = room;
+      scroller.style.setProperty("--tail-room", `${String(room)}px`);
     }
   }
 
@@ -78,156 +105,36 @@ export class DocView {
   scrollToAnchor(id: string, slug?: string): boolean {
     const target = this.findAnchor(id, slug);
     if (target) {
-      this.placeAt(target, TOP_GAP);
+      placeAt(this.app.scroller, target, TOP_GAP);
     }
     return target !== null;
   }
 
   /** Scrolls the block holding source line `line` to the top of the pane. */
   scrollToLine(line: number): boolean {
-    const block = this.blockAt(line);
+    const block = blockAt(this.host, line);
     if (block) {
-      this.placeAt(block, TOP_GAP);
+      placeAt(this.app.scroller, block, TOP_GAP);
     }
     return block !== null;
   }
 
-  /**
-   * Where the reader is: the nearest heading above the pane's top and the distance below it, the
-   * top block's source line, and the scroll fraction.
-   */
+  /** Where the reader is in the document (position.ts). */
   captureAnchor(): SavedPosition {
-    const scroller = this.app.scroller;
-    const top = scroller.getBoundingClientRect().top;
-    const max = scroller.scrollHeight - scroller.clientHeight;
-    let headingId: string | null = null;
-    let offset = 0;
-    let above: HTMLElement | null = null;
-    for (const heading of this.host.querySelectorAll<HTMLElement>(HEADINGS)) {
-      if (heading.getBoundingClientRect().top > top + 1) {
-        break;
-      }
-      above = heading;
-    }
-    if (above) {
-      // Measured with the blocks between at their real height, as `restore` places it.
-      this.layoutBelow(above, top - above.getBoundingClientRect().top);
-      headingId = above.id;
-      offset = top - above.getBoundingClientRect().top;
-    }
-    let line: number | null = null;
-    for (const block of this.host.children) {
-      if (block.getBoundingClientRect().bottom > top) {
-        line = sourceLine(block);
-        break;
-      }
-    }
-    return { headingId, offset, line, fraction: max > 0 ? scroller.scrollTop / max : 0 };
+    return capture(this.host, this.app.scroller);
   }
 
-  /** Scrolls back to a captured position: by heading, else by line, else by fraction. */
+  /** Scrolls back to a captured position (position.ts). */
   restore(p: SavedPosition): void {
-    const heading = p.headingId === null ? null : findById(this.host, p.headingId);
-    if (heading) {
-      this.layoutBelow(heading, p.offset);
-      this.placeAt(heading, -p.offset);
-      return;
-    }
-    const block = p.line === null ? null : this.blockAt(p.line);
-    if (block) {
-      this.placeAt(block, 0);
-      return;
-    }
-    const scroller = this.app.scroller;
-    scroller.scrollTop = p.fraction * (scroller.scrollHeight - scroller.clientHeight);
+    restore(this.host, this.app.scroller, p);
   }
 
   /**
-   * Lays out for real the blocks from `heading` to a screen below `offset`. Off screen they keep
-   * content-visibility's estimated height, so with a long stretch between the heading and the
-   * saved spot (a long section), placing the heading alone would land the reader far off it.
-   * Only within a few screens of the heading, so a long document with few headings never lays
-   * out whole.
+   * Scrolls so `el`'s top sits `at` pixels below the pane's top and holds it there while lazy
+   * layout settles (reflow.ts), for the modules loaded on first use.
    */
-  private layoutBelow(heading: HTMLElement, offset: number): void {
-    const screen = this.app.scroller.clientHeight;
-    if (offset > LAYOUT_SCREENS * screen) {
-      return;
-    }
-    let block: Element | null = heading;
-    while (block && block.parentElement !== this.host) {
-      block = block.parentElement;
-    }
-    const end = heading.getBoundingClientRect().top + offset + screen;
-    for (; block instanceof HTMLElement; block = block.nextElementSibling) {
-      block.style.contentVisibility = "visible";
-      if (block.getBoundingClientRect().bottom >= end) {
-        break;
-      }
-    }
-  }
-
-  /** The element whose source starts last at or before `line`. */
-  private blockAt(line: number): HTMLElement | null {
-    let best: HTMLElement | null = null;
-    let bestLine = 0;
-    for (const el of this.host.querySelectorAll<HTMLElement>("[data-sourcepos]")) {
-      const start = sourceLine(el);
-      if (start !== null && start <= line && start > bestLine) {
-        best = el;
-        bestLine = start;
-      }
-    }
-    return best;
-  }
-
-  /**
-   * Scrolls so `el`'s top sits `at` pixels below the pane's top, and keeps it there. Blocks that
-   * content-visibility kept at an estimated height take their real one as they come near the
-   * viewport, which moves `el` by up to thousands of pixels a frame or two later; so the position
-   * is corrected every frame until `el` has held still for a few frames, for at most a second, and
-   * not once the reader scrolls.
-   */
-  private placeAt(el: HTMLElement, at: number): void {
-    this.stopAnchoring?.();
-    const scroller = this.app.scroller;
-    const correct = (): number => {
-      const delta = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - at;
-      if (Math.abs(delta) > 0.5) {
-        scroller.scrollTop += delta;
-      }
-      return delta;
-    };
-    correct();
-    const started = performance.now();
-    let stable = 0;
-    let frame = 0;
-    const stop = (): void => {
-      cancelAnimationFrame(frame);
-      for (const type of READER_INPUT) {
-        window.removeEventListener(type, stop, true);
-      }
-      if (this.stopAnchoring === stop) {
-        this.stopAnchoring = null;
-      }
-    };
-    const tick = (): void => {
-      if (!el.isConnected || performance.now() - started > ANCHOR_MS) {
-        stop();
-        return;
-      }
-      stable = Math.abs(correct()) <= STABLE_PX ? stable + 1 : 0;
-      if (stable >= STABLE_FRAMES) {
-        stop();
-        return;
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    for (const type of READER_INPUT) {
-      window.addEventListener(type, stop, { capture: true, passive: true });
-    }
-    frame = requestAnimationFrame(tick);
-    this.stopAnchoring = stop;
+  placeAt(el: HTMLElement, at: number): void {
+    placeAt(this.app.scroller, el, at);
   }
 
   private onClick(e: MouseEvent): void {
@@ -338,12 +245,6 @@ export class DocView {
       },
     );
   }
-}
-
-/** The start line of an element's `data-sourcepos` (`12:1-14:3`). */
-function sourceLine(el: Element): number | null {
-  const match = /^(\d+):/.exec(el.getAttribute("data-sourcepos") ?? "");
-  return match ? Number(match[1]) : null;
 }
 
 function decodeFragment(fragment: string): string {

@@ -1,7 +1,7 @@
-// The properties strip above the document: its frontmatter and task count. The status shows as a
-// badge, dates as relative text, `prs` numbers as chips, everything else as compact key/value
-// pairs; keys with nothing to show are left out. It collapses from its header, and remembers that
-// across documents and launches.
+// The properties strip above the document: its frontmatter and task count, and a quiet note of when
+// the file last changed on disk while open. The status shows as a badge, dates as relative text,
+// `prs` numbers as chips, everything else as compact key/value pairs; keys with nothing to show are
+// left out. It collapses from its header, and remembers that across documents and launches.
 import { h } from "./dom";
 import type { DocPayload } from "./generated/DocPayload";
 import type { PropValue } from "./generated/PropValue";
@@ -10,15 +10,41 @@ import type { Property } from "./generated/Property";
 const COLLAPSED_KEY = "lx.properties.collapsed";
 const DAY_MS = 86_400_000;
 const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+const clock = new Intl.DateTimeFormat("en", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
-/** Renders `doc`'s properties into `host`, hiding it when there are none. `now` is for tests. */
-export function renderProperties(host: HTMLElement, doc: DocPayload, now = Date.now()): void {
+/**
+ * Renders `doc`'s properties into `host`, hiding it when there are none. `updated` is when the file
+ * last changed on disk while open, noted as "Updated HH:MM" (alone, without properties). `now` is
+ * for tests.
+ */
+export function renderProperties(
+  host: HTMLElement,
+  doc: DocPayload,
+  now = Date.now(),
+  updated: number | null = null,
+): void {
   const fm = doc.frontmatter;
   const entries = (fm?.kind === "parsed" ? fm.entries : []).filter((e) => !isEmpty(e.value));
   const hasTasks = doc.tasks.total > 0;
+  const note =
+    updated === null
+      ? null
+      : h(
+          "span",
+          {
+            class: "props-updated",
+            title: `Changed on disk at ${new Date(updated).toLocaleString()}`,
+          },
+          `Updated ${clock.format(updated)}`,
+        );
   if (!hasTasks && entries.length === 0 && fm?.kind !== "invalid") {
-    host.hidden = true;
-    host.replaceChildren();
+    host.classList.remove("collapsed");
+    host.replaceChildren(...(note ? [h("div", { class: "props-head props-plain" }, note)] : []));
+    host.hidden = note === null;
     return;
   }
   // A text status is the badge; any other status is an ordinary pair.
@@ -58,6 +84,9 @@ export function renderProperties(host: HTMLElement, doc: DocPayload, now = Date.
         `${String(doc.tasks.done)} / ${String(doc.tasks.total)} tasks`,
       ),
     );
+  }
+  if (note) {
+    head.append(note);
   }
   const setCollapsed = (collapsed: boolean): void => {
     host.classList.toggle("collapsed", collapsed);

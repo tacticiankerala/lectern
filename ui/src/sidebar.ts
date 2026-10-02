@@ -1,8 +1,8 @@
 // The library sidebar (spec §6): a section per root with its name and state, and a lazily built
 // tree. A folder's rows exist only while it is expanded; which folders are expanded is kept in
 // localStorage. Clicking a folder's name opens its README (and expands it) when it has one, else
-// toggles it; README folders carry their `status:` badge. The open document is highlighted, its
-// folders expanded and its row scrolled into view.
+// toggles it; README folders carry their `status:` badge when the setting asks for them. The open
+// document is highlighted, its folders expanded and its row scrolled into view.
 import { h, samePath } from "./dom";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
@@ -70,6 +70,8 @@ export class Sidebar {
   private activeRow: HTMLElement | null = null;
   /** Nothing renders until `start`, after the first paint. */
   private started = false;
+  /** README folders show their `status:` badge (a setting, on by default). */
+  private badges = true;
 
   constructor(
     private readonly host: HTMLElement,
@@ -101,6 +103,17 @@ export class Sidebar {
 
   setLibrary(library: LibraryPayload): void {
     this.library = library;
+    if (this.started) {
+      this.render();
+    }
+  }
+
+  /** Shows or hides README folders' status badges. */
+  setBadges(show: boolean): void {
+    if (show === this.badges) {
+      return;
+    }
+    this.badges = show;
     if (this.started) {
       this.render();
     }
@@ -205,7 +218,7 @@ export class Sidebar {
     return section;
   }
 
-  /** A row: chevron for a folder, the name, and a README folder's badge. */
+  /** A row: chevron for a folder, the name, and a README folder's badge when badges show. */
   private rowElement(node: TreeNode, depth: number, expandable: boolean): HTMLElement {
     const el = h("div", {
       class: node.isDir ? "tree-row dir" : "tree-row file",
@@ -227,7 +240,7 @@ export class Sidebar {
       el.append(h("span", { class: "tree-spacer" }));
     }
     el.append(h("button", { type: "button", class: "tree-name", title: node.name }, node.name));
-    if (node.isDir && node.status !== null) {
+    if (this.badges && node.isDir && node.status !== null) {
       el.append(badge(node.status));
     }
     return el;

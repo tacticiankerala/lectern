@@ -1,14 +1,18 @@
 // What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
-// quick open and Preferences (both loaded on first use), focus mode and the sidebars' widths.
+// quick open, Preferences, find in page and full-text search (all loaded on first use), focus mode
+// and the sidebars' widths.
 import type { App } from "./app";
-import { quietly } from "./dom";
+import { quietly, samePath } from "./dom";
+import type { FindBar } from "./find";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
 import { NARROW } from "./library-controller";
 import type { Menu, MenuEntry } from "./menu";
+import { blockAt } from "./position";
 import type { Preferences } from "./preferences";
 import type { QuickOpen } from "./quick-open";
 import { FlowHold, keepFlow } from "./reflow";
+import type { SearchPanel } from "./search-panel";
 import { bumpFontSize, toggleThemeMode } from "./themes";
 
 /** The sidebars' widths, in pixels, as the resizers allow them. */
@@ -21,6 +25,8 @@ export class Actions {
   /** Loaded on first use. */
   quickOpen: QuickOpen | null = null;
   private preferences: Preferences | null = null;
+  private search: SearchPanel | null = null;
+  private find: FindBar | null = null;
   /** The menu open, if any. */
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
@@ -64,10 +70,20 @@ export class Actions {
         void this.showQuickOpen();
         return true;
       case "search":
-        this.app.openSearch("");
+        this.app.openSearch();
         return true;
       case "find":
         this.app.openFind();
+        return true;
+      case "find-next":
+      case "find-prev":
+        // F3 is also WebView2's own find shortcut, so it is always handled.
+        if (this.find?.isOpen) {
+          if (action === "find-next") this.find.next();
+          else this.find.prev();
+        } else {
+          this.app.openFind();
+        }
         return true;
       case "back":
       case "forward":
@@ -106,7 +122,14 @@ export class Actions {
         this.setFocusMode(!this.focusMode);
         return true;
       case "escape":
-        for (const overlay of [this.menu, this.quickOpen, this.preferences, this.app.panel]) {
+        for (const overlay of [
+          this.menu,
+          this.quickOpen,
+          this.search,
+          this.preferences,
+          this.app.panel,
+          this.find,
+        ]) {
           if (overlay?.isOpen) {
             overlay.close();
             return true;
@@ -136,7 +159,8 @@ export class Actions {
     quietly(this.app.backend.setFullscreen(on));
   }
 
-  private async showQuickOpen(): Promise<void> {
+  /** Quick open, with `query` typed in when given. */
+  async showQuickOpen(query?: string): Promise<void> {
     this.menu?.close(false);
     const { QuickOpen } = await import("./quick-open.js");
     this.quickOpen ??= new QuickOpen(this.app.layout.overlayRoot, {
@@ -145,7 +169,56 @@ export class Actions {
       open: (path) => void this.app.open(path, { push: true }),
     });
     this.preferences?.close();
-    this.quickOpen.open();
+    this.search?.close();
+    this.quickOpen.open(query);
+  }
+
+  /** Full-text search, for `query` when given, else for the last query. */
+  async showSearch(query?: string): Promise<void> {
+    this.menu?.close(false);
+    const { SearchPanel } = await import("./search-panel.js");
+    this.search ??= new SearchPanel(this.app.layout.overlayRoot, {
+      search: (q) => this.app.backend.search(q),
+      open: (path, line, q) => void this.openResult(path, line, q),
+    });
+    this.quickOpen?.close();
+    this.preferences?.close();
+    this.app.panel.close();
+    this.search.open(query);
+  }
+
+  /**
+   * Opens a search result at its line, then finds the query in it once it is on screen, starting
+   * from that line's block: the hit may be in Markdown that doesn't render (a link's destination).
+   */
+  private async openResult(path: string, line: number | null, query: string): Promise<void> {
+    await this.app.open(path, line === null ? { push: true } : { line, push: true });
+    const doc = this.app.state.doc;
+    if (doc && samePath(doc.path, path)) {
+      const near = line === null ? null : blockAt(this.app.layout.doc, line);
+      await this.showFind(query, near ?? undefined);
+    }
+  }
+
+  /** The find bar, searching for `prefill` when given, from `near` (see `FindBar.open`). */
+  async showFind(prefill?: string, near?: Element): Promise<void> {
+    this.menu?.close(false);
+    const { FindBar } = await import("./find.js");
+    this.find ??= new FindBar(this.app.layout.docPane, {
+      doc: () => (this.app.state.doc ? this.app.layout.doc : null),
+      scroller: this.app.scroller,
+      placeAt: (el, at) => {
+        this.app.view.placeAt(el, at);
+      },
+      onRender: (cb) => {
+        this.app.on("doc", cb);
+      },
+    });
+    this.quickOpen?.close();
+    this.search?.close();
+    this.preferences?.close();
+    this.app.panel.close();
+    this.find.open(prefill, near);
   }
 
   private async showPreferences(): Promise<void> {
@@ -164,6 +237,7 @@ export class Actions {
       retryRoot: (path) => void this.app.library.retryRoot(path),
     });
     this.quickOpen?.close();
+    this.search?.close();
     this.app.panel.close();
     this.preferences.open();
   }

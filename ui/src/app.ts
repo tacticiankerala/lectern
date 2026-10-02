@@ -9,7 +9,10 @@
 // - Navigations are numbered, refreshes apart from them (navigation.ts).
 // - `startupNotice` shows once, as a toast.
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
-//   Preferences and the menus are separate modules, loaded on first use.
+//   Preferences, the menus, find in page and full-text search are separate modules, loaded on
+//   first use.
+// - The reading position is saved once scrolling stops for a moment and when the document is
+//   left; a document opened without an anchor or line goes back to its saved position.
 import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
@@ -56,6 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pathMappings: [],
   editor: { mode: "auto" },
   autoUpdate: true,
+  showStatusBadges: true,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -64,6 +68,8 @@ const SAVE_DEBOUNCE_MS = 150;
 const FONT_WAIT_MS = 150;
 /** As many recent files as Rust keeps. */
 const MAX_RECENT = 20;
+/** How long scrolling must stop before the reading position is saved. */
+const POSITION_SAVE_MS = 400;
 /** Settings that move the text, so the reading position is kept across them. */
 const REFLOWING: (keyof Settings)[] = [
   "fontSize",
@@ -82,6 +88,11 @@ export interface AppState {
   recent: RecentEntry[];
   portable: boolean;
   version: string;
+  /**
+   * When the file on screen last changed on disk while it was open (live reload), for the
+   * properties strip's note. Null once another document, or none, is shown.
+   */
+  updated: number | null;
 }
 
 export interface OpenOptions {
@@ -90,7 +101,7 @@ export interface OpenOptions {
   slug?: string;
   /** A source line to scroll to. */
   line?: number;
-  /** A captured position to scroll back to (history). */
+  /** A captured position to scroll back to (history, live reload). */
   position?: SavedPosition;
   /** Record the document on screen, with its position, on the history once this lands. */
   push?: boolean;
@@ -107,13 +118,18 @@ export class App {
     recent: [],
     portable: false,
     version: "",
+    updated: null,
   };
   readonly layout: Layout;
   readonly view: DocView;
-  /** Opens the search panel with a query. Task 12 provides it. */
-  openSearch: (query: string) => void = () => undefined;
-  /** Opens the find bar. Task 12 provides it. */
-  openFind: () => void = () => undefined;
+  /** Opens full-text search, for `query` when given, else for the last query. */
+  openSearch = (query?: string): void => {
+    void this.actions.showSearch(query);
+  };
+  /** Opens the find bar, searching for `prefill` when given. */
+  openFind = (prefill?: string): void => {
+    void this.actions.showFind(prefill);
+  };
   /** Checks for an update on request. Task 13 provides it. */
   checkForUpdates: () => void = () => {
     this.toast("Lectern can't check for updates yet.");
@@ -138,6 +154,8 @@ export class App {
   private started = false;
   /** The latest `open-request` that arrived before startup finished. */
   private queued: OpenRequest | null = null;
+  /** Saves the reading position once scrolling has stopped for a moment. */
+  private positionTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly backend: Backend,
@@ -150,6 +168,13 @@ export class App {
       this.view.scrollToAnchor(id);
     });
     this.updateProgress = trackProgress(this.layout.docPane, this.layout.progress);
+    this.layout.docPane.addEventListener(
+      "scroll",
+      () => {
+        this.schedulePositionSave();
+      },
+      { passive: true },
+    );
 
     const readingButton = h(
       "button",
@@ -285,6 +310,28 @@ export class App {
     this.toasts.show(message);
   }
 
+  /** Saves the reading position in `path`; a save waiting for scrolling to stop is dropped. */
+  savePosition(path: string, position: SavedPosition): void {
+    if (this.positionTimer !== null) {
+      clearTimeout(this.positionTimer);
+      this.positionTimer = null;
+    }
+    quietly(this.backend.savePosition(path, position));
+  }
+
+  private schedulePositionSave(): void {
+    if (this.positionTimer !== null) {
+      clearTimeout(this.positionTimer);
+    }
+    this.positionTimer = setTimeout(() => {
+      this.positionTimer = null;
+      const doc = this.state.doc;
+      if (doc) {
+        this.savePosition(doc.path, this.view.captureAnchor());
+      }
+    }, POSITION_SAVE_MS);
+  }
+
   /**
    * Changes settings: applied at once, keeping the reading position when the text moves, then
    * saved. With `debounce` the save waits until changes stop for a moment (slider drags).
@@ -363,6 +410,7 @@ export class App {
       this.showDoc(result.doc, opts, position);
     } else {
       this.state.doc = null;
+      this.state.updated = null;
       this.state.error = result?.error ?? null;
       this.setTitle(null);
       this.layout.breadcrumbs.replaceChildren();
@@ -393,14 +441,17 @@ export class App {
       // Scrolled to the anchor.
     } else if (opts.line !== undefined && this.view.scrollToLine(opts.line)) {
       // Scrolled to the line.
+    } else if (doc.position) {
+      // Where the reader left it last time.
+      this.view.restore(doc.position);
     } else {
       this.scroller.scrollTop = 0;
     }
   }
 
   /**
-   * What surrounds the body: the title, breadcrumbs and properties (with the task count), and
-   * the document's place at the top of the recent files.
+   * What surrounds the body: the title, breadcrumbs and properties (with the task count and when
+   * the file last changed while open), and the document's place at the top of the recent files.
    */
   showMeta(doc: DocPayload): void {
     this.state.recent = [
@@ -414,7 +465,7 @@ export class App {
         this.library.revealFolder(folder);
       },
     });
-    renderProperties(this.layout.properties, doc);
+    renderProperties(this.layout.properties, doc, Date.now(), this.state.updated);
   }
 
   /** The native window title: the document's, or just Lectern. */
@@ -441,6 +492,7 @@ export class App {
       forget: () => void this.removeRecent(error.path),
       openWithDefaultApp: () => void this.openWithDefaultApp(error.path),
       reveal: () => void this.reveal(error.path),
+      search: () => void this.actions.showQuickOpen(stem(error.path)),
     });
   }
 
@@ -514,6 +566,13 @@ export class App {
     this.layout.app.classList.toggle("no-outline", !s.outlineVisible);
     this.emit("settings");
   }
+}
+
+/** A path's file name without its extension. */
+function stem(path: string): string {
+  const name = path.slice(Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")) + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
 }
 
 function delay(ms: number): Promise<void> {

@@ -1,11 +1,73 @@
-// Keeping the reader's place while the text reflows (a settings change moves it) or the window
-// resizes (focus mode going to or from full screen).
-import { READER_INPUT } from "./doc-view";
+// Keeping the reader's place while the layout moves under it: placing an element and holding it
+// there while lazy layout settles, and holding the reading spot while the text reflows (a settings
+// change moves it) or the window resizes (focus mode going to or from full screen).
 
 /** How long focus mode holds the reader's place while the window goes to or from full screen. */
 const HOLD_MS = 1500;
 /** The hold ends once the place has held still for this many frames after a resize. */
 const HOLD_STABLE_FRAMES = 3;
+/** Placing ends once the target has held still (within 2 px) for this many frames... */
+const STABLE_FRAMES = 3;
+const STABLE_PX = 2;
+/** ...or after this long. */
+const PLACE_MS = 1000;
+/** Input that means the reader is scrolling: placing and holding stop rather than fight it. */
+export const READER_INPUT = ["wheel", "keydown", "touchstart", "pointerdown"] as const;
+
+/**
+ * Stops the placing in progress in each scroller, so only the latest placement holds. The modules
+ * loaded on first use are bundled apart with their own copies of what they import, so they reach
+ * this through their host, never by importing it.
+ */
+const placing = new WeakMap<HTMLElement, () => void>();
+
+/**
+ * Scrolls `scroller` so `el`'s top sits `at` pixels below its top, and keeps it there. Blocks that
+ * content-visibility kept at an estimated height take their real one as they come near the
+ * viewport, which moves `el` by up to thousands of pixels a frame or two later; so the position
+ * is corrected every frame until `el` has held still for a few frames, for at most a second, and
+ * not once the reader scrolls. A newer placement in the same scroller replaces this one.
+ */
+export function placeAt(scroller: HTMLElement, el: HTMLElement, at: number): void {
+  placing.get(scroller)?.();
+  const correct = (): number => {
+    const delta = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - at;
+    if (Math.abs(delta) > 0.5) {
+      scroller.scrollTop += delta;
+    }
+    return delta;
+  };
+  correct();
+  const started = performance.now();
+  let stable = 0;
+  let frame = 0;
+  const stop = (): void => {
+    cancelAnimationFrame(frame);
+    for (const type of READER_INPUT) {
+      window.removeEventListener(type, stop, true);
+    }
+    if (placing.get(scroller) === stop) {
+      placing.delete(scroller);
+    }
+  };
+  const tick = (): void => {
+    if (!el.isConnected || performance.now() - started > PLACE_MS) {
+      stop();
+      return;
+    }
+    stable = Math.abs(correct()) <= STABLE_PX ? stable + 1 : 0;
+    if (stable >= STABLE_FRAMES) {
+      stop();
+      return;
+    }
+    frame = requestAnimationFrame(tick);
+  };
+  for (const type of READER_INPUT) {
+    window.addEventListener(type, stop, { capture: true, passive: true });
+  }
+  frame = requestAnimationFrame(tick);
+  placing.set(scroller, stop);
+}
 
 /** A reading spot held across a reflow: a block, and how far down it the pane's top falls. */
 export interface FlowAnchor {

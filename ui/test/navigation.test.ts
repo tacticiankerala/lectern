@@ -283,3 +283,77 @@ describe("App metadata-only refresh", () => {
     });
   });
 });
+
+describe("App reading position and live reload", () => {
+  const SAVED = { headingId: "bee", offset: 40, line: 1, fraction: 0.5 };
+
+  it("goes back to a document's saved position, unless an anchor or line is asked for", async () => {
+    const { fake, app } = await started(A);
+    fake.setDoc(B, "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1>");
+    await fake.savePosition(B, SAVED);
+    const save = vi.spyOn(fake, "savePosition");
+    const restore = vi.spyOn(app.view, "restore");
+    const toLine = vi.spyOn(app.view, "scrollToLine");
+    await app.open(B);
+    expect(restore).toHaveBeenCalledWith(SAVED);
+    // A goes back where it was left, as saved on the way to B.
+    const left = save.mock.calls.find(([path]) => path === A)?.[1];
+    expect(left).toBeDefined();
+    await app.open(A);
+    expect(restore).toHaveBeenLastCalledWith(left);
+    restore.mockClear();
+    await app.open(B, { line: 1 });
+    expect(toLine).toHaveBeenCalledWith(1);
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("saves the reading position in the document it leaves, and once scrolling stops", async () => {
+    const { fake, app } = await started(A);
+    const save = vi.spyOn(fake, "savePosition");
+    await app.open(B, { push: true });
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(save.mock.calls[0]?.[0]).toBe(A);
+    app.scroller.dispatchEvent(new Event("scroll"));
+    app.scroller.dispatchEvent(new Event("scroll"));
+    await settle(450);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]?.[0]).toBe(B);
+  });
+
+  it("notes Updated in the properties when the file changed on disk, quietly", async () => {
+    const { fake, app } = await started(A);
+    const note = () => document.querySelector("#lx-properties .props-updated")?.textContent;
+    expect(note()).toBeUndefined();
+    fake.setDoc(A, "<p>Changed on disk</p>");
+    fake.emit("doc-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(document.querySelector("#lx-doc p")?.textContent).toBe("Changed on disk");
+    });
+    expect(note()).toMatch(/^Updated \d\d:\d\d$/);
+    const first = app.state.updated;
+    expect(first).not.toBeNull();
+    expect(toasts()).toEqual([]);
+    // Rust re-renders silently once the library index resolves the links: same file, new HTML.
+    const doc = app.state.doc;
+    if (!doc) throw new Error("no doc");
+    fake.overrides[A] = { status: "ok", doc: { ...doc, html: "<p>Links resolved</p>" } };
+    fake.emit("doc-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(document.querySelector("#lx-doc p")?.textContent).toBe("Links resolved");
+    });
+    expect(app.state.updated).toBe(first);
+    // A change that leaves the body as it was refreshes the note too.
+    fake.overrides = {};
+    await settle(5);
+    fake.setDoc(A, "<p>Links resolved</p>");
+    fake.emit("doc-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(app.state.updated).not.toBe(first);
+    });
+    expect(note()).toMatch(/^Updated \d\d:\d\d$/);
+    // Another document carries no note.
+    await app.open(B);
+    expect(note()).toBeUndefined();
+    expect(toasts()).toEqual([]);
+  });
+});

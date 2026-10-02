@@ -57,6 +57,7 @@ fn settings_defaults_match_spec() {
     assert!(s.path_mappings.is_empty());
     assert!(matches!(s.editor, EditorPref::Auto));
     assert!(s.auto_update);
+    assert!(s.show_status_badges);
 }
 
 #[test]
@@ -108,6 +109,7 @@ fn apply_sets_only_the_patched_fields() {
             command: "code -g {path}:{line}".to_owned(),
         }),
         library_roots: Some(vec!["S:\\Dev".to_owned()]),
+        show_status_badges: Some(false),
         path_mappings: Some(vec![PathMapping {
             from: "/home/me/shared".to_owned(),
             to: "S:\\".to_owned(),
@@ -122,6 +124,7 @@ fn apply_sets_only_the_patched_fields() {
     );
     assert_eq!(s.library_roots, ["S:\\Dev"]);
     assert_eq!(s.path_mappings[0].to, "S:\\");
+    assert!(!s.show_status_badges);
     // Untouched fields keep their values.
     assert!(matches!(s.light_theme, ThemeId::Paper));
     assert_eq!(s.font_size, 18);
@@ -138,6 +141,7 @@ fn settings_json_shape() {
     assert_eq!(j["measure"], 72);
     assert_eq!(j["editor"]["mode"], "auto");
     assert_eq!(j["autoUpdate"], true);
+    assert_eq!(j["showStatusBadges"], true);
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -174,6 +178,8 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     assert!(matches!(s.measure, Measure::Full));
     assert_eq!(s.line_height, 1.65);
     assert!(matches!(s.dark_theme, ThemeId::Graphite));
+    // A file written before the setting existed shows the badges, as before.
+    assert!(s.show_status_badges);
 }
 
 #[test]

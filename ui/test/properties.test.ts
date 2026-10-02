@@ -10,16 +10,34 @@ function parsed(entries: Property[]) {
   return docPayload({ kind: "parsed", entries });
 }
 
-function render(doc = parsed([]), now = NOW): HTMLElement {
+function render(doc = parsed([]), now = NOW, updated: number | null = null): HTMLElement {
   const host = document.createElement("section");
   document.body.replaceChildren(host);
-  renderProperties(host, doc, now);
+  renderProperties(host, doc, now, updated);
   return host;
 }
 
 describe("renderProperties", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  it("notes when the file last changed on disk while open, in hours and minutes", () => {
+    const at = new Date(2026, 9, 1, 9, 5, 30).getTime();
+    const host = render(
+      parsed([{ key: "status", value: { kind: "text", value: "active" } }]),
+      NOW,
+      at,
+    );
+    const note = host.querySelector(".props-head .props-updated");
+    expect(note?.textContent).toBe("Updated 09:05");
+    expect(note?.getAttribute("title")).toBe(`Changed on disk at ${new Date(at).toLocaleString()}`);
+    // Without properties, the strip shows for the note alone.
+    const bare = render(docPayload(null), NOW, at);
+    expect(bare.hidden).toBe(false);
+    expect(bare.textContent).toBe("Updated 09:05");
+    expect(bare.querySelector(".props-label")).toBeNull();
+    expect(render(docPayload(null), NOW, null).hidden).toBe(true);
   });
 
   it("renders status badge and relative dates", () => {

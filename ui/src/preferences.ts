@@ -35,6 +35,7 @@ export class Preferences {
   private readonly custom: HTMLInputElement;
   private readonly command: HTMLInputElement;
   private readonly autoUpdate: HTMLInputElement;
+  private readonly badges: HTMLInputElement;
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
 
@@ -84,6 +85,10 @@ export class Preferences {
       this.saveEditor();
     });
 
+    this.badges = h("input", { type: "checkbox", name: "lx-status-badges" });
+    this.badges.addEventListener("change", () => {
+      this.host.update({ showStatusBadges: this.badges.checked });
+    });
     this.autoUpdate = h("input", { type: "checkbox", name: "lx-auto-update" });
     this.autoUpdate.addEventListener("change", () => {
       this.host.update({ autoUpdate: this.autoUpdate.checked });
@@ -94,7 +99,22 @@ export class Preferences {
       "div",
       { class: "prefs", role: "dialog", "aria-modal": "true", "aria-label": "Preferences" },
       h("div", { class: "prefs-head" }, h("h2", {}, "Preferences"), close),
-      section("Libraries", "Folders shown in the sidebar.", this.roots, addFolder),
+      section(
+        "Libraries",
+        "Folders shown in the sidebar.",
+        this.roots,
+        addFolder,
+        h("label", { class: "prefs-check prefs-badges" }, this.badges, "Show folder status badges"),
+        h(
+          "p",
+          { class: "prefs-hint" },
+          "Shows a badge on folders whose README.md has a ",
+          h("code", {}, "status:"),
+          " field in its frontmatter, e.g. ",
+          h("code", {}, "status: active"),
+          ". Green for active, red for blocked, grey for parked, blue for done; other values appear neutral.",
+        ),
+      ),
       section(
         "Path mappings",
         "Absolute paths in notes that start with From open from To instead, such as /home/me/shared → S:\\Shared.",
@@ -149,6 +169,7 @@ export class Preferences {
     this.custom.checked = s.editor.mode === "custom";
     this.command.value = s.editor.mode === "custom" ? s.editor.command : "";
     this.autoUpdate.checked = s.autoUpdate;
+    this.badges.checked = s.showStatusBadges;
     const portable = this.host.portable() ? " · portable" : "";
     this.version.textContent = `Lectern ${this.host.version()}${portable}`;
     this.refresh();

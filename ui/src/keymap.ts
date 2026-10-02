@@ -1,5 +1,6 @@
 // Keyboard shortcuts (spec §6): one global keydown handler that maps keys to actions. While the
-// user types in a field only Esc goes through.
+// user types in a field only Esc and the find and search keys (Ctrl+F, F3, Shift+F3,
+// Ctrl+Shift+F) go through: no field edits with them, and WebView2 would open its own find bar.
 
 export type Action =
   | "open-file"
@@ -7,6 +8,8 @@ export type Action =
   | "quick-open"
   | "search"
   | "find"
+  | "find-next"
+  | "find-prev"
   | "back"
   | "forward"
   | "font-up"
@@ -50,6 +53,9 @@ export function actionFor(e: KeyboardEvent): Action | null {
       return plain ? "focus" : null;
     case "F5":
       return plain ? "reload" : null;
+    case "F3":
+      if (plain) return "find-next";
+      return e.shiftKey && !e.ctrlKey && !e.altKey ? "find-prev" : null;
     case "BrowserBack":
       return plain ? "back" : null;
     case "BrowserForward":
@@ -79,6 +85,9 @@ export function actionFor(e: KeyboardEvent): Action | null {
   return pair ? pair[e.shiftKey ? 1 : 0] : null;
 }
 
+/** What still goes through while the user types in a field. */
+const WHILE_TYPING = new Set<Action>(["escape", "find", "find-next", "find-prev", "search"]);
+
 /** Text entry, where keys belong to the field. */
 function isTyping(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
@@ -94,7 +103,7 @@ function isTyping(target: EventTarget | null): boolean {
 
 /**
  * Listens for shortcuts on `target`. `run` returns whether it handled the action, which then stops
- * the key's default. While the user types in a field only Esc goes through.
+ * the key's default. While the user types in a field only Esc, find and search go through.
  */
 export function installKeymap(
   target: Document | HTMLElement,
@@ -105,7 +114,7 @@ export function installKeymap(
       return;
     }
     const action = actionFor(e);
-    if (action === null || (action !== "escape" && isTyping(e.target))) {
+    if (action === null || (!WHILE_TYPING.has(action) && isTyping(e.target))) {
       return;
     }
     if (run(action, e)) {

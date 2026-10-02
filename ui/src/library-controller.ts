@@ -25,6 +25,9 @@ export class LibraryController {
     app.on("library", () => {
       this.sidebar.setLibrary(app.state.library);
     });
+    app.on("settings", () => {
+      this.sidebar.setBadges(app.state.settings.showStatusBadges);
+    });
     app.on("doc", () => {
       this.sidebar.setActive(app.state.doc?.path ?? null);
     });

@@ -3,12 +3,14 @@
 //
 // - Navigations (startup's `initial`, opens, links, launches) are numbered, and the answer to an
 //   older one is dropped rather than rendered.
-// - `doc-changed` for the open document reloads it in place, keeping the reading position.
-//   Refreshes are numbered apart from navigations: one never cancels a navigation, and one that
-//   arrives while a navigation is in flight waits for it, applying only if it lands on that path.
-// - Navigations that ask to `push` record the document being left, with its reading position, on
-//   the history once they land somewhere else; back and forward restore that position. A travel
-//   changes the history only once it lands, and a second one in flight goes on from its target.
+// - `doc-changed` for the open document reloads it in place, keeping the reading position; when
+//   the file changed on disk, the properties strip notes the time. Refreshes are numbered apart
+//   from navigations: one never cancels a navigation, and one that arrives while a navigation is
+//   in flight waits for it, applying only if it lands on that path.
+// - A navigation that lands somewhere else saves the reading position in the document it leaves.
+//   Those that ask to `push` also record it, with that position, on the history; back and forward
+//   restore it. A travel changes the history only once it lands, and a second one in flight goes
+//   on from its target.
 import type { App, OpenOptions } from "./app";
 import { nextPaint, samePath } from "./dom";
 import type { OpenRequest } from "./generated/OpenRequest";
@@ -131,9 +133,8 @@ export class Navigation {
       return false;
     }
     landed?.();
-    if (opts.push) {
-      this.pushHistory(result);
-    }
+    this.leave(result, opts.push === true);
+    this.app.state.updated = null;
     this.app.show(result, opts, opts.position);
     this.settleDeferred();
     await nextPaint();
@@ -164,11 +165,20 @@ export class Navigation {
     }
   }
 
-  /** Records the document on screen on the history, unless `result` is that same path. */
-  private pushHistory(result: OpenResult): void {
+  /**
+   * Leaves the path on screen for `result`'s, unless it is that same path: saves the reading
+   * position in it and, with `push`, records it on the history.
+   */
+  private leave(result: OpenResult, push: boolean): void {
     const leaving = this.currentEntry();
     const target = result.status === "ok" ? result.doc.path : result.error.path;
-    if (leaving && !samePath(leaving.path, target)) {
+    if (!leaving || samePath(leaving.path, target)) {
+      return;
+    }
+    if (leaving.position) {
+      this.app.savePosition(leaving.path, leaving.position);
+    }
+    if (push) {
       this.history.push(leaving);
     }
   }
@@ -275,8 +285,10 @@ export class Navigation {
   }
 
   /**
-   * Re-renders the document at `path` in place, keeping the reading position. A newer refresh,
-   * or any navigation started meanwhile, makes the answer obsolete.
+   * Re-renders the document at `path` in place, keeping the reading position, and notes the time
+   * in the properties strip when the file changed on disk (rather than, say, its links resolving
+   * once the library is indexed). A newer refresh, or any navigation started meanwhile, makes the
+   * answer obsolete.
    */
   async refresh(path: string): Promise<void> {
     const refresh = ++this.refreshes;
@@ -291,6 +303,9 @@ export class Navigation {
     }
     if (refresh !== this.refreshes || navigation !== this.navigations) {
       return;
+    }
+    if (before && result.status === "ok" && result.doc.mtimeMs !== before.mtimeMs) {
+      this.app.state.updated = Date.now();
     }
     if (before && result.status === "ok" && result.doc.html === before.html) {
       // Only what surrounds the body can have changed: the title, properties and breadcrumbs.

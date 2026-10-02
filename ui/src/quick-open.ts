@@ -92,11 +92,15 @@ export class QuickOpen {
     return !this.backdrop.hidden;
   }
 
-  open(): void {
+  /** Shows the overlay, empty or with `query` typed in. */
+  open(query?: string): void {
     if (!this.isOpen) {
       this.returnFocus = document.activeElement;
       this.backdrop.hidden = false;
       this.input.value = "";
+    }
+    if (query !== undefined) {
+      this.input.value = query;
     }
     this.input.focus();
     this.input.select();

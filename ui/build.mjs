@@ -1,6 +1,7 @@
 // Bundles the UI into dist/ (or dist-fake/ with --fake): app.js, the modules it loads on first use,
 // app.css, index.html and fonts/.
-// The fake build inlines dev/fixtures.json, which `npm run fixtures` writes.
+// The fake build inlines dev/fixtures.json, which `npm run fixtures` writes, with each document's
+// Markdown from fixtures/vault added for the fake's full-text search.
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -19,7 +20,14 @@ if (fake) {
   if (!existsSync(fixtures)) {
     throw new Error("dev/fixtures.json is missing: run `npm run fixtures` first");
   }
-  define.__LX_FIXTURES__ = await readFile(fixtures, "utf8");
+  const data = JSON.parse(await readFile(fixtures, "utf8"));
+  const vault = path.join(root, "../fixtures/vault");
+  data.sources = {};
+  for (const doc of Object.keys(data.docs)) {
+    const rel = doc.slice(data.root.length + 1).split("\\");
+    data.sources[doc] = await readFile(path.join(vault, ...rel), "utf8");
+  }
+  define.__LX_FIXTURES__ = JSON.stringify(data);
 }
 
 await rm(outdir, { recursive: true, force: true });
@@ -28,7 +36,7 @@ await mkdir(outdir, { recursive: true });
 // app.js loads before the first paint, so what is only needed later stays out of it: app.ts loads
 // these modules with `import("./<name>.js")` on first use, and each is bundled on its own (a shared
 // chunk would cost app.js a second request before it can run).
-const lazy = ["quick-open", "preferences", "menu"];
+const lazy = ["quick-open", "preferences", "menu", "search-panel", "find"];
 await esbuild.build({
   entryPoints: [entry],
   outfile: path.join(outdir, "app.js"),

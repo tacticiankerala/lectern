@@ -130,7 +130,7 @@ describe("App error state", () => {
     expect(follow).not.toHaveBeenCalled();
   });
 
-  it("shows a missing file with Retry and Remove from recent", async () => {
+  it("shows a missing file with Retry, Search for it and Remove from recent", async () => {
     const { fake, app } = setup(null);
     fake.startupGate.resolve();
     await app.start();
@@ -138,7 +138,7 @@ describe("App error state", () => {
     const state = document.querySelector("#lx-doc .state-error");
     expect(state?.textContent).toContain("C:\\V\\gone.md");
     const buttons = [...(state?.querySelectorAll("button") ?? [])].map((b) => b.textContent);
-    expect(buttons).toEqual(["Retry", "Remove from recent"]);
+    expect(buttons).toEqual(["Retry", "Search for it", "Remove from recent"]);
     expect(app.state.error?.kind).toBe("notFound");
     expect(app.state.doc).toBeNull();
     // Retry opens it again, which works once the file is back.

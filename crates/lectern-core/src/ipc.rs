@@ -87,6 +87,8 @@ pub struct Settings {
     pub path_mappings: Vec<PathMapping>,
     pub editor: EditorPref,
     pub auto_update: bool,
+    /// Badges on library folders from their README's frontmatter `status:` (on by default).
+    pub show_status_badges: bool,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -111,6 +113,7 @@ pub struct SettingsPatch {
     pub path_mappings: Option<Vec<PathMapping>>,
     pub editor: Option<EditorPref>,
     pub auto_update: Option<bool>,
+    pub show_status_badges: Option<bool>,
 }
 
 /// Where the reader was in a document: the nearest heading and the pixel offset below it, falling

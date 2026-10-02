@@ -44,6 +44,7 @@ impl Default for Settings {
             path_mappings: Vec::new(),
             editor: EditorPref::Auto,
             auto_update: true,
+            show_status_badges: true,
         }
     }
 }
@@ -73,6 +74,7 @@ impl Settings {
         set(&mut self.path_mappings, p.path_mappings);
         set(&mut self.editor, p.editor);
         set(&mut self.auto_update, p.auto_update);
+        set(&mut self.show_status_badges, p.show_status_badges);
         self.clamp();
     }
 

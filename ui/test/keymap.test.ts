@@ -20,6 +20,10 @@ describe("actionFor", () => {
     expect(actionFor(new KeyboardEvent("keydown", { key: "p", ctrlKey: true }))).toBe("quick-open");
     expect(actionFor(key({ key: "F", ctrlKey: true, shiftKey: true }))).toBe("search");
     expect(actionFor(key({ key: "f", ctrlKey: true }))).toBe("find");
+    // F3 is WebView2's own find shortcut otherwise.
+    expect(actionFor(key({ key: "F3" }))).toBe("find-next");
+    expect(actionFor(key({ key: "F3", shiftKey: true }))).toBe("find-prev");
+    expect(actionFor(key({ key: "F3", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "ArrowLeft", altKey: true }))).toBe("back");
     expect(actionFor(key({ key: "ArrowRight", altKey: true }))).toBe("forward");
     expect(actionFor(key({ key: "F11" }))).toBe("focus");
@@ -89,15 +93,22 @@ describe("installKeymap", () => {
     expect(e.defaultPrevented).toBe(false);
   });
 
-  it("stands aside while typing, except for Esc", () => {
+  it("stands aside while typing, except for Esc, find and search", () => {
     const run = vi.fn(() => true);
     uninstall = installKeymap(document, run);
     document.body.innerHTML = "<input type='text'><input type='range'>";
     const [text, range] = document.querySelectorAll("input");
     text?.dispatchEvent(key({ key: "=", ctrlKey: true }));
+    text?.dispatchEvent(key({ key: "p", ctrlKey: true }));
     expect(run).not.toHaveBeenCalled();
     text?.dispatchEvent(key({ key: "Escape" }));
     expect(run).toHaveBeenCalledWith("escape", expect.any(KeyboardEvent));
+    text?.dispatchEvent(key({ key: "f", ctrlKey: true }));
+    expect(run).toHaveBeenLastCalledWith("find", expect.any(KeyboardEvent));
+    text?.dispatchEvent(key({ key: "F", ctrlKey: true, shiftKey: true }));
+    expect(run).toHaveBeenLastCalledWith("search", expect.any(KeyboardEvent));
+    text?.dispatchEvent(key({ key: "F3", shiftKey: true }));
+    expect(run).toHaveBeenLastCalledWith("find-prev", expect.any(KeyboardEvent));
     range?.dispatchEvent(key({ key: "=", ctrlKey: true }));
     expect(run).toHaveBeenLastCalledWith("font-up", expect.any(KeyboardEvent));
   });

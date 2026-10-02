@@ -15,6 +15,8 @@ export interface ErrorActions {
   forget: () => void;
   openWithDefaultApp: () => void;
   reveal: () => void;
+  /** Looks for a file that isn't there by its name: it may have moved. */
+  search: () => void;
 }
 
 const SHORTCUTS: [string, string][] = [
@@ -114,10 +116,11 @@ export function renderWelcome(
 }
 
 export function renderError(host: HTMLElement, error: OpenError, actions: ErrorActions): void {
-  const buttons = [
-    button("Retry", actions.retry, { primary: true }),
-    button("Remove from recent", actions.forget),
-  ];
+  const buttons = [button("Retry", actions.retry, { primary: true })];
+  if (error.kind === "notFound") {
+    buttons.push(button("Search for it", actions.search));
+  }
+  buttons.push(button("Remove from recent", actions.forget));
   if (error.kind === "binary") {
     // Rust would open a Markdown-named file in the reader again, so that one is revealed instead.
     buttons.push(

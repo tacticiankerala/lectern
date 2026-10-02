@@ -21,4 +21,8 @@ lineHeight: number,
 /**
  * 50–120 characters, or full width.
  */
-measure: Measure, codeWrap: boolean, libraryVisible: boolean, outlineVisible: boolean, libraryWidth: number, outlineWidth: number, libraryRoots: Array<string>, pathMappings: Array<PathMapping>, editor: EditorPref, autoUpdate: boolean, };
+measure: Measure, codeWrap: boolean, libraryVisible: boolean, outlineVisible: boolean, libraryWidth: number, outlineWidth: number, libraryRoots: Array<string>, pathMappings: Array<PathMapping>, editor: EditorPref, autoUpdate: boolean, 
+/**
+ * Badges on library folders from their README's frontmatter `status:` (on by default).
+ */
+showStatusBadges: boolean, };

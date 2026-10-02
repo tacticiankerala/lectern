@@ -1,5 +1,8 @@
 // A Backend that serves the fixtures `export_fixtures` rendered (ui/dev/fixtures.json), so the
 // UI runs in a plain browser for Playwright. Tests drive it through `window.__fake`.
+//
+// Full-text search matches the fixtures' Markdown, which `build.mjs --fake` inlines, as Rust does:
+// smart case, line by line.
 import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
 import type { Candidate } from "../src/generated/Candidate";
@@ -12,6 +15,9 @@ import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
+import type { SavedPosition } from "../src/generated/SavedPosition";
+import type { SearchHit } from "../src/generated/SearchHit";
+import type { Segment } from "../src/generated/Segment";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { StartupPayload } from "../src/generated/StartupPayload";
@@ -26,19 +32,32 @@ export interface Fixtures {
   candidates: Candidate[];
   /** By path. */
   docs: Record<string, RenderedDoc>;
+  /** Each document's Markdown, by path; `build.mjs --fake` adds it. */
+  sources?: Record<string, string>;
 }
 
 export interface FakeOptions {
   /** A document "given on the command line": startup renders it as `initial`. */
   initial?: string;
   recent?: RecentEntry[];
-  /** Keeps the settings in sessionStorage, so they survive a page reload as on disk. */
+  /**
+   * Keeps the settings and reading positions in sessionStorage, so they survive a page reload as
+   * on disk.
+   */
   persist?: boolean;
 }
 
 /** The fake library's second root, on a share that never answers. */
 export const OFFLINE_ROOT = "\\\\offline-nas\\share\\notes";
 const SETTINGS_KEY = "lx-fake-settings";
+const POSITIONS_KEY = "lx-fake-positions";
+/**
+ * As Rust: matching lines returned per file and in all, and the context kept around a line's first
+ * hit.
+ */
+const MAX_HITS_PER_FILE = 5;
+const MAX_HITS = 500;
+const CONTEXT_CHARS = 60;
 
 export interface PerfMark {
   name: string;
@@ -48,8 +67,15 @@ export interface PerfMark {
 /** What tests reach through `window.__fake`. */
 export interface FakeControl {
   emit(event: BackendEvent, payload: unknown): void;
-  /** Replaces a document's HTML, adds a document, or (with null) deletes one. */
-  setDoc(path: string, html: string | null): void;
+  /**
+   * Replaces a document's HTML (as if the file changed on disk), adds a document, or (with null)
+   * deletes one. `source` is its Markdown, for full-text search.
+   */
+  setDoc(path: string, html: string | null, source?: string): void;
+  /** Deletes a document. */
+  remove(path: string): void;
+  /** The HTML a document renders to, or null when there is no such document. */
+  html(path: string): string | null;
   /** Drops files or folders on the window. */
   drop(paths: string[]): void;
   /** Every root `retryRoot` was asked to retry, in order. */
@@ -83,6 +109,42 @@ function isUnder(path: string, root: string): boolean {
 
 const MARKDOWN = /\.(md|markdown)$/i;
 
+/**
+ * A matching line's snippet, as Rust cuts it: up to 60 characters either side of the first hit,
+ * with `…` where the line goes on, every hit inside marked.
+ */
+function segments(line: string, hits: RegExpExecArray[]): Segment[] {
+  const first = hits[0]?.index ?? 0;
+  const start = Math.max(0, first - CONTEXT_CHARS);
+  const firstEnd = first + (hits[0]?.[0].length ?? 0);
+  const end = Math.min(line.length, firstEnd + CONTEXT_CHARS);
+  const out: Segment[] = [];
+  let at = start;
+  const text = (to: number): void => {
+    if (to > at) out.push({ text: line.slice(at, to), hit: false });
+  };
+  for (const hit of hits) {
+    const from = hit.index;
+    const to = from + hit[0].length;
+    if (from < start || to > end) continue;
+    text(from);
+    out.push({ text: hit[0], hit: true });
+    at = to;
+  }
+  text(end);
+  // Hits and the text between them alternate, so the ellipses join the text at either end.
+  if (start > 0) {
+    if (out[0] && !out[0].hit) out[0].text = `…${out[0].text}`;
+    else out.unshift({ text: "…", hit: false });
+  }
+  const last = out[out.length - 1];
+  if (end < line.length) {
+    if (last && !last.hit) last.text += "…";
+    else out.push({ text: "…", hit: false });
+  }
+  return out;
+}
+
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
   readonly shown: number[] = [];
@@ -93,7 +155,13 @@ export class FakeBackend implements Backend, FakeControl {
   readonly retried: string[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
-  private readonly docs = new Map<string, { path: string; doc: RenderedDoc }>();
+  private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
+  /** Saved reading positions, by path key. */
+  private readonly positions = new Map<string, SavedPosition>();
+  /** Each document's Markdown, by path key, for full-text search. */
+  private readonly sources = new Map<string, string>();
+  /** Stands in for modification times: bumped by every change. */
+  private clock = 0;
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
   private readonly drops = new Set<(paths: string[]) => void>();
   private settings: Settings = { ...DEFAULT_SETTINGS };
@@ -106,7 +174,10 @@ export class FakeBackend implements Backend, FakeControl {
   ) {
     this.recent = options.recent ?? [];
     for (const [path, doc] of Object.entries(fixtures.docs)) {
-      this.docs.set(key(path), { path, doc });
+      this.docs.set(key(path), { path, doc, mtimeMs: 0 });
+    }
+    for (const [path, source] of Object.entries(fixtures.sources ?? {})) {
+      this.sources.set(key(path), source);
     }
     this.library = {
       roots: [
@@ -129,6 +200,14 @@ export class FakeBackend implements Backend, FakeControl {
         const saved = sessionStorage.getItem(SETTINGS_KEY);
         if (saved !== null) {
           this.settings = { ...this.settings, ...(JSON.parse(saved) as Partial<Settings>) };
+        }
+        const positions = sessionStorage.getItem(POSITIONS_KEY);
+        if (positions !== null) {
+          for (const [k, p] of Object.entries(
+            JSON.parse(positions) as Record<string, SavedPosition>,
+          )) {
+            this.positions.set(k, p);
+          }
         }
       } catch {
         // Defaults, then.
@@ -220,8 +299,51 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.fixtures.candidates);
   }
 
-  search(): Promise<FileHits[]> {
-    return Promise.resolve([]);
+  /** As Rust: files whose name matches first, then by matching lines; at most 500 lines in all. */
+  search(query: string): Promise<FileHits[]> {
+    if (query.trim() === "" || /[\r\n]/.test(query)) {
+      return Promise.resolve([]);
+    }
+    const source = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = /\p{Uppercase}/u.test(query) ? "u" : "iu";
+    // Global for every hit in a line; the file name is tested apart, as a global test would leave
+    // `lastIndex` behind for the next file's lines.
+    const re = new RegExp(source, `g${flags}`);
+    const name = new RegExp(source, flags);
+    const files = [...this.docs.values()].map(({ path, doc }) => {
+      const text = this.sources.get(key(path));
+      if (text === undefined) return null;
+      const lines: SearchHit[] = [];
+      let total = 0;
+      text.split("\n").forEach((line, i) => {
+        const hits = [...line.matchAll(re)];
+        if (hits.length === 0) return;
+        total++;
+        if (lines.length < MAX_HITS_PER_FILE) {
+          lines.push({ line: i + 1, segments: segments(line, hits) });
+        }
+      });
+      if (total === 0) return null;
+      const nameMatch = name.test(baseName(path).replace(/\.(md|markdown)$/i, ""));
+      const rel = path.slice(this.fixtures.root.length + 1).replaceAll("\\", "/");
+      return { path, title: doc.title, rel, nameMatch, hits: lines, total };
+    });
+    const found = files.filter((f) => f !== null);
+    found.sort(
+      (a, b) =>
+        Number(b.nameMatch) - Number(a.nameMatch) ||
+        b.total - a.total ||
+        (a.path < b.path ? -1 : 1),
+    );
+    let budget = MAX_HITS;
+    const results: FileHits[] = [];
+    for (const file of found) {
+      if (budget === 0) break;
+      file.hits = file.hits.slice(0, budget);
+      budget -= file.hits.length;
+      results.push(file);
+    }
+    return Promise.resolve(results);
   }
 
   /** `doc` targets open, with the anchor passed through as written, as Rust does. */
@@ -262,7 +384,15 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.settings);
   }
 
-  savePosition(): Promise<void> {
+  savePosition(path: string, position: SavedPosition): Promise<void> {
+    this.positions.set(key(path), position);
+    if (this.options.persist) {
+      try {
+        sessionStorage.setItem(POSITIONS_KEY, JSON.stringify(Object.fromEntries(this.positions)));
+      } catch {
+        // Kept for this page only.
+      }
+    }
     return Promise.resolve();
   }
 
@@ -330,10 +460,14 @@ export class FakeBackend implements Backend, FakeControl {
     }
   }
 
-  setDoc(path: string, html: string | null): void {
+  setDoc(path: string, html: string | null, source?: string): void {
     const k = key(path);
+    if (source !== undefined) {
+      this.sources.set(k, source);
+    }
     if (html === null) {
       this.docs.delete(k);
+      this.sources.delete(k);
       return;
     }
     const old = this.docs.get(k);
@@ -348,7 +482,15 @@ export class FakeBackend implements Backend, FakeControl {
           wordCount: 0,
           hasUnresolvedWikilinks: false,
         };
-    this.docs.set(k, { path: old?.path ?? path, doc });
+    this.docs.set(k, { path: old?.path ?? path, doc, mtimeMs: ++this.clock });
+  }
+
+  remove(path: string): void {
+    this.setDoc(path, null);
+  }
+
+  html(path: string): string | null {
+    return this.docs.get(key(path))?.doc.html ?? null;
   }
 
   private open(path: string): OpenResult {
@@ -356,10 +498,10 @@ export class FakeBackend implements Backend, FakeControl {
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };
     }
-    return { status: "ok", doc: this.payload(found.path, found.doc) };
+    return { status: "ok", doc: this.payload(found.path, found.doc, found.mtimeMs) };
   }
 
-  private payload(path: string, doc: RenderedDoc): DocPayload {
+  private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
     return {
       path,
       title: doc.title,
@@ -368,9 +510,9 @@ export class FakeBackend implements Backend, FakeControl {
       frontmatter: doc.frontmatter,
       tasks: doc.tasks,
       wordCount: doc.wordCount,
-      mtimeMs: 0,
+      mtimeMs,
       lossy: false,
-      position: null,
+      position: this.positions.get(key(path)) ?? null,
       breadcrumbs: this.breadcrumbs(path),
       rootPath: this.fixtures.root,
     };

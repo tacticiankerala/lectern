@@ -43,6 +43,36 @@ test("a folder click opens its README and shows the status badge", async ({ page
   );
 });
 
+test("folder status badges show by default and hide once turned off", async ({ page }) => {
+  await launch(page);
+  await row(page, "work").locator(".tree-name").click();
+  const alpha = row(page, "work/alpha");
+  await expect(alpha.locator(".badge.status-blocked")).toHaveText("blocked");
+
+  await page.keyboard.press("Control+,");
+  const prefs = page.getByRole("dialog", { name: "Preferences" });
+  const toggle = prefs.getByRole("checkbox", { name: "Show folder status badges" });
+  await expect(toggle).toBeChecked();
+  await expect(prefs).toContainText(
+    "Shows a badge on folders whose README.md has a status: field in its frontmatter, e.g. status: active. Green for active, red for blocked, grey for parked, blue for done; other values appear neutral.",
+  );
+  await toggle.uncheck();
+  await expect(page.locator("#lx-library .badge")).toHaveCount(0);
+  await expect(alpha).toBeVisible();
+  // Saved: a reload keeps them hidden, and turning it on brings them back.
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await page.locator("html[data-lx-ready]").waitFor({ state: "attached" });
+  await expect(row(page, "work/alpha")).toBeVisible();
+  await expect(page.locator("#lx-library .badge")).toHaveCount(0);
+  await page.keyboard.press("Control+,");
+  await prefs.getByRole("checkbox", { name: "Show folder status badges" }).check();
+  await expect(row(page, "work/alpha").locator(".badge.status-blocked")).toHaveText("blocked");
+  await expect(page.locator("#lx-library .lib-root-head .badge.status-active")).toHaveText(
+    "active",
+  );
+});
+
 test("the open document is revealed in the sidebar, and folders stay expanded", async ({
   page,
 }) => {
