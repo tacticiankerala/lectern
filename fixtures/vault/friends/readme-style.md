@@ -16,6 +16,12 @@
 
 Every claim here is invented.[^1]
 
+| Version | Highlights | Download size |
+| :--- | :---: | ---: |
+| 0.3.0 | Faster start | 4.9 MB |
+| 0.2.0 | Dark themes | 5.1 MB |
+| 0.1.0 | First release | 5.2 MB |
+
 ```mermaid
 graph TD
   Library --> Index

@@ -164,5 +164,5 @@ fn startup_payload_carries_a_notice() {
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
     assert!(j["initial"].is_null());
-    assert_eq!(j["settings"]["measure"], 72);
+    assert_eq!(j["settings"]["measure"], 100);
 }

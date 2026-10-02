@@ -47,7 +47,7 @@ fn settings_defaults_match_spec() {
     assert_eq!(s.code_font, "JetBrains Mono");
     assert_eq!(s.font_size, 18);
     assert_eq!(s.line_height, 1.65);
-    assert!(matches!(s.measure, Measure::Chars(72)));
+    assert!(matches!(s.measure, Measure::Chars(100)));
     assert!(!s.code_wrap);
     assert!(s.library_visible);
     assert!(s.outline_visible);
@@ -79,13 +79,36 @@ fn settings_clamped() {
     });
     assert_eq!(s.font_size, 12);
     assert_eq!(s.line_height, 2.0);
-    assert!(matches!(s.measure, Measure::Chars(50)));
+    assert!(matches!(s.measure, Measure::Chars(60)));
 
     s.apply(SettingsPatch {
         measure: Some(Measure::Chars(500)),
         ..Default::default()
     });
-    assert!(matches!(s.measure, Measure::Chars(120)));
+    assert!(matches!(s.measure, Measure::Chars(160)));
+}
+
+#[test]
+fn measure_range_is_60_to_160() {
+    for (saved, clamped) in [
+        (50, 60),
+        (59, 60),
+        (60, 60),
+        (72, 72),
+        (160, 160),
+        (161, 160),
+    ] {
+        let mut s = Settings {
+            measure: Measure::Chars(saved),
+            ..Settings::default()
+        };
+        s.clamp();
+        assert!(
+            matches!(s.measure, Measure::Chars(c) if c == clamped),
+            "{saved} clamps to {clamped}, got {:?}",
+            s.measure
+        );
+    }
 }
 
 #[test]
@@ -138,7 +161,7 @@ fn settings_json_shape() {
     assert_eq!(j["lightTheme"], "paper");
     assert_eq!(j["darkTheme"], "graphite");
     assert_eq!(j["fontSize"], 18);
-    assert_eq!(j["measure"], 72);
+    assert_eq!(j["measure"], 100);
     assert_eq!(j["editor"]["mode"], "auto");
     assert_eq!(j["autoUpdate"], true);
     assert_eq!(j["showStatusBadges"], true);

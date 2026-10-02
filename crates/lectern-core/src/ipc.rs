@@ -32,7 +32,7 @@ pub enum ThemeId {
     Mocha,
 }
 
-/// The reading width: a number of characters, or the full window. JSON `72` or `"full"`.
+/// The reading width: a number of characters, or the full window. JSON `100` or `"full"`.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]

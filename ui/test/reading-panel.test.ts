@@ -98,6 +98,26 @@ describe("reading panel", () => {
     expect(setSettings).toHaveBeenCalledWith({ fontSize: 22 });
   });
 
+  it("offers widths from 60 to 160 characters, starting at 100", async () => {
+    const { panel } = await setup();
+    const width = control(panel, 'input[name="lx-measure"]');
+    expect([width.min, width.max, width.value]).toEqual(["60", "160", "100"]);
+    expect(rootVar("--measure")).toBe("100ch");
+  });
+
+  it("full width, on from the start, turns off to 100 characters", async () => {
+    const fake = new FakeBackend(fixtures(), { initial: A });
+    await fake.setSettings({ measure: "full" });
+    const app = new App(fake, appRoot());
+    await app.start();
+    document.querySelector<HTMLButtonElement>("#lx-reading-btn")?.click();
+    const panel = document.querySelector<HTMLElement>(".reading-panel");
+    if (!panel) throw new Error("no reading panel");
+    control(panel, 'input[name="lx-full-width"]').click();
+    expect(app.state.settings.measure).toBe(100);
+    expect(control(panel, 'input[name="lx-measure"]').value).toBe("100");
+  });
+
   it("sets line height and width, and full width disables the width slider", async () => {
     const { panel, setSettings, app } = await setup();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

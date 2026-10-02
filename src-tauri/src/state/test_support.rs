@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use lectern_core::ipc::{OpenResult, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
+use lectern_core::render::highlight::StartupWarmUp;
 
 use super::doc::{now_ms, render_file, Early, EarlyDoc};
 use super::open_queue::OpenQueue;
@@ -158,6 +159,24 @@ pub(super) fn profile(roots: &[&Path]) -> Profile {
 }
 
 pub(super) fn fixture_in(dir: TempDir, profile: Profile, host: FakeHost) -> Fixture {
+    fixture_full(dir, profile, host, Arc::new(StartupWarmUp::new(|| {})))
+}
+
+/// A fixture whose start-up warm-up is `warm`.
+pub(super) fn fixture_with_warm(
+    profile: Profile,
+    host: FakeHost,
+    warm: Arc<StartupWarmUp>,
+) -> Fixture {
+    fixture_full(TempDir::new(), profile, host, warm)
+}
+
+fn fixture_full(
+    dir: TempDir,
+    profile: Profile,
+    host: FakeHost,
+    warm: Arc<StartupWarmUp>,
+) -> Fixture {
     let host = Arc::new(host);
     let watched = Arc::new(Mutex::new(Vec::new()));
     let early = Arc::new(Slot::default());
@@ -170,6 +189,7 @@ pub(super) fn fixture_in(dir: TempDir, profile: Profile, host: FakeHost) -> Fixt
         exit_after_paint: false,
         profile,
         early: Arc::clone(&early),
+        warm,
         opens: Arc::clone(&opens),
         timings: Timings {
             probe: Duration::from_secs(2),
@@ -178,6 +198,8 @@ pub(super) fn fixture_in(dir: TempDir, profile: Profile, host: FakeHost) -> Fixt
             snapshots: Duration::from_millis(300),
             root: Duration::from_secs(5),
             scan_delay: Duration::ZERO,
+            // Never in a test: releasing would race the other tests' renders.
+            release_after: Duration::from_secs(24 * 60 * 60),
         },
         portable: false,
     };

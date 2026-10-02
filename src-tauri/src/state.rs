@@ -12,6 +12,7 @@
 mod assets;
 mod doc;
 mod follow;
+mod grammars;
 mod library;
 mod open;
 mod open_queue;
@@ -37,6 +38,8 @@ use lectern_core::ipc::{OpenRequest, Settings, SettingsPatch};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::library::LibraryIndex;
 use lectern_core::perf::PerfLog;
+use lectern_core::render::highlight::{BackgroundRelease, StartupWarmUp};
+use lectern_core::render::RenderedDoc;
 use lectern_core::search::ContentCache;
 use lectern_core::watch::WatchEvent;
 use tauri::Window;
@@ -50,6 +53,7 @@ pub use self::trust::Trust;
 pub use self::watch_control::{Watch, WatchControl};
 
 use self::assets::AssetScope;
+use self::grammars::AppGrammars;
 use self::library::Library;
 use self::paths::same_path;
 use self::profile::StateFile;
@@ -76,6 +80,8 @@ pub struct Timings {
     pub root: Duration,
     /// Scans and the watcher start once the window has shown its first document, or after this.
     pub scan_delay: Duration,
+    /// The compiled grammars are released once the window has been in the background this long.
+    pub release_after: Duration,
 }
 
 impl Default for Timings {
@@ -87,6 +93,7 @@ impl Default for Timings {
             snapshots: Duration::from_millis(1500),
             root: Duration::from_secs(8),
             scan_delay: Duration::from_secs(2),
+            release_after: Duration::from_secs(60),
         }
     }
 }
@@ -103,6 +110,8 @@ struct Current {
     rendered_gen: u64,
     /// The index generation it was last refreshed for, so a refresh happens once per generation.
     refreshed_at: Option<u64>,
+    /// What it rendered to, for the languages to warm first.
+    doc: Option<Arc<RenderedDoc>>,
 }
 
 /// Everything AppState needs from boot.
@@ -113,6 +122,8 @@ pub struct Boot {
     pub exit_after_paint: bool,
     pub profile: Profile,
     pub early: Arc<Slot<Early>>,
+    /// Starts the highlighter's warm-up; the first paint may be what it waits for.
+    pub warm: Arc<StartupWarmUp>,
     pub opens: Arc<OpenQueue>,
     pub timings: Timings,
     /// Not running from the folder Lectern was installed in (`updater::detect_portable`).
@@ -147,6 +158,9 @@ pub struct AppState {
     snapshots_loaded: Gate,
     ui_shown: Gate,
     early: Arc<Slot<Early>>,
+    warm: Arc<StartupWarmUp>,
+    /// Releases the compiled grammars while the window is in the background.
+    background: BackgroundRelease,
     opens: Arc<OpenQueue>,
     /// Second launches after startup, resolved one at a time on a thread of their own.
     forwards: Sender<OpenRequest>,
@@ -183,6 +197,10 @@ impl AppState {
         Arc::new_cyclic(|weak: &Weak<AppState>| Self {
             forwards: spawn_forwarder(weak.clone()),
             watch: watch(weak.clone()),
+            background: BackgroundRelease::start(
+                boot.timings.release_after,
+                AppGrammars(weak.clone()),
+            ),
             saver: Saver::new(boot.config_dir, persist),
             host,
             snapshot_dir: boot.snapshot_dir,
@@ -212,6 +230,7 @@ impl AppState {
             snapshots_loaded: Gate::default(),
             ui_shown: Gate::default(),
             early: boot.early,
+            warm: boot.warm,
             opens: boot.opens,
         })
     }
@@ -263,8 +282,11 @@ impl AppState {
 
     pub fn perf_mark(&self, name: &str, ms: Option<f64>) {
         self.perf.mark(name, ms);
-        if name == "first-paint" && self.exit_after_paint {
-            self.host.exit();
+        if name == "first-paint" {
+            if self.exit_after_paint {
+                self.host.exit();
+            }
+            self.warm.first_paint();
         }
     }
 

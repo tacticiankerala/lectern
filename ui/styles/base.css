@@ -4,7 +4,7 @@
   /* Reading, from the settings. */
   --font-size: 18px;
   --line-height: 1.65;
-  --measure: 72ch;
+  --measure: 100ch;
   --body-font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif, "Segoe UI Emoji";
   --code-font: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
 

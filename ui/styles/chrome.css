@@ -591,8 +591,13 @@ button.crumb:hover {
   cursor: pointer;
 }
 
+/* The name button takes the keyboard focus; the ring goes round its whole row, clear of the text. */
 .tree-name:focus-visible {
-  outline-offset: 0;
+  outline: none;
+}
+
+.tree-row:has(> .tree-name:focus-visible) {
+  outline: 2px solid var(--accent);
 }
 
 .tree-row .badge {

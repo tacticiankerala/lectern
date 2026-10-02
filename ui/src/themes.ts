@@ -40,7 +40,7 @@ export const THEMES: ThemeDef[] = [
 
 export const FONT_SIZE = { min: 12, max: 32, default: 18 } as const;
 export const LINE_HEIGHT = { min: 1.3, max: 2, step: 0.05 } as const;
-export const MEASURE = { min: 50, max: 120 } as const;
+export const MEASURE = { min: 60, max: 160, default: 100 } as const;
 
 /** Fonts that ship with Lectern (styles/fonts.css). */
 const BUNDLED_FONTS = new Set([

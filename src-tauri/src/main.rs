@@ -1,7 +1,8 @@
 //! Lectern's entry point. Before Tauri builds the WebView, a boot thread loads the settings and
-//! reads and renders the document to open, so that work overlaps WebView2's start-up; another
-//! thread loads the syntax highlighter. A second launch skips both: the single-instance plugin
-//! hands its arguments to the running Lectern and exits.
+//! reads and renders the document to open, so that work overlaps WebView2's start-up. Once that
+//! render is done (or, without a document, once the window first paints) the highlighter warms
+//! the grammars the vault uses most, at low priority. A second launch skips all of it: the
+//! single-instance plugin hands its arguments to the running Lectern and exits.
 //!
 //! Lectern targets Windows only.
 
@@ -24,7 +25,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use lectern_core::cli::Args;
 use lectern_core::perf::PerfLog;
-use lectern_core::render::highlight;
+use lectern_core::render::highlight::StartupWarmUp;
 
 use crate::app::{Dirs, Launch};
 use crate::state::{Early, EarlyDoc, Profile, Slot, Trust};
@@ -39,11 +40,12 @@ fn main() {
     let dirs = Dirs::for_app(&context.config().identifier);
     let profile = Arc::new(Slot::default());
     let early = Arc::new(Slot::default());
+    let warm = Arc::new(StartupWarmUp::default());
     // A second launch must reach the single-instance hand-over fast, and must not race the
     // running Lectern on the log, the settings or a render.
     let booted = !win::another_instance_is_running(&context.config().identifier);
     if booted {
-        start_boot(args.path.clone(), &dirs, &perf, &profile, &early);
+        start_boot(args.path.clone(), &dirs, &perf, &profile, &early, &warm);
     }
 
     app::run(
@@ -54,50 +56,51 @@ fn main() {
             dirs,
             profile,
             early,
+            warm,
             booted,
         },
     );
 }
 
-/// Starts the highlighter's warm-up and the boot thread. `main` does this unless another Lectern
-/// is running; setup does it when that Lectern quit before handing over.
+/// Starts the boot thread. `main` does this unless another Lectern is running; setup does it when
+/// that Lectern quit before handing over.
 pub(crate) fn start_boot(
     arg: Option<PathBuf>,
     dirs: &Dirs,
     perf: &Arc<PerfLog>,
     profile: &Arc<Slot<Profile>>,
     early: &Arc<Slot<Early>>,
+    warm: &Arc<StartupWarmUp>,
 ) {
-    if let Err(e) = thread::Builder::new()
-        .name("lectern-warm-up".to_owned())
-        .spawn(highlight::warm_up)
-    {
-        eprintln!("lectern: couldn't warm up the highlighter: {e}");
-    }
-    let (dirs, perf, profile, early) = (
+    let (dirs, perf, profile, early, warm) = (
         dirs.clone(),
         Arc::clone(perf),
         Arc::clone(profile),
         Arc::clone(early),
+        Arc::clone(warm),
     );
     let doc = arg.map(|path| std::path::absolute(&path).unwrap_or(path));
     thread::Builder::new()
         .name("lectern-boot".to_owned())
-        .spawn(move || boot(&dirs, doc, &perf, &profile, &early))
+        .spawn(move || {
+            let rendered = boot(&dirs, doc, &perf, &profile, &early);
+            // Only now: the warm-up must never compete with the boot render.
+            warm.boot_finished(rendered);
+        })
         .expect("couldn't start the boot thread");
 }
 
 /// Starts logging, loads the settings for setup, then reads and renders the document to open
 /// with the user's path mappings and no index yet: the one given on the command line (a folder's
 /// README for a folder), else the last one open, unless that is on a network host the user no
-/// longer trusts.
+/// longer trusts. True when it had a document to render, whether or not reading it worked.
 fn boot(
     dirs: &Dirs,
     arg: Option<PathBuf>,
     perf: &PerfLog,
     profile_slot: &Slot<Profile>,
     early_slot: &Slot<Early>,
-) {
+) -> bool {
     logging::init_logging(&dirs.logs);
     let profile = state::load_profile(&dirs.config, win::wsl_default_distro());
     let mapper = state::mapper_for(&profile.settings, profile.wsl_distro.clone());
@@ -138,7 +141,9 @@ fn boot(
             outcome,
         }
     });
+    let rendered = early.doc.is_some();
     early_slot.fill(early);
+    rendered
 }
 
 fn unix_now_ms() -> f64 {

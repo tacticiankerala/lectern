@@ -184,6 +184,7 @@ impl AppState {
             stale: rendered.is_some_and(|r| !r.covered || r.doc.has_unresolved_wikilinks),
             rendered_gen: rendered.map_or(0, |r| r.gen),
             refreshed_at,
+            doc: rendered.map(|r| Arc::clone(&r.doc)),
         });
         self.watch.doc(Some(path.to_path_buf()));
         true

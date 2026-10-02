@@ -26,6 +26,8 @@ use crate::frontmatter::{parse_frontmatter, Frontmatter};
 use crate::library::pathmap::PathMapper;
 use crate::library::LibraryIndex;
 use code_blocks::CodeBlocks;
+
+pub use code_blocks::code_languages;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.

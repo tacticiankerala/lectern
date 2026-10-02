@@ -10,6 +10,7 @@ use std::time::Duration;
 use lectern_core::cli::Args;
 use lectern_core::ipc::{OpenRequest, Settings, ThemeId, ThemeMode};
 use lectern_core::perf::PerfLog;
+use lectern_core::render::highlight::StartupWarmUp;
 use serde::{Deserialize, Serialize};
 use tauri::window::Color;
 use tauri::{
@@ -73,6 +74,8 @@ pub struct Launch {
     pub dirs: Dirs,
     pub profile: Arc<Slot<Profile>>,
     pub early: Arc<Slot<Early>>,
+    /// Starts the highlighter's warm-up once boot has rendered, or at the first paint.
+    pub warm: Arc<StartupWarmUp>,
     /// The boot thread ran. It doesn't when another Lectern was already running, and then this
     /// process only hands its arguments over and exits, unless that Lectern quit meanwhile.
     pub booted: bool,
@@ -150,6 +153,7 @@ fn setup(
             &launch.perf,
             &launch.profile,
             &launch.early,
+            &launch.warm,
         );
     }
     let profile = launch
@@ -175,6 +179,7 @@ fn setup(
             exit_after_paint: launch.args.exit_after_paint,
             profile,
             early: launch.early,
+            warm: launch.warm,
             opens,
             timings: Timings::default(),
             portable,
@@ -291,10 +296,24 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
         return;
     };
     match event {
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => state.track_window(window),
+        WindowEvent::Moved(_) => state.track_window(window),
+        WindowEvent::Resized(_) => {
+            state.track_window(window);
+            state.set_background(in_background(window, None));
+        }
+        WindowEvent::Focused(focused) => {
+            state.set_background(in_background(window, Some(*focused)));
+        }
         WindowEvent::CloseRequested { .. } => state.remember_window(window),
         _ => {}
     }
+}
+
+/// Whether the window is in the background: unfocused or minimised. `focused` is what a focus
+/// event just said, which the window may not report yet.
+fn in_background(window: &Window, focused: Option<bool>) -> bool {
+    let focused = focused.unwrap_or_else(|| window.is_focused().unwrap_or(true));
+    !focused || window.is_minimized().unwrap_or(false)
 }
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {

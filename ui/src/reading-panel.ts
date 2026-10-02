@@ -37,7 +37,6 @@ const MODES: [ThemeMode, string][] = [
   ["dark", "Dark"],
 ];
 const FONT_LIST_ID = "lx-rp-fonts";
-const DEFAULT_MEASURE = 72;
 
 type FontKind = "body" | "code";
 
@@ -74,7 +73,7 @@ export class ReadingPanel {
   /** The installed fonts, asked for once. */
   private systemFonts: Promise<string[]> | null = null;
   /** The width to go back to when Full width is turned off. */
-  private lastMeasure = DEFAULT_MEASURE;
+  private lastMeasure: number = MEASURE.default;
 
   constructor(
     private readonly button: HTMLElement,

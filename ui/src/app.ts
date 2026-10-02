@@ -49,7 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
   codeFont: "JetBrains Mono",
   fontSize: 18,
   lineHeight: 1.65,
-  measure: 72,
+  measure: 100,
   codeWrap: false,
   libraryVisible: true,
   outlineVisible: true,

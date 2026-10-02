@@ -101,7 +101,7 @@ Open the **Aa** panel in the toolbar to change how documents look.
 - **Dark themes:** Graphite, Midnight, Nord, Catppuccin Mocha.
 - Lectern follows Windows' light or dark mode, with a light and a dark theme of your choosing, or you can fix it to one.
 - **Bundled fonts:** Inter, Atkinson Hyperlegible Next, Literata and Source Serif 4 for text, and JetBrains Mono for code. Any font installed on your PC works too. The default text font is Segoe UI Variable.
-- Text size runs from 12 to 32 px and line height from 1.3 to 2.0. The reading width is set in characters, or fills the window. Long code lines can scroll or wrap.
+- Text size runs from 12 to 32 px and line height from 1.3 to 2.0. The reading width is 100 characters by default and adjusts from 60 to 160, or the text can fill the window. Long code lines can scroll or wrap.
 
 ## Privacy
 

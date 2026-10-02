@@ -92,6 +92,40 @@ test("a local image loads through the asset route", async ({ page }) => {
   expect(await logo.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
 });
 
+test("table columns keep their Markdown alignment", async ({ page }) => {
+  await openFixture(page, "friends/readme-style.md");
+  const table = page.locator("#lx-doc table").first();
+  // `| :--- | :---: | ---: |`: left, centred, right; header and body cells alike.
+  const aligns = (row: string) =>
+    table
+      .locator(row)
+      .first()
+      .locator("th, td")
+      .evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign));
+  expect(await aligns("thead tr")).toEqual(["left", "center", "right"]);
+  expect(await aligns("tbody tr")).toEqual(["left", "center", "right"]);
+  // The right-aligned text ends at its cell's right padding, clear of the left one (the header
+  // makes the column wider than the text).
+  const gaps = await table
+    .locator("tbody tr")
+    .first()
+    .locator("td")
+    .last()
+    .evaluate((cell) => {
+      const text = document.createRange();
+      text.selectNodeContents(cell);
+      const t = text.getBoundingClientRect();
+      const c = cell.getBoundingClientRect();
+      const style = getComputedStyle(cell);
+      return {
+        left: t.left - c.left - parseFloat(style.paddingLeft),
+        right: c.right - parseFloat(style.paddingRight) - t.right,
+      };
+    });
+  expect(Math.abs(gaps.right)).toBeLessThan(2);
+  expect(gaps.left).toBeGreaterThan(10);
+});
+
 test("doc-changed reloads the document in place", async ({ page }) => {
   await openFixture(page, "memory/index.md");
   await page.evaluate((path) => {

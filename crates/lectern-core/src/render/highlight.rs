@@ -1,17 +1,130 @@
 //! Syntax highlighting with syntect and two-face's grammars, using the pure-Rust regex engine.
+//!
+//! Grammars compile lazily, regex by regex, the first time a block reaches them, and stay
+//! compiled in the syntax set together with each highlighting thread's matching caches: hundreds
+//! of MB once the large grammars (TSX, TypeScript) have run. So the set can be released
+//! (`release_grammars`), which frees all of it; the next highlight loads it again. `release` drops
+//! it while the window is in the background, and `warm_up` compiles the most used grammars ahead
+//! of the renders, out of their way.
 
-use std::sync::LazyLock;
+mod release;
+mod warm_up;
 
-use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::Instant;
+
 use syntect::html::{ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 use super::escape_html;
 
-/// Loaded on first use, or ahead of time by `warm_up`. Each grammar's regexes compile lazily the
-/// first time a block in that language is highlighted.
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
+pub use release::{BackgroundRelease, Grammars, ReleaseAction, ReleasePolicy};
+pub use warm_up::{warm_up, warm_up_in_background, StartupWarmUp, WARM_UP_LANGUAGES};
+
+/// The syntax set while it is loaded, and when a highlight last used it.
+struct Loaded {
+    set: Arc<SyntaxSet>,
+    used: Instant,
+}
+
+static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
+
+/// Renders highlighting right now. The warm-up waits while there are any.
+static RENDERS: AtomicUsize = AtomicUsize::new(0);
+
+/// At most this many threads highlight. Every thread that runs a grammar's regexes builds its own
+/// matching caches the first time, and keeps them (about 12 MB a thread for the fixture plan's
+/// languages). On a 32-thread PC the first code-heavy render after start-up spent longer building
+/// caches on every thread than the threads saved; 8 measured fastest for that render, while a
+/// warm render stays within its budget.
+const MAX_HIGHLIGHT_THREADS: usize = 8;
+
+/// The threads code blocks are highlighted on. `None` if it couldn't start; highlighting then uses
+/// rayon's global pool.
+static POOL: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+    let threads =
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(MAX_HIGHLIGHT_THREADS));
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("lectern-highlight-{i}"))
+        .build()
+        .ok()
+});
+
+/// Runs `work` on the highlighting threads, where its parallel iterators run too.
+pub(crate) fn on_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    match &*POOL {
+        Some(pool) => pool.install(work),
+        None => work(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pool() -> Option<&'static rayon::ThreadPool> {
+    POOL.as_ref()
+}
+
+fn loaded() -> MutexGuard<'static, Option<Loaded>> {
+    LOADED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The syntax set, loaded if it isn't, marked as used now.
+pub(crate) fn syntaxes() -> Arc<SyntaxSet> {
+    let mut slot = loaded();
+    let loaded = slot.get_or_insert_with(|| Loaded {
+        set: Arc::new(two_face::syntax::extra_newlines()),
+        used: Instant::now(),
+    });
+    loaded.used = Instant::now();
+    Arc::clone(&loaded.set)
+}
+
+/// A syntax set taken out of use, with every compiled grammar and matching cache in it; freed
+/// when dropped, unless a highlight under way still holds it.
+pub struct ReleasedGrammars(
+    #[expect(dead_code, reason = "held only to be freed when dropped")] Arc<SyntaxSet>,
+);
+
+/// Takes the syntax set out of use and drops the warm-up still queued. A highlight under way
+/// keeps the set it holds until it finishes; the next one loads the set again. `None` when it
+/// wasn't loaded.
+pub fn take_grammars() -> Option<ReleasedGrammars> {
+    warm_up::cancel();
+    loaded().take().map(|loaded| ReleasedGrammars(loaded.set))
+}
+
+/// `take_grammars`, freeing the set at once. True when it was loaded.
+pub fn release_grammars() -> bool {
+    take_grammars().is_some()
+}
+
+/// When a highlight last used the syntax set; `None` while it isn't loaded.
+pub fn grammars_last_used() -> Option<Instant> {
+    loaded().as_ref().map(|loaded| loaded.used)
+}
+
+/// Counts a render as highlighting until it is dropped.
+pub(crate) struct Rendering;
+
+impl Rendering {
+    pub(crate) fn begin() -> Self {
+        RENDERS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for Rendering {
+    fn drop(&mut self) {
+        RENDERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a render is highlighting.
+pub(crate) fn rendering() -> bool {
+    RENDERS.load(Ordering::SeqCst) > 0
+}
 
 const BASH: &str = "Bourne Again Shell (bash)";
 
@@ -49,133 +162,40 @@ const PLAIN_TEXT: &str = "Plain Text";
 const MAX_BLOCK_BYTES: usize = 100 * 1024;
 const MAX_LINE_CHARS: usize = 2_000;
 
-/// A short, typical snippet in each language the vault uses most, reaching the grammar states a
-/// real block does. `jsx` shares the `tsx` grammar.
-const WARM_UP_SAMPLES: &[(&str, &str)] = &[
-    (
-        "ruby",
-        concat!(
-            "# note\n",
-            "RSpec.describe Report do\n",
-            "  let(:record) { described_class.new(name: \"a-#{1}\", tags: %w[x y]) }\n",
-            "  it \"keeps its name\" do\n",
-            "    expect(record.name).to eq(:a) if record&.valid?\n",
-            "  end\n",
-            "end\n",
-        ),
-    ),
-    (
-        "tsx",
-        concat!(
-            "import { useState } from \"react\";\n",
-            "// note\n",
-            "export function Panel({ items, onSelect }: Props) {\n",
-            "  const [open, setOpen] = useState<boolean>(false);\n",
-            "  if (items.length === 0) {\n",
-            "    return <p className=\"empty\">None yet.</p>;\n",
-            "  }\n",
-            "  return (\n",
-            "    <ul>\n",
-            "      {items.map((item) => (\n",
-            "        <li key={item.id} onClick={() => onSelect(item)}>{item.label}</li>\n",
-            "      ))}\n",
-            "    </ul>\n",
-            "  );\n",
-            "}\n",
-        ),
-    ),
-    (
-        "ts",
-        concat!(
-            "import type { A } from \"./a\";\n",
-            "// note\n",
-            "export interface B<T> { c?: T; readonly d: string[] }\n",
-            "export async function e(f: number): Promise<string | null> {\n",
-            "  const g = await fetch(`/x/${f}`);\n",
-            "  return g.ok ? \"y\" : null;\n",
-            "}\n",
-        ),
-    ),
-    (
-        "js",
-        concat!(
-            "// note\n",
-            "const { a } = require(\"b\");\n",
-            "export const c = async (d) => {\n",
-            "  for (const e of d) { if (e > 1) return `${e}`; }\n",
-            "};\n",
-        ),
-    ),
-    (
-        "bash",
-        concat!(
-            "# note\n",
-            "export A=\"${HOME}/b\"\n",
-            "for f in *.md; do echo \"$f\" | grep -q x && ls -la \"$f\"; done\n",
-            "bundle exec rspec spec/a_spec.rb --format documentation\n",
-        ),
-    ),
-    (
-        "vim",
-        concat!(
-            "\" note\n",
-            "nnoremap <leader>a :call A()<CR>\n",
-            "function! A() abort\n",
-            "  let l:x = expand('%:t:r')\n",
-            "  if l:x =~# '_spec$' | echo \"y\" | endif\n",
-            "endfunction\n",
-        ),
-    ),
-    ("json", "{\"a\": [1, true, null], \"b\": {\"c\": \"d\"}}\n"),
-    ("yaml", "# note\na: 1\nb:\n  - \"c\"\n  - d: [e, f]\n"),
-    (
-        "scss",
-        "// note\n$a: 1px;\n.b { &:hover { color: darken($c, 10%); } }\n",
-    ),
-    (
-        "sql",
-        "-- note\nSELECT a, COUNT(*) FROM b WHERE c = 'd' GROUP BY a;\n",
-    ),
-    ("diff", "--- a\n+++ b\n@@ -1,2 +1,2 @@\n-x\n+y\n z\n"),
-    (
-        "python",
-        "# note\nimport os\n\ndef a(b: int) -> str:\n    return f\"{b}\" if b else os.sep\n",
-    ),
-    (
-        "html",
-        "<!-- note -->\n<div class=\"a\"><script>let b = 1;</script><a href=\"c\">d</a></div>\n",
-    ),
-    (
-        "markdown",
-        "# A\n\n- b `c` **d** [e](f)\n\n> g\n\n```sh\nh\n```\n",
-    ),
-];
-
-/// Loads the syntax set and compiles the grammars of the most used languages, so the first render
-/// doesn't pay for either. Call it on a background thread at app start.
-pub fn warm_up() {
-    LazyLock::force(&SYNTAXES);
-    WARM_UP_SAMPLES.par_iter().for_each(|(tag, code)| {
-        highlight_to_html(Some(tag), code);
-    });
-}
-
 /// The name of the grammar a fence tag is highlighted with, or `None` when it is shown as plain
 /// text.
 pub fn canonical_lang(tag: &str) -> Option<&'static str> {
-    syntax_for(tag).map(|syntax| syntax.name.as_str())
+    // The set comes and goes, so its grammar names are kept apart, once.
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let set = syntaxes();
+    let name = syntax_for(&set, tag)?.name.as_str();
+    let names = NAMES.get_or_init(|| {
+        set.syntaxes()
+            .iter()
+            .map(|syntax| &*Box::leak(syntax.name.clone().into_boxed_str()))
+            .collect()
+    });
+    names.iter().copied().find(|known| *known == name)
 }
 
 /// The inner HTML of a `<code>` element: spans classed `hl-…` for a known language, else the code
 /// escaped. Blocks over the size limits are escaped too.
 pub fn highlight_to_html(lang_tag: Option<&str>, code: &str) -> String {
-    let syntax = match lang_tag.and_then(syntax_for) {
+    match lang_tag.filter(|tag| !tag.is_empty()) {
+        Some(tag) => highlight_with(&syntaxes(), tag, code),
+        None => escape_html(code),
+    }
+}
+
+/// `highlight_to_html` with the syntax set in hand.
+pub(crate) fn highlight_with(set: &SyntaxSet, tag: &str, code: &str) -> String {
+    let syntax = match syntax_for(set, tag) {
         Some(syntax) if within_limits(code) => syntax,
         _ => return escape_html(code),
     };
     let mut generator = ClassedHTMLGenerator::new_with_class_style(
         syntax,
-        &SYNTAXES,
+        set,
         ClassStyle::SpacedPrefixed { prefix: "hl-" },
     );
     for line in LinesWithEndings::from(code) {
@@ -196,11 +216,10 @@ fn within_limits(code: &str) -> bool {
             .all(|line| line.len() <= MAX_LINE_CHARS || line.chars().count() <= MAX_LINE_CHARS)
 }
 
-fn syntax_for(tag: &str) -> Option<&'static SyntaxReference> {
+fn syntax_for<'a>(syntaxes: &'a SyntaxSet, tag: &str) -> Option<&'a SyntaxReference> {
     if tag.is_empty() {
         return None;
     }
-    let syntaxes: &'static SyntaxSet = &SYNTAXES;
     let lower = tag.to_ascii_lowercase();
     let syntax = match ALIASES.iter().find(|(alias, _)| *alias == lower) {
         Some((_, name)) => syntaxes.find_syntax_by_name(name),

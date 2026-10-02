@@ -17,7 +17,7 @@ use crate::library::path_key;
 
 const FONT_SIZE: (u8, u8) = (12, 32);
 const LINE_HEIGHT: (f64, f64) = (1.3, 2.0);
-const MEASURE: (u16, u16) = (50, 120);
+const MEASURE: (u16, u16) = (60, 160);
 const DEFAULT_LINE_HEIGHT: f64 = 1.65;
 
 /// Reading positions kept, least recently saved dropped first.
@@ -34,7 +34,7 @@ impl Default for Settings {
             code_font: "JetBrains Mono".to_owned(),
             font_size: 18,
             line_height: DEFAULT_LINE_HEIGHT,
-            measure: Measure::Chars(72),
+            measure: Measure::Chars(100),
             code_wrap: false,
             library_visible: true,
             outline_visible: true,

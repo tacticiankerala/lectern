@@ -108,6 +108,11 @@
   text-decoration-color: currentColor;
 }
 
+.doc a:focus-visible {
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
 .doc a.broken {
   color: var(--fg-muted);
   text-decoration-style: dashed;
@@ -252,6 +257,14 @@
   font-size: 0.88em;
 }
 
+/* The ↩ back to the reference, as a plain arrow: on Windows only the emoji font has it unless a
+   symbol font comes first, and the emoji is a blue tile. */
+.doc .footnote-backref {
+  font-family: "Segoe UI Symbol", var(--body-font);
+  font-variant-emoji: text;
+  text-decoration: none;
+}
+
 .doc summary {
   cursor: pointer;
 }
@@ -378,6 +391,17 @@
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
+}
+
+/* A column's alignment from the Markdown (`:---:`, `---:`), which comrak writes as `align`. */
+.doc th[align="center"],
+.doc td[align="center"] {
+  text-align: center;
+}
+
+.doc th[align="right"],
+.doc td[align="right"] {
+  text-align: right;
 }
 
 .doc th {
