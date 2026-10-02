@@ -635,13 +635,30 @@ fn write_attribute<T>(context: &mut Context<'_, '_, T>, name: &str, value: &str)
 mod tests {
     use super::*;
 
+    /// The folder of the document the image tests render.
+    const DOC_DIR: &str = "/vault/notes";
+
     fn images() -> ImageSources {
         ImageSources {
-            doc_dir: PathBuf::from("/vault/notes"),
+            doc_dir: PathBuf::from(DOC_DIR),
             mapper: PathMapper::default(),
             asset_base: "asset:".to_owned(),
             trusted_unc_hosts: vec!["nas".to_owned()],
         }
+    }
+
+    /// The asset URL of the file at `parts` under `dir`, joined one component at a time with the
+    /// platform's own separator, as the renderer joins a relative source.
+    fn asset_in(dir: &Path, parts: &[&str]) -> String {
+        let path = parts
+            .iter()
+            .fold(dir.to_path_buf(), |path, part| path.join(part));
+        asset_url("asset:", &path)
+    }
+
+    /// `asset_in` the document's folder.
+    fn asset(parts: &[&str]) -> String {
+        asset_in(Path::new(DOC_DIR), parts)
     }
 
     /// The rewritten value, or `None` when the source stays as written.
@@ -696,12 +713,13 @@ mod tests {
     fn image_urls_keep_fragments_and_skip_remote_sources() {
         let images = images();
         assert_eq!(
-            rewritten(images.resolve("img/sprite.svg#icon")).as_deref(),
-            Some("asset:%2Fvault%2Fnotes%2Fimg%2Fsprite.svg#icon")
+            rewritten(images.resolve("img/sprite.svg#icon")),
+            Some(format!("{}#icon", asset(&["img", "sprite.svg"])))
         );
+        let parent = Path::new(DOC_DIR).parent().unwrap();
         assert_eq!(
-            rewritten(images.resolve("../a%20b.png?v=2")).as_deref(),
-            Some("asset:%2Fvault%2Fa%20b.png")
+            rewritten(images.resolve("../a%20b.png?v=2")),
+            Some(asset_in(parent, &["a b.png"]))
         );
         for remote in [
             "https://e.com/a.png",
@@ -718,8 +736,12 @@ mod tests {
     fn srcset_candidates_are_rewritten_with_their_descriptors() {
         let images = images();
         assert_eq!(
-            rewritten(images.srcset("a.png 1x, https://e.com/b.png 2x,c.png")).as_deref(),
-            Some("asset:%2Fvault%2Fnotes%2Fa.png 1x, https://e.com/b.png 2x, asset:%2Fvault%2Fnotes%2Fc.png")
+            rewritten(images.srcset("a.png 1x, https://e.com/b.png 2x,c.png")),
+            Some(format!(
+                "{} 1x, https://e.com/b.png 2x, {}",
+                asset(&["a.png"]),
+                asset(&["c.png"])
+            ))
         );
         assert_eq!(rewritten(images.srcset("https://e.com/b.png 2x")), None);
     }
@@ -733,16 +755,21 @@ mod tests {
             None
         );
         assert_eq!(
-            rewritten(images.srcset("a,b.png 1x,c.png  2x ,, d.png,")).as_deref(),
-            Some(concat!(
-                "asset:%2Fvault%2Fnotes%2Fa%2Cb.png 1x, ",
-                "asset:%2Fvault%2Fnotes%2Fc.png 2x, ",
-                "asset:%2Fvault%2Fnotes%2Fd.png"
+            rewritten(images.srcset("a,b.png 1x,c.png  2x ,, d.png,")),
+            Some(format!(
+                "{} 1x, {} 2x, {}",
+                asset(&["a,b.png"]),
+                asset(&["c.png"]),
+                asset(&["d.png"])
             ))
         );
         assert_eq!(
-            rewritten(images.srcset("a.png 1x, b.png 2x")).as_deref(),
-            Some("asset:%2Fvault%2Fnotes%2Fa.png 1x, asset:%2Fvault%2Fnotes%2Fb.png 2x")
+            rewritten(images.srcset("a.png 1x, b.png 2x")),
+            Some(format!(
+                "{} 1x, {} 2x",
+                asset(&["a.png"]),
+                asset(&["b.png"])
+            ))
         );
     }
 
@@ -751,8 +778,8 @@ mod tests {
         let images = images();
         assert_eq!(rewritten(images.resolve(" https://e.com/a.png\t")), None);
         assert_eq!(
-            rewritten(images.resolve("\n img/a.png ")).as_deref(),
-            Some("asset:%2Fvault%2Fnotes%2Fimg%2Fa.png")
+            rewritten(images.resolve("\n img/a.png ")),
+            Some(asset(&["img", "a.png"]))
         );
     }
 

@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+# Releases of the same tag queue rather than cancel: a cancelled run could leave half its assets.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Windows installer and portable exe
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # latest.json carries the app's version, so a tag that disagrees would publish a release the
+      # updater misreads.
+      - name: The tag matches the app version
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match version $version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
+      # Builds and signs the NSIS installer, then publishes the release with the installer, its
+      # signature and latest.json, which installed copies of Lectern check for updates.
+      - name: Build and publish the installer
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          projectPath: .
+          # The Tauri CLI is a dev dependency of ui/; its `tauri` script runs it from the repo root.
+          tauriScript: npm --prefix ui run tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: Lectern ${{ github.ref_name }}
+          releaseBody: |
+            Lectern ${{ github.ref_name }} for Windows 10 (1809 or later) and Windows 11, x64.
+
+            - **`Lectern_…_x64-setup.exe`** installs Lectern for your account, with no admin rights needed. Installed copies update themselves.
+            - **`Lectern_…_x64_portable.exe`** is the same app as a single file you can run from anywhere. It checks for updates but leaves installing them to you.
+
+            Windows may warn that the installer is from an unknown publisher. See [Install](https://github.com/tacticiankerala/lectern#install) in the README for what to do, and for making Lectern your Markdown viewer.
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+
+      - name: Upload the portable exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tauri.outputs.appVersion }}
+        run: |
+          portable="Lectern_${VERSION}_x64_portable.exe"
+          cp target/release/lectern.exe "$portable"
+          gh release upload "$GITHUB_REF_NAME" "$portable" --clobber --repo "$GITHUB_REPOSITORY"

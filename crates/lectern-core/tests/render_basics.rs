@@ -304,20 +304,23 @@ const BIG_PLAN: &str = "work/alpha/plans/2026-01-01-big-plan.md";
 /// Every Markdown fixture, rendered without an index and pinned. Binary files with a `.md` name
 /// are skipped, and so is the big plan, which `big_plan_structure` covers instead of a snapshot
 /// that every rendering change would rewrite. The vault's path is redacted, since links and
-/// images carry absolute paths.
+/// images carry absolute paths. Paths lose the verbatim prefix canonicalizing adds on Windows, so
+/// each document renders at the plain path Lectern would open it by.
 #[test]
 fn fixtures() {
-    let vault = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/vault")
-        .canonicalize()
-        .unwrap();
+    let vault = common::without_verbatim_prefix(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/vault")
+            .canonicalize()
+            .unwrap(),
+    );
     insta::glob!("../../../fixtures/vault", "**/*.md", |path| {
         if path.ends_with(BIG_PLAN) {
             return;
         }
         let bytes = std::fs::read(path).unwrap();
         let Ok(decoded) = decode(&bytes) else { return };
-        let doc = r_at(&decoded.text, path);
+        let doc = r_at(&decoded.text, &common::without_verbatim_prefix(path));
         insta::assert_snapshot!(common::redact_vault(&describe(&doc), &vault));
     });
 }

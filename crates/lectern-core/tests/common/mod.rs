@@ -54,6 +54,17 @@ pub fn redact_vault(text: &str, vault: &Path) -> String {
     out
 }
 
+/// `path` without the verbatim `\\?\` prefix that `canonicalize` (and so `insta::glob!`) adds to
+/// a drive path on Windows. Lectern opens documents by their plain paths and treats a verbatim
+/// path as untrusted, so a document rendered at one would have its local images blocked.
+pub fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// `root` joined with the `/`-separated `rel` using the platform's separators, as the index
 /// joins paths.
 pub fn native_join(root: &Path, rel: &str) -> PathBuf {
