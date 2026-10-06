@@ -12,6 +12,8 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
 import type { RecentEntry } from "./generated/RecentEntry";
+import type { ReviewOp } from "./generated/ReviewOp";
+import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
@@ -91,6 +93,14 @@ export class TauriBackend implements Backend {
 
   openInEditor(path: string, line?: number): Promise<void> {
     return invoke("open_in_editor", { path, line: line ?? null });
+  }
+
+  loadReview(path: string): Promise<ReviewPayload> {
+    return invoke("load_review", { path });
+  }
+
+  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
+    return invoke("review_op", { path, op });
   }
 
   getSettings(): Promise<Settings> {

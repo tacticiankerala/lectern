@@ -28,6 +28,7 @@ export class LibraryController {
     });
     app.on("settings", () => {
       this.sidebar.setBadges(app.state.settings.showStatusBadges);
+      this.sidebar.setCommentCounts(app.state.settings.reviewComments);
     });
     app.on("doc", () => {
       this.sidebar.setActive(app.state.doc?.path ?? null);

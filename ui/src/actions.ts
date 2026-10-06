@@ -1,10 +1,11 @@
 // What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
 // quick open, Preferences, find in page, full-text search, update checks, About and the breadcrumb
-// chooser (all loaded on first use), focus mode and the sidebars' visibility and widths.
+// chooser (all loaded on first use), focus mode, the sidebars' visibility and widths, and showing
+// or hiding the review comments.
 import type { About } from "./about";
 import type { App } from "./app";
 import type { CrumbChooser } from "./crumb-chooser";
-import { quietly, samePath } from "./dom";
+import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
@@ -26,6 +27,8 @@ const WIDTHS = {
 
 /** How long the library's column takes to open or close (chrome.css), with some to spare. */
 const SLIDE_MS = 200;
+/** How long the comments badge pulses when Claude writes while the panel is closed. */
+const PULSE_MS = 2000;
 
 export class Actions {
   /** Loaded on first use. */
@@ -40,6 +43,10 @@ export class Actions {
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
   private readonly libraryButton: HTMLButtonElement;
+  /** Shows or hides every comment surface; its badge counts the open comments. */
+  private readonly commentsButton: HTMLButtonElement;
+  private readonly commentsBadge: HTMLElement;
+  private pulseTimer?: ReturnType<typeof setTimeout>;
   /** Below this width the library hides unless shown on purpose. */
   private readonly narrowLibrary =
     typeof matchMedia === "function" ? matchMedia(NARROW.library) : null;
@@ -63,6 +70,21 @@ export class Actions {
     new MutationObserver(sync).observe(app.layout.app, { attributeFilter: ["class"] });
     this.narrowLibrary?.addEventListener("change", sync);
     sync();
+    this.commentsButton = iconButton("lx-comments-btn", "Comments", ICONS.comments, "Ctrl+Shift+M");
+    this.commentsBadge = h("span", { class: "count-badge" });
+    this.commentsBadge.hidden = true;
+    this.commentsButton.append(this.commentsBadge);
+    this.commentsButton.addEventListener("click", () => {
+      this.run("toggle-comments");
+    });
+    // Next to Aa, which the app adds first.
+    const reading = app.layout.headerActions.querySelector("#lx-reading-btn");
+    if (reading) reading.after(this.commentsButton);
+    else app.layout.headerActions.append(this.commentsButton);
+    this.syncCommentsButton();
+    app.on("settings", () => {
+      this.syncCommentsButton();
+    });
     const outlineButton = iconButton("lx-outline-btn", "Outline", ICONS.outline);
     outlineButton.addEventListener("click", () => {
       this.toggleSidebar("outline");
@@ -82,6 +104,11 @@ export class Actions {
         this.installResizer(handle, side);
       }
     }
+  }
+
+  /** Whether focus mode (F11) is on: no header, sidebars or progress bar. */
+  get inFocusMode(): boolean {
+    return this.focusMode;
   }
 
   /** Runs a shortcut; false when it had nothing to do. */
@@ -156,6 +183,15 @@ export class Actions {
         return this.chooseFromLastCrumb();
       case "toggle-theme":
         this.app.updateSettings(toggleThemeMode(s, this.app.systemDark()));
+        return true;
+      case "toggle-comments":
+        if (!s.reviewComments) return false;
+        this.app.updateSettings({ commentsVisible: !s.commentsVisible });
+        return true;
+      case "add-comment":
+        // Shows hidden comments; the editor comes with adding comments.
+        if (!s.reviewComments) return false;
+        if (!s.commentsVisible) this.app.updateSettings({ commentsVisible: true });
         return true;
       case "focus":
         this.setFocusMode(!this.focusMode);
@@ -488,6 +524,32 @@ export class Actions {
       app.classList.remove(showClass);
       this.app.updateSettings({ [visibleKey]: !visible });
     }
+  }
+
+  /** The open comments, on the comments button's badge; none hides it. */
+  setCommentCount(n: number): void {
+    this.commentsBadge.textContent = n > 0 ? String(n) : "";
+    this.commentsBadge.hidden = n === 0;
+  }
+
+  /** A pulse on the comments badge for a moment: Claude wrote while the panel was closed. */
+  pulseCommentBadge(): void {
+    clearTimeout(this.pulseTimer);
+    this.commentsBadge.classList.add("pulse");
+    this.pulseTimer = setTimeout(() => {
+      this.commentsBadge.classList.remove("pulse");
+    }, PULSE_MS);
+  }
+
+  /**
+   * The comments button: there only while the feature is on, pressed while comments show, its
+   * badge dimmed while they're hidden.
+   */
+  private syncCommentsButton(): void {
+    const s = this.app.state.settings;
+    this.commentsButton.hidden = !s.reviewComments;
+    this.commentsButton.setAttribute("aria-pressed", String(s.commentsVisible));
+    this.commentsBadge.classList.toggle("muted", !s.commentsVisible);
   }
 
   /** The library button: pressed while the library shows, its tooltip saying what a click does. */

@@ -200,11 +200,59 @@ button.crumb:focus-visible {
   background: var(--bg-elev);
 }
 
+/* The right panel: tabs (right-panel.ts) over two panes, each scrolling on its own. */
 #lx-outline {
   grid-area: outline;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 10px 12px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-tab {
+  margin-bottom: -1px;
+  padding: 4px 8px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.panel-tab:hover {
+  color: var(--fg);
+}
+
+.panel-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--fg);
+}
+
+.panel-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg) 18%, transparent) transparent;
+}
+
+#lx-outline-pane {
   /* The entries' offset parent, for keeping the active one in view. */
   position: relative;
-  padding: 28px 12px 32px 4px;
+  padding: 14px 12px 32px 4px;
+}
+
+/* Alone, the outline starts level with the document, as it did before the tabs. */
+.panel-tabs[hidden] + #lx-outline-pane {
+  padding-top: 28px;
 }
 
 .resizer {

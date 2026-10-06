@@ -27,6 +27,8 @@ export type Action =
   | "copy-path"
   | "reload"
   | "preferences"
+  | "toggle-comments"
+  | "add-comment"
   | "escape";
 
 /** Ctrl with a letter or comma, by `e.key` lower-cased: without Shift, then with it. */
@@ -42,6 +44,7 @@ const CTRL: Record<string, [Action | null, Action | null]> = {
   // F5's twin: WebView2 would otherwise reload the whole page.
   r: ["reload", null],
   ",": ["preferences", null],
+  m: [null, "toggle-comments"],
 };
 
 /** The action a key press stands for, or null. */
@@ -88,7 +91,9 @@ export function actionFor(e: KeyboardEvent): Action | null {
       return e.altKey ? "sidebar-font-reset" : "font-reset";
   }
   if (e.altKey) {
-    return null;
+    // Ctrl+Alt+M, by the key typed: where AltGr (Ctrl+Alt) makes M type a character (µ), that's
+    // what the key is, and it stays typing.
+    return !e.shiftKey && e.key.toLowerCase() === "m" ? "add-comment" : null;
   }
   // Ctrl+Shift+. (VS Code's "focus breadcrumbs"), by the key rather than what Shift makes of it.
   if (e.shiftKey && (e.code === "Period" || e.key === ">")) {

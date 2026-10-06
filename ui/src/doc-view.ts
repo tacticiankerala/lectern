@@ -157,7 +157,8 @@ export class DocView {
     }
   }
 
-  private follow(link: HTMLAnchorElement): void {
+  /** Follows a link as the document's own links are followed: also those in review comments. */
+  follow(link: HTMLAnchorElement): void {
     const kind = link.dataset.kind;
     const href = link.getAttribute("href") ?? "";
     if (kind === "anchor" || (kind === undefined && href.startsWith("#"))) {

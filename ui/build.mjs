@@ -45,6 +45,7 @@ const lazy = [
   "update",
   "about",
   "crumb-chooser",
+  "comments",
 ];
 await esbuild.build({
   entryPoints: [entry],

@@ -1,5 +1,6 @@
-// The outline sidebar: the document's headings, indented by level, with a scrollspy that marks the
-// heading being read and keeps it in view.
+// The outline: the document's headings, indented by level, with a scrollspy that marks the heading
+// being read and keeps it in view. It fills the right panel's Outline pane (right-panel.ts), which
+// is its scroll container.
 import { HEADINGS, h } from "./dom";
 import type { OutlineItem } from "./generated/OutlineItem";
 
@@ -117,7 +118,7 @@ export class Outline {
     this.active?.classList.remove("active");
     li.classList.add("active");
     this.active = li;
-    // Keep it in view in the sidebar, which is the entries' offset parent.
+    // Keep it in view in the pane, which is the entries' offset parent.
     const host = this.host;
     if (
       li.offsetTop < host.scrollTop ||

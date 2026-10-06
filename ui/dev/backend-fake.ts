@@ -3,12 +3,24 @@
 //
 // Full-text search matches the fixtures' Markdown, which `build.mjs --fake` inlines, as Rust does:
 // smart case, line by line.
+//
+// Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
+// text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
+// lines; one seeded as moved stays moved while its current text is there; anything else is
+// detached. Without text for a note, comments keep the state they were seeded with. Statuses,
+// `openCount` and the operations follow core's rules.
 import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
+import { QUOTE_CAP, matchPart } from "../src/comments-model";
+import { normalize } from "../src/comments-text";
 import { MARKDOWN_PATH } from "../src/dom";
+import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
+import type { ClaudeKind } from "../src/generated/ClaudeKind";
+import type { CommentStatus } from "../src/generated/CommentStatus";
 import type { Crumb } from "../src/generated/Crumb";
 import type { DocPayload } from "../src/generated/DocPayload";
+import type { EntryView } from "../src/generated/EntryView";
 import type { FileHits } from "../src/generated/FileHits";
 import type { FollowResult } from "../src/generated/FollowResult";
 import type { FollowTarget } from "../src/generated/FollowTarget";
@@ -16,13 +28,17 @@ import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
+import type { ReviewOp } from "../src/generated/ReviewOp";
+import type { ReviewPayload } from "../src/generated/ReviewPayload";
 import type { SavedPosition } from "../src/generated/SavedPosition";
 import type { SearchHit } from "../src/generated/SearchHit";
 import type { Segment } from "../src/generated/Segment";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { StartupPayload } from "../src/generated/StartupPayload";
+import type { StatusChange } from "../src/generated/StatusChange";
 import type { TreeNode } from "../src/generated/TreeNode";
+import type { UnreadableView } from "../src/generated/UnreadableView";
 import type { UpdateInfo } from "../src/generated/UpdateInfo";
 import type { UserOpen } from "../src/generated/UserOpen";
 
@@ -35,6 +51,8 @@ export interface Fixtures {
   docs: Record<string, RenderedDoc>;
   /** Each document's Markdown, by path; `build.mjs --fake` adds it. */
   sources?: Record<string, string>;
+  /** Core's review text for each document, by path: `[startLine, endLine, text]` per block. */
+  textBlocks?: Record<string, [number, number, string][]>;
 }
 
 export interface FakeOptions {
@@ -59,6 +77,21 @@ const POSITIONS_KEY = "lx-fake-positions";
 const MAX_HITS_PER_FILE = 5;
 const MAX_HITS = 500;
 const CONTEXT_CHARS = 60;
+/** As core: the longest comment text accepted, in characters. */
+const MAX_COMMENT_CHARS = 20_000;
+/** As core: the status a Claude entry's kind gives its comment. */
+const KIND_STATUS: Record<ClaudeKind, CommentStatus> = {
+  reply: "replied",
+  question: "question",
+  pushback: "pushback",
+  resolved: "resolved",
+};
+/** As core: the status each change sets. */
+const CHANGE_STATUS: Record<StatusChange, CommentStatus> = {
+  resolve: "resolved",
+  reopen: "open",
+  dismiss: "dismissed",
+};
 
 export interface PerfMark {
   name: string;
@@ -92,6 +125,51 @@ export interface FakeControl {
   updateError: string | null;
   /** Every `checkUpdate` and `installUpdate` call, in order. */
   readonly updateCalls: ("check" | "install")[];
+  /**
+   * Gives a note a sidecar holding `payload`'s comments (each with its status as its header's and
+   * every entry already seen), or (with null) none.
+   */
+  setReview(path: string, payload: ReviewPayload | null): void;
+  /** Appends a Claude entry to comment `id`, as Claude editing the sidecar would. */
+  claudeReply(path: string, id: number, kind: ClaudeKind | null, text: string): void;
+  /** Replaces core's text for a note, as if the note were edited. */
+  setText(path: string, blocks: [number, number, string][]): void;
+  /** Core's text blocks for a note, as `setText` takes them. */
+  blocksOf(path: string): [number, number, string][];
+  /** Core's text for a note: its blocks' text joined by spaces. */
+  coreText(path: string): string;
+  /** How many times the review was loaded or changed. */
+  reviewCalls(): number;
+  /** Makes the next `reviewOp` fail with `message`, as Rust's command would. */
+  failNextReviewOp(message: string): void;
+}
+
+/** A comment in the fake's review store. */
+interface StoredComment {
+  id: number;
+  /** The status in its header, which a newer Claude entry overrides. */
+  status: CommentStatus;
+  /** How many entries it had when last saved: the sidecar's `n=`. */
+  seen: number;
+  startLine: number;
+  endLine: number;
+  headingPath: string[];
+  quote: string;
+  entries: EntryView[];
+  /** Its state when seeded, kept while the note's text is unknown. */
+  state: AnchorState;
+  /** Seeded as moved: the passage its quote became. */
+  movedTo: string | null;
+  jumpLine: number | null;
+  pinnedHeading: string | null;
+}
+
+interface StoredReview {
+  noteWslPath: string | null;
+  sidecarWslPath: string | null;
+  readOnly: string | null;
+  comments: StoredComment[];
+  unreadable: UnreadableView[];
 }
 
 declare global {
@@ -150,6 +228,67 @@ function segments(line: string, hits: RegExpExecArray[]): Segment[] {
   return out;
 }
 
+/** As core: a newer Claude entry's kind gives the status, else the header's stands. */
+function effectiveStatus(c: StoredComment): CommentStatus {
+  const last = c.entries[c.entries.length - 1];
+  if (last && c.entries.length > c.seen && last.author === "claude") {
+    return KIND_STATUS[last.kind ?? "reply"];
+  }
+  return c.status;
+}
+
+/** Where a comment's quote is in core's `text` (see the module comment). */
+function resolveState(c: StoredComment, text: string | null): AnchorState {
+  if (text === null) {
+    return c.state;
+  }
+  if (c.movedTo !== null && text.includes(normalize(c.movedTo))) {
+    return "moved";
+  }
+  const needle = normalize(matchPart(c.quote));
+  return needle !== "" && text.includes(needle) ? "anchored" : "detached";
+}
+
+/** As core caps a quote: 500 characters, then an ellipsis. */
+function capQuote(quote: string): string {
+  const chars = Array.from(quote);
+  return chars.length > QUOTE_CAP ? `${chars.slice(0, QUOTE_CAP).join("")}…` : quote;
+}
+
+/** Comment text as core stores it, or the error core refuses it with. */
+function cleanText(text: string): string {
+  const clean = text.trim().replaceAll("\r\n", "\n");
+  if (clean === "") {
+    throw new Error("Write something first.");
+  }
+  if (Array.from(clean).length > MAX_COMMENT_CHARS) {
+    throw new Error("That comment is too long (over 20,000 characters).");
+  }
+  return clean;
+}
+
+/** A thread entry, its Markdown shown as escaped text: the fake has no renderer. */
+function entry(author: "you" | "claude", kind: ClaudeKind | null, text: string): EntryView {
+  const escaped = text.replace(/[&<>"]/g, (ch) => `&#${String(ch.charCodeAt(0))};`);
+  return { author, kind, text, html: `<p>${escaped}</p>` };
+}
+
+/** As core names a sidecar: `plan.md` → `plan.review.md`, `x.markdown` → `x.markdown.review.md`. */
+function sidecarOf(path: string): string {
+  const name = baseName(path);
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 && name.slice(dot + 1).toLowerCase() === "md" ? name.slice(0, dot) : name;
+  return `${path.slice(0, path.length - name.length)}${base}.review.md`;
+}
+
+/** A drive path as WSL mounts it (`C:\x` → `/mnt/c/x`); null for anything else. */
+function wslPath(path: string): string | null {
+  const drive = /^([A-Za-z]):\\(.*)$/.exec(path);
+  return drive
+    ? `/mnt/${(drive[1] ?? "").toLowerCase()}/${(drive[2] ?? "").replaceAll("\\", "/")}`
+    : null;
+}
+
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
   readonly shown: number[] = [];
@@ -172,6 +311,12 @@ export class FakeBackend implements Backend, FakeControl {
   private clock = 0;
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
   private readonly drops = new Set<(paths: string[]) => void>();
+  /** Sidecars, by note path key. */
+  private readonly reviews = new Map<string, StoredReview>();
+  /** Core's text blocks, by path key. */
+  private readonly textBlocks = new Map<string, [number, number, string][]>();
+  private reviewCount = 0;
+  private reviewFailure: string | null = null;
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private library: LibraryPayload;
   private recent: RecentEntry[];
@@ -186,6 +331,9 @@ export class FakeBackend implements Backend, FakeControl {
     }
     for (const [path, source] of Object.entries(fixtures.sources ?? {})) {
       this.sources.set(key(path), source);
+    }
+    for (const [path, blocks] of Object.entries(fixtures.textBlocks ?? {})) {
+      this.textBlocks.set(key(path), blocks);
     }
     this.library = {
       roots: [
@@ -376,6 +524,192 @@ export class FakeBackend implements Backend, FakeControl {
 
   openInEditor(): Promise<void> {
     return Promise.resolve();
+  }
+
+  loadReview(path: string): Promise<ReviewPayload> {
+    this.reviewCount++;
+    return Promise.resolve(this.reviewPayload(path));
+  }
+
+  /** The five operations, on the store, as core applies them. */
+  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
+    this.reviewCount++;
+    try {
+      this.applyOp(path, op);
+    } catch (e) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(e instanceof Error ? e.message : String(e));
+    }
+    return Promise.resolve(this.reviewPayload(path));
+  }
+
+  setReview(path: string, payload: ReviewPayload | null): void {
+    if (payload === null) {
+      this.reviews.delete(key(path));
+      return;
+    }
+    this.reviews.set(key(path), {
+      noteWslPath: payload.noteWslPath,
+      sidecarWslPath: payload.sidecarWslPath,
+      readOnly: payload.readOnly,
+      unreadable: structuredClone(payload.unreadable),
+      comments: payload.comments.map((c) => ({
+        id: c.id,
+        status: c.status,
+        seen: c.entries.length,
+        startLine: c.startLine,
+        endLine: c.endLine,
+        headingPath: [...c.headingPath],
+        quote: c.quote,
+        entries: structuredClone(c.entries),
+        state: c.state,
+        movedTo: c.state === "moved" ? c.currentText : null,
+        jumpLine: c.jumpLine,
+        pinnedHeading: c.pinnedHeading,
+      })),
+    });
+  }
+
+  claudeReply(path: string, id: number, kind: ClaudeKind | null, text: string): void {
+    const c = this.reviews.get(key(path))?.comments.find((x) => x.id === id);
+    if (!c) {
+      throw new Error(`no comment C${String(id)} on ${path}`);
+    }
+    c.entries.push(entry("claude", kind, text));
+  }
+
+  setText(path: string, blocks: [number, number, string][]): void {
+    this.textBlocks.set(key(path), blocks);
+  }
+
+  blocksOf(path: string): [number, number, string][] {
+    return structuredClone(this.textBlocks.get(key(path)) ?? []);
+  }
+
+  coreText(path: string): string {
+    return (this.textBlocks.get(key(path)) ?? []).map(([, , text]) => text).join(" ");
+  }
+
+  reviewCalls(): number {
+    return this.reviewCount;
+  }
+
+  failNextReviewOp(message: string): void {
+    this.reviewFailure = message;
+  }
+
+  private applyOp(path: string, op: ReviewOp): void {
+    const failure = this.reviewFailure;
+    this.reviewFailure = null;
+    if (failure !== null) {
+      throw new Error(failure);
+    }
+    const existing = this.reviews.get(key(path));
+    if (existing?.readOnly) {
+      throw new Error(existing.readOnly);
+    }
+    const review = existing ?? {
+      noteWslPath: wslPath(path),
+      sidecarWslPath: wslPath(sidecarOf(path)),
+      readOnly: null,
+      comments: [],
+      unreadable: [],
+    };
+    if (op.op === "add") {
+      const text = cleanText(op.text);
+      const ids = [
+        ...review.comments.map((c) => c.id),
+        ...review.unreadable.map((u) => Number(/^## C(\d+)/.exec(u.raw)?.[1] ?? 0)),
+      ];
+      review.comments.push({
+        id: Math.max(0, ...ids) + 1,
+        status: "open",
+        seen: 1,
+        startLine: op.anchor.startLine,
+        endLine: op.anchor.endLine,
+        headingPath: [],
+        quote: capQuote(normalize(op.anchor.quote)),
+        entries: [entry("you", null, text)],
+        state: "anchored",
+        movedTo: null,
+        jumpLine: op.anchor.startLine,
+        pinnedHeading: null,
+      });
+      this.reviews.set(key(path), review);
+      return;
+    }
+    const c = review.comments.find((x) => x.id === op.id);
+    if (!c) {
+      throw new Error("That comment no longer exists.");
+    }
+    // Newer Claude entries are folded into the header first, as core settles a comment.
+    c.status = effectiveStatus(c);
+    switch (op.op) {
+      case "reply":
+        c.entries.push(entry("you", null, cleanText(op.text)));
+        c.status = "open";
+        break;
+      case "setStatus":
+        c.status = CHANGE_STATUS[op.change];
+        break;
+      case "reattach":
+        c.startLine = op.anchor.startLine;
+        c.endLine = op.anchor.endLine;
+        c.quote = capQuote(normalize(op.anchor.quote));
+        c.state = "anchored";
+        c.movedTo = null;
+        c.jumpLine = op.anchor.startLine;
+        c.pinnedHeading = null;
+        break;
+      case "edit": {
+        const target = c.entries[op.entry];
+        if (!target) {
+          throw new Error("That reply no longer exists.");
+        }
+        if (target.author !== "you") {
+          throw new Error("Only your own replies can be edited.");
+        }
+        c.entries[op.entry] = entry("you", null, cleanText(op.text));
+        break;
+      }
+    }
+    c.seen = c.entries.length;
+  }
+
+  /** The review of `path` as `load_review` answers: each comment anchored against core's text. */
+  private reviewPayload(path: string): ReviewPayload {
+    const review = this.reviews.get(key(path));
+    const blocks = this.textBlocks.get(key(path));
+    const text = blocks === undefined ? null : this.coreText(path);
+    const comments = (review?.comments ?? []).map((c) => {
+      const state = resolveState(c, text);
+      const detached = state === "detached";
+      return {
+        id: c.id,
+        status: effectiveStatus(c),
+        state,
+        startLine: c.startLine,
+        endLine: c.endLine,
+        headingPath: [...c.headingPath],
+        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : null) : c.startLine,
+        pinnedHeading: detached && c.state === "detached" ? c.pinnedHeading : null,
+        quote: c.quote,
+        currentText: state === "moved" ? c.movedTo : null,
+        entries: structuredClone(c.entries),
+      };
+    });
+    return {
+      notePath: path,
+      sidecarPath: sidecarOf(path),
+      noteWslPath: review ? review.noteWslPath : wslPath(path),
+      sidecarWslPath: review ? review.sidecarWslPath : wslPath(sidecarOf(path)),
+      exists: review !== undefined,
+      readOnly: review?.readOnly ?? null,
+      comments,
+      unreadable: structuredClone(review?.unreadable ?? []),
+      openCount: comments.filter((c) => c.status !== "resolved" && c.status !== "dismissed").length,
+    };
   }
 
   getSettings(): Promise<Settings> {

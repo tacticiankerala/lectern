@@ -7,6 +7,8 @@ import type { FollowTarget } from "./generated/FollowTarget";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { RecentEntry } from "./generated/RecentEntry";
+import type { ReviewOp } from "./generated/ReviewOp";
+import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
@@ -15,7 +17,12 @@ import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
 
 export type BackendEvent =
-  "doc-changed" | "doc-removed" | "open-request" | "library-updated" | "index-ready";
+  | "doc-changed"
+  | "doc-removed"
+  | "open-request"
+  | "library-updated"
+  | "index-ready"
+  | "review-changed";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
@@ -30,6 +37,13 @@ export interface Backend {
   follow(target: FollowTarget): Promise<FollowResult>;
   revealInExplorer(path: string): Promise<void>;
   openInEditor(path: string, line?: number): Promise<void>;
+  /**
+   * The review comments of the open note `path`, from its sidecar. Rejects with a message for the
+   * reader.
+   */
+  loadReview(path: string): Promise<ReviewPayload>;
+  /** Changes the open note's sidecar; answers with its review as it now is. */
+  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload>;
   getSettings(): Promise<Settings>;
   setSettings(patch: SettingsPatch): Promise<Settings>;
   savePosition(path: string, position: SavedPosition): Promise<void>;
