@@ -2,10 +2,12 @@
 // and its text blocks for core's text map (dev/backend-fake.ts).
 import { expect, test, type Page } from "@playwright/test";
 import type { CommentView } from "../src/generated/CommentView";
+import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { ReviewPayload } from "../src/generated/ReviewPayload";
 import { fixturePath, openFixture } from "./util";
 
 const ALPHA = "work/alpha/README.md";
+const PLAN = "work/alpha/plans/2026-01-01-big-plan.md";
 
 /**
  * The fixtures whose visible text must match core's. Together they hold a code block, a footnote,
@@ -140,6 +142,77 @@ function wordPoint(page: Page, word: string): Promise<{ x: number; y: number }> 
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }, word);
 }
+
+/**
+ * Selects `phrase` in the note by dragging the mouse from the middle of its first character's left
+ * half to the middle of its last character's right half, inside the first block holding it.
+ */
+async function dragSelect(page: Page, phrase: string): Promise<void> {
+  const ends = await page.evaluate(async (phrase) => {
+    const block = [...document.querySelectorAll<HTMLElement>("#lx-doc [data-sourcepos]")]
+      .reverse()
+      .find((el) => el.textContent.includes(phrase));
+    const walker = document.createTreeWalker(block ?? document.body, NodeFilter.SHOW_TEXT);
+    let text: Text | null = null;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n instanceof Text && n.data.includes(phrase)) {
+        text = n;
+        break;
+      }
+    }
+    if (!text) throw new Error(`no text node with ${phrase}`);
+    // Blocks near the view take their real height a frame later: scroll until it holds still.
+    const holder = text.parentElement;
+    for (let tries = 0, last = NaN; tries < 10; tries++) {
+      holder?.scrollIntoView({ block: "center" });
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const top = holder?.getBoundingClientRect().top ?? 0;
+      if (Math.abs(top - last) < 1) break;
+      last = top;
+    }
+    const at = text.data.indexOf(phrase);
+    const charBox = (i: number) => {
+      const range = document.createRange();
+      range.setStart(text, i);
+      range.setEnd(text, i + 1);
+      return range.getBoundingClientRect();
+    };
+    const first = charBox(at);
+    const last = charBox(at + phrase.length - 1);
+    return {
+      from: { x: first.left + first.width / 4, y: first.top + first.height / 2 },
+      to: { x: last.right - last.width / 4, y: last.top + last.height / 2 },
+    };
+  }, phrase);
+  await page.mouse.move(ends.from.x, ends.from.y);
+  await page.mouse.down();
+  await page.mouse.move(ends.to.x, ends.to.y, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => document.getSelection()?.toString())).toBe(phrase);
+}
+
+/** The block in the note whose text is just `text`, scrolled to the very top of the pane. */
+async function scrollToTop(page: Page, selector: string, text: string): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ selector, text }) => {
+          const el = [...document.querySelectorAll(`#lx-doc ${selector}`)].find(
+            (e) => e.textContent.trim() === text,
+          );
+          const pane = document.getElementById("lx-doc-pane");
+          if (!el || !pane) throw new Error(`no ${selector} saying ${text}`);
+          const off = el.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+          pane.scrollTop += off;
+          return Math.abs(off) < 1;
+        },
+        { selector, text },
+      ),
+    )
+    .toBe(true);
+}
+
+const editor = (page: Page) => page.locator("#lx-doc-pane .comment-editor");
 
 test("header toggle hides every comment surface and persists across reload", async ({ page }) => {
   await openFixture(page, ALPHA);
@@ -430,4 +503,323 @@ test("UI text matches core text on real fixtures", async ({ page }) => {
       "wikilink with an alias",
     ].sort(),
   );
+});
+
+test("add a comment from a selection, reply, resolve", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  const button = page.locator("#lx-doc-pane button.lx-sel-comment");
+  await expect(button).toBeHidden();
+  await dragSelect(page, "review from the platform team");
+  await expect(button).toBeVisible();
+  await expect(button).toHaveText("Comment");
+  // On the selection's last line, just after its end, outside the note's own markup.
+  await expect(page.locator("#lx-doc .lx-sel-comment")).toHaveCount(0);
+  const end = await page.evaluate(() => {
+    const rects = [...(document.getSelection()?.getRangeAt(0).getClientRects() ?? [])];
+    const last = rects[rects.length - 1];
+    return last ? { right: last.right, middle: (last.top + last.bottom) / 2 } : null;
+  });
+  const buttonBox = await button.boundingBox();
+  expect(end && buttonBox && Math.abs(buttonBox.y + buttonBox.height / 2 - end.middle) < 3).toBe(
+    true,
+  );
+  expect(end && buttonBox && buttonBox.x - end.right).toBeGreaterThanOrEqual(4);
+  expect(end && buttonBox && buttonBox.x - end.right).toBeLessThanOrEqual(8);
+  await button.click();
+  await expect(editor(page)).toBeVisible();
+  await expect(button).toBeHidden();
+  const text = editor(page).locator("textarea");
+  await expect(text).toBeFocused();
+  await expect(text).toHaveAttribute("placeholder", "Comment…");
+  await page.keyboard.type("Which team, and since when?");
+  await page.keyboard.press("Control+Enter");
+
+  await expect(editor(page)).toBeHidden();
+  // Anchored by the fake against core's text: the quote the page took is core's too.
+  await expect(card(page, 1)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 1)).toHaveClass(/selected/);
+  await expect(card(page, 1).locator(".comment-quote")).toHaveText("review from the platform team");
+  await expect(card(page, 1).locator(".comment-place")).toHaveText("L8");
+  await expect(card(page, 1).locator(".comment-entry.you .comment-body")).toHaveText(
+    "Which team, and since when?",
+  );
+  await expect(page.getByRole("tab", { name: "Comments (1)" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator('#lx-doc .lx-cdot[data-comments="1"]')).toHaveCount(1);
+  await expect(page.locator("#lx-comments-btn .count-badge")).toHaveText("1");
+
+  await card(page, 1).getByRole("button", { name: "Reply" }).click();
+  await card(page, 1).locator("textarea").fill("The data team may know.");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 1).locator(".comment-entry.you")).toHaveCount(2);
+
+  await card(page, 1).getByRole("button", { name: "Resolve" }).click();
+  await expect(card(page, 1)).toHaveCount(0);
+  await expect(page.locator("#lx-comments-pane .comments-empty")).toHaveText("No open comments.");
+  await page.locator('#lx-comments-pane [data-filter="all"]').click();
+  await expect(card(page, 1)).toHaveAttribute("data-status", "resolved");
+});
+
+test("add a comment on a code block via +, and on a list item via Ctrl+Alt+M", async ({ page }) => {
+  await openFixture(page, PLAN);
+  const plus = page.locator("#lx-doc-pane button.lx-block-plus");
+  const code = page.locator('#lx-doc .code-block[data-sourcepos="30:3-42:5"]');
+  await code.hover();
+  await expect(plus).toBeVisible();
+  await expect(plus).toHaveAttribute("aria-label", "Comment on this block");
+  await expect(page.locator("#lx-doc .lx-block-plus")).toHaveCount(0);
+  // Just left of the block's own edge, though it's indented in a list item, level with its top.
+  const plusBox = await plus.boundingBox();
+  const codeBox = await code.boundingBox();
+  const gap = plusBox && codeBox ? codeBox.x - (plusBox.x + plusBox.width) : -1;
+  expect(gap).toBeGreaterThanOrEqual(4);
+  expect(gap).toBeLessThanOrEqual(12);
+  expect(plusBox && codeBox && Math.abs(plusBox.y - codeBox.y) < 24).toBe(true);
+  // By a list item, it clears the bullet.
+  const item = page.locator("#lx-doc li", { hasText: "Create: app/models/alert_1_1.rb" });
+  await item.hover();
+  await expect(plus).toBeVisible();
+  const itemBox = await item.boundingBox();
+  const byItem = await plus.boundingBox();
+  const clear = itemBox && byItem ? itemBox.x - (byItem.x + byItem.width) : -1;
+  expect(clear).toBeGreaterThanOrEqual(24);
+  expect(clear).toBeLessThanOrEqual(48);
+  await code.hover();
+  await plus.click();
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Add a case for an empty name.");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 1)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 1).locator(".comment-place")).toHaveText("L30–L42");
+  await expect(card(page, 1).locator(".comment-quote")).toHaveText(
+    /^RSpec\.describe Alert11 do let\(:record\) \{ described_class\.new/,
+  );
+
+  // Nothing selected: Ctrl+Alt+M comments on the block at the top of the view.
+  await page.evaluate(() => document.getSelection()?.removeAllRanges());
+  await scrollToTop(page, "li", "Create: app/models/alert_1_1.rb");
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Name it after the alert.");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 2)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 2).locator(".comment-place")).toHaveText("L24");
+  await expect(card(page, 2).locator(".comment-quote")).toHaveText(
+    "Create: app/models/alert_1_1.rb",
+  );
+  await expect(card(page, 2)).toHaveClass(/selected/);
+
+  // Hidden comments come back for it, and focus mode is left first.
+  await page.keyboard.press("Control+Shift+M");
+  await expect(page.locator("#lx-app")).toHaveClass(/no-comments/);
+  await page.keyboard.press("F11");
+  await expect(page.locator("body")).toHaveClass(/focus/);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(page.locator("body")).not.toHaveClass(/focus/);
+  await expect(page.locator("#lx-app")).not.toHaveClass(/no-comments/);
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(editor(page)).toBeHidden();
+});
+
+test("re-attach a detached comment", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  await seed(page, alphaReview());
+  await page.getByRole("tab", { name: /^Comments/ }).click();
+  await expect(card(page, 4)).toHaveAttribute("data-state", "detached");
+  await card(page, 4).getByRole("button", { name: "Re-attach" }).click();
+  const banner = page.locator("#lx-comments-pane .comments-attach");
+  await expect(banner).toContainText("Select the new text for C4, then press Attach here.");
+  await dragSelect(page, "Ship the first slice");
+  const button = page.locator("#lx-doc-pane button.lx-sel-comment");
+  await expect(button).toHaveText("Attach C4 here");
+  await button.click();
+  await expect(card(page, 4)).toHaveAttribute("data-state", "anchored");
+  await expect(page.locator("#lx-comments-pane .comment-group.detached")).toHaveCount(0);
+  await expect(card(page, 4).locator(".comment-quote")).toHaveText("Ship the first slice");
+  await expect(card(page, 4)).toHaveClass(/selected/);
+  await expect(banner).toBeHidden();
+  await expect(page.locator('#lx-doc .lx-cdot[data-comments="4"]')).toHaveCount(1);
+  // No editor: the selection is all a re-attach needs.
+  await expect(editor(page)).toBeHidden();
+});
+
+test("turning the feature off in Preferences removes every surface and the header button", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  await seed(page, alphaReview());
+  // A note in the library with open comments, as the scan counts them.
+  await page.evaluate(async () => {
+    const fake = window.__fake as unknown as { getLibrary(): Promise<LibraryPayload> };
+    const library = await fake.getLibrary();
+    const note = library.roots[0]?.tree?.children.find((c) => !c.isDir);
+    if (!note) throw new Error("no note at the top of the library");
+    note.comments = 2;
+    window.__fake.emit("library-updated", library);
+  });
+  const button = page.locator("#lx-comments-btn");
+  const dots = page.locator("#lx-doc .lx-cdot");
+  const counts = page.locator("#lx-library .tree-count");
+  const tabs = page.locator("#lx-outline [role=tablist]");
+  await expect(button).toBeVisible();
+  await expect(dots).toHaveCount(2);
+  await expect(counts).toHaveCount(1);
+  await expect(tabs).toBeVisible();
+
+  await page.keyboard.press("Control+,");
+  const toggle = page.locator('input[name="lx-review-comments"]');
+  await expect(toggle).toBeChecked();
+  await expect(page.locator(".prefs")).toContainText(
+    "Comments are saved next to each note as <note>.review.md, a Markdown file Claude can read and reply in.",
+  );
+  await toggle.uncheck();
+  await page.keyboard.press("Escape");
+  await expect(button).toBeHidden();
+  await expect(dots).toHaveCount(0);
+  await expect(counts).toHaveCount(0);
+  await expect(tabs).toBeHidden();
+  await expect(page.locator("#lx-comments-pane")).toBeEmpty();
+  expect(await highlighted(page)).toBe(false);
+  // Nothing offers to add one.
+  await dragSelect(page, "review from the platform team");
+  await page.waitForTimeout(100);
+  await expect(page.locator(".lx-sel-comment:visible, .lx-block-plus:visible")).toHaveCount(0);
+  await page.evaluate(() => document.getSelection()?.removeAllRanges());
+  await page.locator("#lx-doc li").first().hover();
+  await page.waitForTimeout(100);
+  await expect(page.locator(".lx-sel-comment:visible, .lx-block-plus:visible")).toHaveCount(0);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(page.locator(".comment-editor:visible")).toHaveCount(0);
+
+  await page.keyboard.press("Control+,");
+  await toggle.check();
+  await page.keyboard.press("Escape");
+  await expect(button).toBeVisible();
+  await expect(dots).toHaveCount(2);
+  await expect(counts).toHaveCount(1);
+  await expect(tabs).toBeVisible();
+  await expect.poll(() => highlighted(page)).toBe(true);
+});
+
+test("Ctrl+Alt+M scrolled partway into a block comments on that block", async ({ page }) => {
+  await openFixture(page, "stress/long-lines.md");
+  // 100 px into the first code block, which runs on well past the top of the view.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const code = document.querySelector("#lx-doc .code-block");
+        const pane = document.getElementById("lx-doc-pane");
+        if (!code || !pane) throw new Error("no code block");
+        const off = code.getBoundingClientRect().top - pane.getBoundingClientRect().top + 100;
+        pane.scrollTop += off;
+        return Math.abs(off) < 1;
+      }),
+    )
+    .toBe(true);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Fold the repeated lines.");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 1)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 1).locator(".comment-place")).toHaveText("L11–L50");
+  await expect(card(page, 1).locator(".comment-quote")).toHaveText(
+    /^\/\/ block 1 func step2\(ctx \*Context\) error \{/,
+  );
+});
+
+test("Ctrl+Alt+M on a selection scrolled out of view brings it back and opens by it", async ({
+  page,
+}) => {
+  await openFixture(page, PLAN);
+  await dragSelect(page, "a synthetic plan");
+  await page.evaluate(() => {
+    const pane = document.getElementById("lx-doc-pane");
+    if (pane) pane.scrollTop += 3000;
+  });
+  // Where the selected words are, as the editor takes the selection into its box once open.
+  const selectionInView = () =>
+    page.evaluate(() => {
+      const p = [...document.querySelectorAll("#lx-doc p")].find((el) =>
+        el.textContent.includes("a synthetic plan"),
+      );
+      const pane = document.getElementById("lx-doc-pane")?.getBoundingClientRect();
+      const r = p?.getBoundingClientRect();
+      return !!r && !!pane && r.top >= pane.top && r.bottom <= pane.bottom;
+    });
+  expect(await selectionInView()).toBe(false);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeVisible();
+  await expect(editor(page)).toBeInViewport({ ratio: 1 });
+  expect(await selectionInView()).toBe(true);
+  // What's typed goes into it.
+  await page.keyboard.type("Say what it exercises.");
+  await expect(editor(page).locator("textarea")).toHaveValue("Say what it exercises.");
+});
+
+test("a kept draft comes back into view when a comment is asked for again", async ({ page }) => {
+  await openFixture(page, PLAN);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Half a thought");
+  await page.evaluate(() => {
+    const pane = document.getElementById("lx-doc-pane");
+    if (pane) pane.scrollTop += 3000;
+  });
+  await expect(editor(page)).not.toBeInViewport();
+  // A click in the note (its margin, clear of links) leaves the draft open, out of view.
+  const doc = await page.locator("#lx-doc").boundingBox();
+  if (!doc) throw new Error("no note");
+  await page.mouse.click(doc.x + 10, 450);
+  await expect(editor(page)).toBeVisible();
+  await expect(editor(page)).not.toBeInViewport();
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeInViewport({ ratio: 1 });
+  const text = editor(page).locator("textarea");
+  await expect(text).toBeFocused();
+  await expect(text).toHaveValue("Half a thought");
+});
+
+test("Ctrl+Alt+M from focus mode leaves the editor in view", async ({ page }) => {
+  await openFixture(page, PLAN);
+  await page.keyboard.press("F11");
+  await expect(page.locator("body")).toHaveClass(/focus/);
+  // Reader input ends the hold that entering focus mode started, so the drag lands where aimed.
+  await page.keyboard.press("Shift");
+  await dragSelect(page, "Section 2 covers the search area");
+  // The selection below the view, the pane still scrolled: leaving focus mode holds that place.
+  const scrolled = await page.evaluate(() => {
+    const pane = document.getElementById("lx-doc-pane");
+    if (!pane) return 0;
+    pane.scrollTop -= 1500;
+    return pane.scrollTop;
+  });
+  expect(scrolled).toBeGreaterThan(0);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(page.locator("body")).not.toHaveClass(/focus/);
+  await expect(editor(page)).toBeVisible();
+  // Past the time the old place would have been held for.
+  await page.waitForTimeout(1600);
+  await expect(editor(page)).toBeInViewport({ ratio: 1 });
+  // The window leaving full screen shrinks some frames later: the editor stays in view.
+  await page.setViewportSize({ width: 1400, height: 600 });
+  await expect(editor(page)).toBeInViewport({ ratio: 1 });
+  await expect(editor(page).locator("textarea")).toBeFocused();
+});
+
+test("find in page paints over comment highlights", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  await seed(page, alphaReview());
+  await expect.poll(() => highlighted(page)).toBe(true);
+  await page.keyboard.press("Control+f");
+  await expect(page.getByRole("textbox", { name: "Find" })).toBeFocused();
+  await page.keyboard.type("platform");
+  await expect.poll(() => page.evaluate(() => CSS.highlights.has("find-current"))).toBe(true);
+  expect(
+    await page.evaluate(() =>
+      ["comment", "find", "find-current"].map((name) => CSS.highlights.get(name)?.priority),
+    ),
+  ).toEqual([0, 2, 3]);
 });

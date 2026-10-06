@@ -31,6 +31,8 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0", "Sidebar text size"],
   ["Ctrl+Shift+T", "Light or dark theme"],
   ["Ctrl+B / Ctrl+Shift+O", "Library / outline"],
+  ["Ctrl+Shift+M", "Show or hide comments"],
+  ["Ctrl+Alt+M", "Add a comment"],
   ["F11", "Focus mode"],
   ["Ctrl+E", "Open in editor"],
 ];

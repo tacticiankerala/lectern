@@ -86,6 +86,8 @@ status: active
 | Ctrl+Shift+T | Switch between the light and dark theme |
 | Ctrl+B | Show or hide the library |
 | Ctrl+Shift+O | Show or hide the outline |
+| Ctrl+Shift+M | Show or hide review comments |
+| Ctrl+Alt+M | Comment on the selected text, or on the block at the top of the view |
 | F11 | Focus mode |
 | Ctrl+E | Open the document in your editor |
 | Ctrl+Shift+C | Copy the document's path |

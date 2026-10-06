@@ -1,6 +1,6 @@
-// Preferences (Ctrl+, or the ⋯ menu, spec §6): the library's folders (add, remove, retry), path
-// mappings (from/to rows, saved as a field loses focus), the editor command, automatic update
-// checks and the version. Loaded on first use.
+// Preferences (Ctrl+, or the ⋯ menu, spec §6): the library's folders (add, remove, retry), review
+// comments on or off, path mappings (from/to rows, saved as a field loses focus), the editor
+// command, automatic update checks and the version. Loaded on first use.
 import { h } from "./dom";
 import type { EditorPref } from "./generated/EditorPref";
 import type { LibraryPayload } from "./generated/LibraryPayload";
@@ -36,6 +36,7 @@ export class Preferences {
   private readonly command: HTMLInputElement;
   private readonly autoUpdate: HTMLInputElement;
   private readonly badges: HTMLInputElement;
+  private readonly reviewComments: HTMLInputElement;
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
 
@@ -89,6 +90,10 @@ export class Preferences {
     this.badges.addEventListener("change", () => {
       this.host.update({ showStatusBadges: this.badges.checked });
     });
+    this.reviewComments = h("input", { type: "checkbox", name: "lx-review-comments" });
+    this.reviewComments.addEventListener("change", () => {
+      this.host.update({ reviewComments: this.reviewComments.checked });
+    });
     this.autoUpdate = h("input", { type: "checkbox", name: "lx-auto-update" });
     this.autoUpdate.addEventListener("change", () => {
       this.host.update({ autoUpdate: this.autoUpdate.checked });
@@ -113,6 +118,16 @@ export class Preferences {
           " field in its frontmatter, e.g. ",
           h("code", {}, "status: active"),
           ". Green for active, red for blocked, grey for parked, blue for done; other values appear neutral.",
+        ),
+      ),
+      section(
+        "Reading",
+        null,
+        h("label", { class: "prefs-check" }, this.reviewComments, "Review comments"),
+        h(
+          "p",
+          { class: "prefs-hint" },
+          "Comments are saved next to each note as <note>.review.md, a Markdown file Claude can read and reply in.",
         ),
       ),
       section(
@@ -170,6 +185,7 @@ export class Preferences {
     this.command.value = s.editor.mode === "custom" ? s.editor.command : "";
     this.autoUpdate.checked = s.autoUpdate;
     this.badges.checked = s.showStatusBadges;
+    this.reviewComments.checked = s.reviewComments;
     const portable = this.host.portable() ? " · portable" : "";
     this.version.textContent = `Lectern ${this.host.version()}${portable}`;
     this.refresh();

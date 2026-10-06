@@ -1,7 +1,7 @@
 /* Review comments: the header button's badge, the Comments tab and its cards, the marks in the
-   note (highlights and margin dots) and the library's counts. The highlight and dot colours fall
-   back to tints of the accent until the themes define their own (--comment, --comment-focus,
-   --comment-dot). */
+   note (highlights and margin dots), adding them (the selection button, the block "+", the
+   editor) and the library's counts. The highlight and dot colours are each theme's own
+   (themes.css: --comment, --comment-focus, --comment-dot). */
 
 /* ---- The header button ---- */
 
@@ -151,6 +151,24 @@
   background: color-mix(in srgb, var(--badge-blocked) 9%, transparent);
 }
 
+/* Re-attach mode: what to do, and the way out. */
+.comments-attach {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--comment-dot) 55%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--comment-dot) 10%, transparent);
+}
+
+.comments-attach .btn {
+  flex: none;
+  padding: 2px 10px;
+}
+
 .comments-empty {
   margin: 12px 4px;
   color: var(--fg-muted);
@@ -274,7 +292,27 @@
 }
 
 .comment-entry {
+  position: relative;
   margin-top: 6px;
+}
+
+/* Your own entries: Edit, at the end of the author's line. */
+.comment-edit {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 0.846em;
+  cursor: pointer;
+}
+
+.comment-edit:hover {
+  background: var(--hover);
+  color: var(--fg);
 }
 
 .comment-author {
@@ -444,12 +482,13 @@
 
 /* ---- Marks in the note ---- */
 
+/* Below find's highlights, which have the higher priority (find.ts). */
 ::highlight(comment) {
-  background: var(--comment, color-mix(in srgb, var(--accent) 16%, transparent));
+  background: var(--comment);
 }
 
 ::highlight(comment-focus) {
-  background: var(--comment-focus, color-mix(in srgb, var(--accent) 32%, transparent));
+  background: var(--comment-focus);
 }
 
 .doc .lx-has-comment {
@@ -473,7 +512,7 @@
   padding: 0;
   border: 0;
   border-radius: 50%;
-  background: var(--comment-dot, var(--accent));
+  background: var(--comment-dot);
   cursor: pointer;
 }
 
@@ -513,6 +552,107 @@
 #lx-app.no-comments .lx-cdot,
 body.focus .lx-cdot {
   display: none;
+}
+
+/* ---- Adding: the selection button, the block "+" and the editor, in the document pane ---- */
+
+/* Their offset parent: they're placed in the pane's scrolled content, so they move with the text. */
+#lx-doc-pane {
+  position: relative;
+}
+
+.lx-sel-comment,
+.lx-block-plus,
+.comment-editor {
+  position: absolute;
+  z-index: 5;
+  font: var(--ui-size) / 1.45 var(--ui-font);
+}
+
+.lx-sel-comment {
+  padding: 2px 10px;
+  border: 1px solid color-mix(in srgb, var(--comment-dot) 60%, var(--border));
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: 0 4px 14px -4px rgb(0 0 0 / 0.3);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.lx-sel-comment:hover {
+  background: color-mix(in srgb, var(--comment-dot) 14%, var(--bg-elev));
+}
+
+.lx-block-plus {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lx-block-plus:hover {
+  border-color: var(--comment-dot);
+  color: var(--fg);
+}
+
+.comment-editor {
+  width: min(360px, calc(100% - 16px));
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px -10px rgb(0 0 0 / 0.35);
+  animation: panel-in 0.12s ease-out;
+}
+
+.comment-editor-text {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  resize: vertical;
+}
+
+.comment-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.comment-editor-actions .btn {
+  padding: 3px 12px;
+}
+
+.comment-editor-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#lx-app.no-comments .lx-sel-comment,
+#lx-app.no-comments .lx-block-plus,
+body.focus .lx-sel-comment,
+body.focus .lx-block-plus {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .comment-editor {
+    animation: none;
+  }
 }
 
 /* ---- The library ---- */

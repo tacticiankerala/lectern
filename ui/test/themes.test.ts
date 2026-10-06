@@ -36,6 +36,9 @@ const VARIABLES = [
   "badge-blocked",
   "badge-parked",
   "badge-done",
+  "comment",
+  "comment-focus",
+  "comment-dot",
 ];
 const SYNTAX = [
   "keyword",
@@ -88,6 +91,40 @@ function hexOf(theme: Map<string, string>, name: string): string {
   const value = theme.get(`--${name}`) ?? "";
   expect(value, `--${name}`).toMatch(HEX);
   return value;
+}
+
+/** An RGB colour and its opacity, 0 to 1. */
+type Rgba = [number, number, number, number];
+
+const RGB = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)\s*(?:[/,]\s*([\d.]+)(%?))?\s*\)$/;
+
+/**
+ * A theme's colour for `name`, from `#rrggbb` or `rgb(r g b / a)` (or the comma form), failing
+ * the test when it is missing or neither.
+ */
+function rgbaOf(theme: Map<string, string>, name: string): Rgba {
+  const value = theme.get(`--${name}`) ?? "";
+  if (HEX.test(value)) {
+    const hex = hexOf(theme, name);
+    return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).concat(1) as Rgba;
+  }
+  const match = RGB.exec(value);
+  expect(match, `--${name}: ${value}`).not.toBeNull();
+  const [, r, g, b, alpha, percent] = match ?? [];
+  const a = alpha === undefined ? 1 : Number(alpha) / (percent === "%" ? 100 : 1);
+  return [Number(r), Number(g), Number(b), a];
+}
+
+/** `color` painted over the opaque `bg`, as the browser blends it, as `#rrggbb`. */
+function over([r, g, b, a]: Rgba, bg: string): string {
+  return `#${[r, g, b]
+    .map((c, i) => {
+      const under = parseInt(bg.slice(1 + 2 * i, 3 + 2 * i), 16);
+      return Math.round(a * c + (1 - a) * under)
+        .toString(16)
+        .padStart(2, "0");
+    })
+    .join("")}`;
 }
 
 const themes = parseThemes(themesCss);
@@ -159,6 +196,22 @@ describe("themes", () => {
       for (const name of SYNTAX) {
         expect(contrast(hexOf(theme, name), codeBg), `${id} --${name}`).toBeGreaterThanOrEqual(4.5);
       }
+    }
+  });
+
+  it("comment highlights keep text readable", () => {
+    for (const id of IDS) {
+      const theme = themes.get(id) ?? new Map<string, string>();
+      const bg = hexOf(theme, "bg");
+      const fg = hexOf(theme, "fg");
+      for (const name of ["comment", "comment-focus"]) {
+        const under = over(rgbaOf(theme, name), bg);
+        expect(contrast(fg, under), `${id} text on --${name}`).toBeGreaterThanOrEqual(4.5);
+      }
+      const dot = over(rgbaOf(theme, "comment-dot"), bg);
+      expect(contrast(dot, bg), `${id} --comment-dot`).toBeGreaterThanOrEqual(3);
+      // Comments and find in page never share a colour.
+      expect(theme.get("--comment"), `${id} --comment`).not.toBe(theme.get("--mark"));
     }
   });
 

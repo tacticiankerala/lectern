@@ -189,9 +189,14 @@ export class Actions {
         this.app.updateSettings({ commentsVisible: !s.commentsVisible });
         return true;
       case "add-comment":
-        // Shows hidden comments; the editor comes with adding comments.
+        // Out of focus mode first; the comments show hidden ones themselves.
         if (!s.reviewComments) return false;
-        if (!s.commentsVisible) this.app.updateSettings({ commentsVisible: true });
+        if (this.focusMode) {
+          this.setFocusMode(false);
+          // Adding a comment moves the reading position on purpose: the old one isn't held.
+          this.hold.stop();
+        }
+        void this.app.addComment();
         return true;
       case "focus":
         this.setFocusMode(!this.focusMode);

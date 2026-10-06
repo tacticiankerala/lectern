@@ -1,7 +1,7 @@
 // Review comments in the reader (spec §6): the cards in the right panel's Comments tab, the
-// highlights and margin dots that mark the commented text, and live reload when the sidecar
-// changes. Loaded after the first paint while the feature is on; adding comments comes with the
-// editor.
+// highlights and margin dots that mark the commented text, live reload when the sidecar changes,
+// and adding, re-attaching and editing comments. Loaded after the first paint while the feature is
+// on.
 //
 // Contracts:
 // - A review applies only for the note it was loaded for: a newer load, or another note on screen,
@@ -9,16 +9,23 @@
 // - The marks follow the list: each comment the filter shows that is attached to the note gets its
 //   quote highlighted (`comment`, and `comment-focus` for the selected one) and a dot on its first
 //   block. A re-render of the note wipes the dots, so they're put back on every "doc".
-// - Hidden comments (the header toggle) keep their cards and badge but mark nothing.
+// - Hidden comments (the header toggle) keep their cards and badge but mark nothing, and nothing
+//   offers to add one.
 // - Loads and operations go to the backend one at a time, in the order they were asked for, so
-//   their answers apply in that order: an older answer never hides a newer Claude reply.
+//   their answers apply in that order: an older answer never hides a newer Claude reply. An
+//   operation is for the note it was asked on: one whose note is no longer on screen by its turn
+//   isn't sent.
 // - Reply drafts belong to their note and comment. They survive a reload of the comments (the box
 //   keeps its caret), a failed send, a reply that couldn't be sent because the note changed, and
 //   a visit to another note; they never move to another note. A reply box is disabled while its
 //   reply is being saved.
-// - In focus mode the panel is hidden: the dots hide too (comments.css) and clicks on highlighted
-//   text do nothing; the highlights stay.
+// - Adding comments and re-attaching them are comment-adding.ts's.
+// - Editing your own entry swaps its body for a box with its raw text, kept across renders, for
+//   the note on screen only.
+// - In focus mode the panel is hidden: the dots and the adding buttons hide too (comments.css) and
+//   clicks on highlighted text do nothing; the highlights stay.
 import type { Backend } from "./backend";
+import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
 import {
   claudeEntryCount,
   copyCount,
@@ -67,6 +74,8 @@ export interface CommentsHost {
   pulseBadge: () => void;
   /** Whether focus mode (F11) is on, which hides the panel. */
   focusMode: () => boolean;
+  /** Shows comments the header toggle hid. */
+  showComments: () => void;
 }
 
 const EMPTY = "No comments yet. Select text in the note, or hover a paragraph and press +.";
@@ -99,6 +108,10 @@ export class CommentsController {
   private readonly copyGroup: HTMLElement;
   private readonly menuButton: HTMLButtonElement;
   private readonly menu: HTMLElement;
+  /** The entry being edited, kept across renders. */
+  private edit: EditBox | null = null;
+  /** The selection button, the block "+", the editor and re-attach mode. */
+  private readonly adding: CommentAdding;
   private readonly stops: (() => void)[] = [];
   private disposed = false;
 
@@ -166,7 +179,28 @@ export class CommentsController {
     this.banner = h("div", { class: "comments-banner", role: "note" });
     this.list = h("div", { class: "comments-list" });
     const pane = host.panel.commentsPane;
-    pane.replaceChildren(this.head, this.banner, this.list);
+    this.adding = new CommentAdding({
+      doc: () => host.doc(),
+      docPath: () => host.docPath(),
+      scroller: host.scroller,
+      focusMode: () => host.focusMode(),
+      toast: (m) => {
+        host.toast(m);
+      },
+      shown: () => this.shown,
+      show: () => {
+        this.ensureShown();
+      },
+      readOnly: () => this.review?.readOnly ?? null,
+      perform: (op, path) => this.perform(op, path),
+      showing: (path) => this.showing(path),
+      ids: () => this.review?.comments.map((c) => c.id) ?? [],
+      select: (id, reveal) => {
+        if (reveal) this.reveal(id);
+        else this.select(id, false);
+      },
+    });
+    pane.replaceChildren(this.head, this.banner, this.adding.attachBanner, this.list);
     pane.addEventListener("click", this.onPaneClick);
     host.scroller.addEventListener("click", this.onNoteClick);
     this.stops.push(
@@ -237,6 +271,7 @@ export class CommentsController {
     }
     const ids = new Set(payload.comments.map((c) => c.id));
     if (this.focused !== null && !ids.has(this.focused)) this.focused = null;
+    this.adding.reviewChanged(ids);
     const drafts = this.drafts.get(noteKey(payload.notePath));
     for (const id of drafts?.keys() ?? []) {
       if (!ids.has(id)) drafts?.delete(id);
@@ -247,12 +282,36 @@ export class CommentsController {
     this.decorate();
   }
 
-  /** Shows or hides the marks in the note. */
+  /** Shows or hides the marks in the note; hidden, nothing offers to add a comment. */
   setVisible(on: boolean): void {
-    if (on !== this.shown) {
-      this.shown = on;
-      this.decorate();
+    if (on === this.shown) {
+      return;
     }
+    this.shown = on;
+    this.adding.setVisible(on);
+    this.decorate();
+  }
+
+  /**
+   * A comment on the text selected in the note, in the editor; in re-attach mode, the comment
+   * being re-attached moved to it. Hidden comments show first. False when nothing in the note is
+   * selected.
+   */
+  addFromSelection(): boolean {
+    return this.adding.addFromSelection();
+  }
+
+  /**
+   * A comment on the block at the top of the view: the deepest crossing it, else the first below
+   * it. Hidden comments show first.
+   */
+  addAtTop(): void {
+    this.adding.addAtTop();
+  }
+
+  /** Re-attach mode for comment `id`: the selection button attaches it to the selected text. */
+  startReattach(id: number): void {
+    this.adding.startReattach(id);
   }
 
   /** Selects a comment's card, highlights its text as the focused one and brings it into view. */
@@ -269,9 +328,8 @@ export class CommentsController {
     return (await this.perform(op)) === "applied";
   }
 
-  /** `run`, saying why an operation wasn't applied. */
-  private perform(op: ReviewOp): Promise<Outcome> {
-    const path = this.host.docPath();
+  /** `run`, for the note at `path` (the one on screen), saying why it wasn't applied. */
+  private perform(op: ReviewOp, path = this.host.docPath()): Promise<Outcome> {
     if (path === null || this.disposed) {
       return Promise.resolve("skipped");
     }
@@ -311,6 +369,8 @@ export class CommentsController {
     this.gen++;
     for (const stop of this.stops) stop();
     this.closeMenu();
+    this.adding.dispose();
+    this.edit = null;
     this.unmark();
     if (supported()) {
       CSS.highlights.delete("comment");
@@ -326,9 +386,15 @@ export class CommentsController {
     return !this.disposed && this.host.docPath() === path;
   }
 
-  /** The document re-rendered or changed: the marks go back, and the review loads again. */
+  /**
+   * The document re-rendered or changed: the marks go back, and the review loads again. Another
+   * note ends what was being added, re-attached or edited on the last.
+   */
   private onDoc(): void {
     const path = this.host.docPath();
+    const note = path === null ? null : noteKey(path);
+    this.adding.docChanged();
+    if (this.edit !== null && this.edit.note !== note) this.edit = null;
     if (this.review !== null && (path === null || !samePath(this.review.notePath, path))) {
       this.review = null;
       this.focused = null;
@@ -373,6 +439,9 @@ export class CommentsController {
     const drafts = p === null ? undefined : this.drafts.get(noteKey(p.notePath));
     for (const id of this.replyBoxes.keys()) {
       if (!drafts?.has(id)) this.replyBoxes.delete(id);
+    }
+    if (this.edit !== null && !this.editable(this.edit)) {
+      this.edit = null;
     }
     this.head.hidden = p === null;
     this.banner.hidden = p?.readOnly == null;
@@ -468,7 +537,13 @@ export class CommentsController {
         ),
       );
     }
-    parts.push(h("div", { class: "comment-thread" }, ...c.entries.map(entry)));
+    parts.push(
+      h(
+        "div",
+        { class: "comment-thread" },
+        ...c.entries.map((e, i) => this.entryEl(c.id, e, i, readOnly)),
+      ),
+    );
     const action = (name: string, label: string, disabled = readOnly): HTMLButtonElement => {
       const b = h(
         "button",
@@ -485,7 +560,7 @@ export class CommentsController {
     if (c.status !== "dismissed") actions.push(action("dismiss", "Dismiss"));
     actions.push(action("copy", "Copy", false));
     if (c.state !== "anchored") {
-      const reattach = action("reattach", "Re-attach", true);
+      const reattach = action("reattach", "Re-attach");
       reattach.title = "Attach this comment to other text";
       actions.push(reattach);
     }
@@ -503,6 +578,142 @@ export class CommentsController {
       },
       ...parts,
     );
+  }
+
+  /**
+   * One entry of a thread: who wrote it, Claude's kind, and its Markdown as core rendered it. Your
+   * own entries can be edited (`edit` action); the one being edited shows its box instead.
+   */
+  private entryEl(id: number, e: EntryView, index: number, readOnly: boolean): HTMLElement {
+    const author = h("div", { class: "comment-author" }, e.author === "you" ? "You" : "Claude");
+    if (e.author === "claude" && e.kind !== null) {
+      author.append(" ", h("span", { class: `comment-kind kind-${e.kind}` }, e.kind));
+    }
+    const edit = this.edit;
+    if (edit !== null && edit.id === id && edit.entry === index) {
+      edit.sync();
+      return h("div", { class: "comment-entry you editing" }, author, edit.el);
+    }
+    const body = h("div", { class: "comment-body" });
+    // Sanitised by core, with the note's link rules.
+    body.innerHTML = e.html;
+    const el = h("div", { class: `comment-entry ${e.author}` }, author, body);
+    if (e.author === "you" && !readOnly) {
+      author.after(
+        h(
+          "button",
+          {
+            type: "button",
+            class: "comment-edit",
+            "data-action": "edit",
+            "data-entry": String(index),
+          },
+          "Edit",
+        ),
+      );
+    }
+    return el;
+  }
+
+  /** Whether an edit still has its entry, yours, in the review on screen. */
+  private editable(edit: EditBox): boolean {
+    const p = this.review;
+    const e = p?.comments.find((c) => c.id === edit.id)?.entries[edit.entry];
+    return (
+      p !== null && p.readOnly === null && noteKey(p.notePath) === edit.note && e?.author === "you"
+    );
+  }
+
+  /** Opens the box for editing your entry `index` of comment `id`, in place of its body. */
+  private openEdit(id: number, index: number): void {
+    const path = this.host.docPath();
+    const e = this.review?.comments.find((c) => c.id === id)?.entries[index];
+    if (path === null || e?.author !== "you") {
+      return;
+    }
+    this.edit = this.editBox(noteKey(path), id, index, e.text);
+    this.render();
+    this.edit.area.focus();
+  }
+
+  /** An edit box: Ctrl+Enter saves, Esc cancels, empty text can't be saved; disabled while saving. */
+  private editBox(note: string, id: number, entry: number, text: string): EditBox {
+    const area = h("textarea", {
+      class: "comment-reply-text comment-edit-text",
+      rows: "3",
+      "aria-label": `Edit your entry in C${String(id)}`,
+    });
+    area.value = text;
+    const save = h("button", { type: "button", class: "btn" }, "Save");
+    const cancel = h("button", { type: "button", class: "btn" }, "Cancel");
+    const box: EditBox = {
+      note,
+      id,
+      entry,
+      busy: false,
+      area,
+      el: h(
+        "div",
+        { class: "comment-reply comment-edit-box" },
+        area,
+        h("div", { class: "comment-reply-actions" }, save, cancel),
+      ),
+      sync: () => {
+        area.disabled = box.busy;
+        save.disabled = box.busy || area.value.trim() === "";
+      },
+    };
+    box.sync();
+    area.addEventListener("input", box.sync);
+    area.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.ctrlKey) {
+        e.preventDefault();
+        void this.saveEdit(box);
+      } else if (e.key === "Escape") {
+        // Before the app's Esc, which would close something else.
+        e.preventDefault();
+        this.closeEdit(box);
+      }
+    });
+    save.addEventListener("click", () => void this.saveEdit(box));
+    cancel.addEventListener("click", () => {
+      this.closeEdit(box);
+    });
+    return box;
+  }
+
+  private closeEdit(box: EditBox): void {
+    if (this.edit === box) {
+      this.edit = null;
+      this.render();
+    }
+  }
+
+  /**
+   * Saves an edit box's text as its entry, its box disabled meanwhile. Saved, the box goes;
+   * otherwise (toasted) it comes back as it was.
+   */
+  private async saveEdit(box: EditBox): Promise<void> {
+    const text = box.area.value.trim();
+    const path = this.host.docPath();
+    if (text === "" || box.busy || path === null || noteKey(path) !== box.note) {
+      return;
+    }
+    box.busy = true;
+    box.sync();
+    const outcome = await this.perform({ op: "edit", id: box.id, entry: box.entry, text }, path);
+    box.busy = false;
+    if (outcome === "applied") {
+      this.closeEdit(box);
+      return;
+    }
+    if (outcome === "skipped" && !this.disposed) {
+      this.host.toast("Your edit wasn't saved: the note changed.");
+    }
+    box.sync();
+    if (box.el.isConnected) {
+      box.area.focus();
+    }
   }
 
   /**
@@ -709,6 +920,12 @@ export class CommentsController {
       case "copy":
         void this.copy({ includeResolved: true, ids: [id] });
         break;
+      case "reattach":
+        this.startReattach(id);
+        break;
+      case "edit":
+        this.openEdit(id, Number(button.dataset.entry));
+        break;
     }
   };
 
@@ -742,6 +959,14 @@ export class CommentsController {
       }
     }
   };
+
+  /** Shows comments the header toggle hid. */
+  private ensureShown(): void {
+    if (!this.shown) {
+      this.host.showComments();
+      this.setVisible(this.host.visible());
+    }
+  }
 
   /** Shows a comment's card: the Comments tab, the panel opened if it was closed. */
   private reveal(id: number): void {
@@ -860,9 +1085,6 @@ export class CommentsController {
   }
 }
 
-/** Why an operation wasn't applied, or that it was. */
-type Outcome = "applied" | "failed" | "skipped";
-
 /** A reply box, and how to bring its disabled state up to date. */
 interface ReplyBox {
   el: HTMLElement;
@@ -870,26 +1092,18 @@ interface ReplyBox {
   sync: () => void;
 }
 
+/** The box editing your entry `entry` of comment `id` on a note (`noteKey`). */
+interface EditBox extends ReplyBox {
+  note: string;
+  id: number;
+  entry: number;
+  /** Its text is being saved. */
+  busy: boolean;
+}
+
 /** A reply draft's key: its note and comment. */
 function draftKey(path: string, id: number): string {
   return `${noteKey(path)}#${String(id)}`;
-}
-
-/** A note's path as drafts are kept by it: compared as on Windows, as `samePath` does. */
-function noteKey(path: string): string {
-  return path.toLowerCase().replaceAll("/", "\\");
-}
-
-/** One entry of a thread: who wrote it, Claude's kind, and its Markdown as core rendered it. */
-function entry(e: EntryView): HTMLElement {
-  const author = h("div", { class: "comment-author" }, e.author === "you" ? "You" : "Claude");
-  if (e.author === "claude" && e.kind !== null) {
-    author.append(" ", h("span", { class: `comment-kind kind-${e.kind}` }, e.kind));
-  }
-  const body = h("div", { class: "comment-body" });
-  // Sanitised by core, with the note's link rules.
-  body.innerHTML = e.html;
-  return h("div", { class: `comment-entry ${e.author}` }, author, body);
 }
 
 /** A block's dot for the comments `ids`: its first child, or in its first cell for a table row. */

@@ -589,6 +589,20 @@ export class App {
     );
   }
 
+  /**
+   * Ctrl+Alt+M: a comment on the text selected in the note, else on the block at the top of the
+   * view, once the comments module is there.
+   */
+  async addComment(): Promise<void> {
+    if (this.commentsLoading) {
+      await this.commentsLoading;
+    }
+    const comments = this.comments;
+    if (comments && !comments.addFromSelection()) {
+      comments.addAtTop();
+    }
+  }
+
   /** Whether comments show: the feature on and not hidden by the header toggle. */
   private commentsShown(): boolean {
     const s = this.state.settings;
@@ -661,6 +675,11 @@ export class App {
             this.actions.pulseCommentBadge();
           },
           focusMode: () => this.actions.inFocusMode,
+          showComments: () => {
+            if (!this.state.settings.commentsVisible) {
+              this.updateSettings({ commentsVisible: true });
+            }
+          },
         });
         quietly(this.comments.load());
       }

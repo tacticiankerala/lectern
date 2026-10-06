@@ -122,8 +122,12 @@ function setup(
     openPanel: vi.fn<() => void>(),
     pulseBadge: vi.fn<() => void>(),
     focusMode: () => opts.focusMode ?? false,
+    showComments: vi.fn<() => void>(() => {
+      state.visible = true;
+    }),
   } satisfies CommentsHost;
   const controller = new CommentsController(host);
+  controllers.push(controller);
   const rerender = () => {
     docEl.innerHTML = html;
     for (const cb of [...docListeners]) cb();
@@ -163,6 +167,53 @@ function ctrlEnter(el: HTMLElement): void {
   );
 }
 
+/** Selects from the start of `from` to the end of `to`, each the first text in `root` holding it. */
+function selectBetween(root: Element, from: string, to: string): Range {
+  const textWith = (word: string): Text => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n instanceof Text && n.data.includes(word)) return n;
+    }
+    throw new Error(`no text with ${word}`);
+  };
+  const start = textWith(from);
+  const end = textWith(to);
+  const range = document.createRange();
+  range.setStart(start, start.data.indexOf(from));
+  range.setEnd(end, end.data.indexOf(to) + to.length);
+  const selection = document.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  return range;
+}
+
+/** The selection changed: lets the controller's frame run. */
+async function selectionSettles(): Promise<void> {
+  document.dispatchEvent(new Event("selectionchange"));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+/** A client rect `height` tall from `top`, full width. */
+function box(top: number, height: number): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    top,
+    bottom: top + height,
+    left: 0,
+    right: 800,
+    width: 800,
+    height,
+    toJSON: () => ({}),
+  };
+}
+
+function editorText(): HTMLTextAreaElement {
+  const el = document.querySelector<HTMLTextAreaElement>(".comment-editor textarea");
+  if (!el || el.closest<HTMLElement>(".comment-editor")?.hidden) throw new Error("no editor open");
+  return el;
+}
+
 /** Stands in for the CSS Custom Highlight API, which jsdom lacks. */
 class FakeHighlight extends Set<Range> {
   priority = 0;
@@ -171,7 +222,11 @@ class FakeHighlight extends Set<Range> {
   }
 }
 
+/** Every controller made, disposed after each test so none keeps listening to the document. */
+const controllers: CommentsController[] = [];
+
 afterEach(() => {
+  for (const c of controllers.splice(0)) c.dispose();
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
 });
@@ -222,9 +277,9 @@ describe("CommentsController", () => {
     panel.commentsPane.querySelector<HTMLButtonElement>('[data-filter="all"]')?.click();
     expect(cards(panel).map((c) => c.dataset.id)).toEqual(["4", "1", "2", "3"]);
     expect(action(panel, 3, "reopen").textContent).toBe("Reopen");
-    // Re-attach is for moved and detached comments only, and comes with adding comments.
+    // Re-attach is for moved and detached comments only.
     expect(card(panel, 3).querySelector('[data-action="reattach"]')).toBeNull();
-    expect(action(panel, 4, "reattach").disabled).toBe(true);
+    expect(action(panel, 4, "reattach").disabled).toBe(false);
   });
 
   it("reply sends a reply op and re-renders", async () => {
@@ -443,6 +498,7 @@ describe("CommentsController", () => {
     for (const name of ["reply", "resolve", "dismiss"]) {
       expect(action(panel, 1, name).disabled, name).toBe(true);
     }
+    expect(action(panel, 4, "reattach").disabled).toBe(true);
     expect(action(panel, 1, "copy").disabled).toBe(false);
     const unreadable = panel.commentsPane.querySelector(".comment-card.unreadable");
     expect(unreadable?.textContent).toContain("Couldn't read this comment");
@@ -738,5 +794,289 @@ describe("CommentsController", () => {
     expect(panel.tab).toBe("outline");
     expect(host.openPanel).not.toHaveBeenCalled();
     expect(panel.commentsPane.querySelector(".comment-card.selected")).toBeNull();
+  });
+  it("anchor from selection uses block lines and a chrome-free quote", async () => {
+    const { fake, panel, host, controller, docEl } = setup({
+      html: `<h1 id="tide-sync" data-sourcepos="1:1-1:11">Tide sync</h1>
+<p data-sourcepos="3:1-3:70">The client sends at most fifty<sup data-sourcepos="3:31-3:34" class="footnote-ref"><a href="#fn-1" id="fnref-1" data-footnote-ref="">1</a></sup> changes per batch.</p>
+<ul data-sourcepos="5:1-6:20">
+<li data-sourcepos="5:1-5:30"><input type="checkbox" disabled=""> Retry with a short backoff</li>
+<li data-sourcepos="6:1-6:20">Log every failure</li>
+</ul>`,
+    });
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    // From the paragraph, over its footnote mark, into the first item past its checkbox.
+    selectBetween(docEl, "sends", "Retry");
+    await selectionSettles();
+    const button = host.scroller.querySelector<HTMLButtonElement>("button.lx-sel-comment");
+    expect(button?.hidden).toBe(false);
+    expect(button?.textContent).toBe("Comment");
+    // In the pane, never in the note.
+    expect(docEl.querySelector(".lx-sel-comment")).toBeNull();
+    button?.click();
+    const area = editorText();
+    expect(document.activeElement).toBe(area);
+    area.value = "Why fifty?";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledWith(A, {
+        op: "add",
+        anchor: { startLine: 3, endLine: 5, quote: "sends at most fifty changes per batch. Retry" },
+        text: "Why fifty?",
+      });
+    });
+    // Saved: the editor goes, and the new comment (the highest id) is the one on show.
+    await vi.waitFor(() => {
+      expect(card(panel, 5).classList.contains("selected")).toBe(true);
+    });
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    expect(panel.tab).toBe("comments");
+
+    // A selection reaching outside the note, or none, adds nothing.
+    document.getSelection()?.removeAllRanges();
+    await selectionSettles();
+    expect(button?.hidden).toBe(true);
+    expect(controller.addFromSelection()).toBe(false);
+    const outside = document.createElement("p");
+    outside.textContent = "Outside the note";
+    document.body.append(outside);
+    const range = document.createRange();
+    range.setStart(docEl.querySelector("h1")?.firstChild ?? docEl, 0);
+    range.setEnd(outside.firstChild ?? outside, 3);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+    await selectionSettles();
+    expect(button?.hidden).toBe(true);
+    expect(controller.addFromSelection()).toBe(false);
+
+    // A triple click ends at the very start of the next block: the comment is on the paragraph.
+    const paragraph = docEl.querySelector("p");
+    const opening = [...(paragraph?.childNodes ?? [])].find((n) => n instanceof Text);
+    const item = docEl.querySelector("li");
+    if (!opening || !item) throw new Error("no paragraph text or item");
+    const triple = document.createRange();
+    triple.setStart(opening, 0);
+    triple.setEnd(item, 0);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(triple);
+    expect(controller.addFromSelection()).toBe(true);
+    const again = editorText();
+    again.value = "Per batch, or per minute?";
+    again.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(again);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenLastCalledWith(A, {
+        op: "add",
+        anchor: {
+          startLine: 3,
+          endLine: 3,
+          quote: "The client sends at most fifty changes per batch.",
+        },
+        text: "Per batch, or per minute?",
+      });
+    });
+  });
+
+  it("add at top picks the first visible block", async () => {
+    const { fake, host, controller, docEl } = setup();
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    // The pane's top is at 100: the heading starts above it, the paragraph is the first below.
+    vi.spyOn(host.scroller, "getBoundingClientRect").mockReturnValue(box(100, 500));
+    const tops: [string, number][] = [
+      ["h1", 70],
+      ["p", 130],
+      ["ul", 200],
+      ["li", 200],
+      ["li:last-child", 240],
+    ];
+    for (const [selector, top] of tops) {
+      for (const el of docEl.querySelectorAll<HTMLElement>(selector)) {
+        vi.spyOn(el, "getBoundingClientRect").mockReturnValue(box(top, 30));
+      }
+    }
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Is fifty enough?";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledWith(A, {
+        op: "add",
+        anchor: {
+          startLine: 3,
+          endLine: 3,
+          quote: "The client sends at most fifty changes per batch to the hub.",
+        },
+        text: "Is fifty enough?",
+      });
+    });
+
+    // Scrolled partway into the paragraph: it crosses the top, so it's the one, not the list below.
+    vi.spyOn(docEl.querySelector("p") ?? docEl, "getBoundingClientRect").mockReturnValue(
+      box(90, 60),
+    );
+    controller.addAtTop();
+    const again = editorText();
+    again.value = "And per minute?";
+    again.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(again);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenLastCalledWith(A, {
+        op: "add",
+        anchor: expect.objectContaining({ startLine: 3, endLine: 3 }) as unknown,
+        text: "And per minute?",
+      });
+    });
+
+    // The deepest block crossing it wins: an item rather than its list.
+    for (const [selector, top, height] of [
+      ["p", 40, 50],
+      ["ul", 95, 80],
+      ["li", 95, 40],
+      ["li:last-child", 135, 40],
+    ] as const) {
+      for (const el of docEl.querySelectorAll<HTMLElement>(selector)) {
+        vi.spyOn(el, "getBoundingClientRect").mockReturnValue(box(top, height));
+      }
+    }
+    controller.addAtTop();
+    const third = editorText();
+    third.value = "How short?";
+    third.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(third);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenLastCalledWith(A, {
+        op: "add",
+        anchor: { startLine: 5, endLine: 5, quote: "Retry with a short backoff" },
+        text: "How short?",
+      });
+    });
+  });
+
+  it("asking for another comment while the editor holds text keeps it", async () => {
+    const { controller, docEl } = setup();
+    await controller.load();
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Half a thought";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    // A press elsewhere leaves it open, and another comment asked for brings it back.
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    area.blur();
+    selectBetween(docEl, "Log", "failure");
+    expect(controller.addFromSelection()).toBe(true);
+    expect(editorText()).toBe(area);
+    expect(area.value).toBe("Half a thought");
+    expect(document.activeElement).toBe(area);
+    controller.addAtTop();
+    expect(area.value).toBe("Half a thought");
+  });
+
+  it("reattach mode sends a reattach op", async () => {
+    const { fake, panel, host, controller, docEl } = setup();
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    const banner = (): HTMLElement | null =>
+      panel.commentsPane.querySelector<HTMLElement>(".comments-attach");
+    const selButton = (): HTMLButtonElement | null =>
+      host.scroller.querySelector<HTMLButtonElement>("button.lx-sel-comment");
+
+    // Cancel, and Esc, leave attach mode.
+    action(panel, 4, "reattach").click();
+    expect(banner()?.hidden).toBe(false);
+    expect(banner()?.textContent).toContain("Select the new text for C4, then press Attach here.");
+    banner()?.querySelector<HTMLButtonElement>("button")?.click();
+    expect(banner()?.hidden).toBe(true);
+    action(panel, 4, "reattach").click();
+    expect(banner()?.hidden).toBe(false);
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(banner()?.hidden).toBe(true);
+    selectBetween(docEl, "Log", "failure");
+    await selectionSettles();
+    expect(selButton()?.textContent).toBe("Comment");
+
+    action(panel, 4, "reattach").click();
+    await selectionSettles();
+    expect(selButton()?.textContent).toBe("Attach C4 here");
+    selButton()?.click();
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledWith(A, {
+        op: "reattach",
+        id: 4,
+        anchor: { startLine: 6, endLine: 6, quote: "Log every failure" },
+      });
+    });
+    await vi.waitFor(() => {
+      expect(card(panel, 4).dataset.state).toBe("anchored");
+    });
+    expect(banner()?.hidden).toBe(true);
+    expect(card(panel, 4).classList.contains("selected")).toBe(true);
+    // No editor: the selection is all a re-attach needs.
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden ?? true).toBe(true);
+  });
+
+  it("edit sends the entry index", async () => {
+    const { fake, panel, controller } = setup();
+    const p = review(A);
+    p.comments[1]?.entries.push(you("Under a second?"));
+    fake.setReview(A, p);
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    const entries = (): HTMLElement[] => [
+      ...card(panel, 2).querySelectorAll<HTMLElement>(".comment-entry"),
+    ];
+    // Only your own entries can be edited.
+    expect(entries().map((e) => e.querySelector('[data-action="edit"]') !== null)).toEqual([
+      true,
+      false,
+      true,
+    ]);
+    entries()[2]?.querySelector<HTMLButtonElement>('[data-action="edit"]')?.click();
+    const area = card(panel, 2).querySelector<HTMLTextAreaElement>("textarea");
+    if (!area) throw new Error("no edit box");
+    // The raw text, in place of the entry's body.
+    expect(area.value).toBe("Under a second?");
+    expect(entries()[2]?.querySelector(".comment-body")).toBeNull();
+    expect(document.activeElement).toBe(area);
+    area.value = "Under two seconds?";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledWith(A, {
+        op: "edit",
+        id: 2,
+        entry: 2,
+        text: "Under two seconds?",
+      });
+    });
+    await vi.waitFor(() => {
+      expect(entries()[2]?.querySelector(".comment-body")?.textContent).toBe("Under two seconds?");
+    });
+    expect(card(panel, 2).querySelector("textarea")).toBeNull();
+
+    // Esc puts the entry back as it was.
+    entries()[0]?.querySelector<HTMLButtonElement>('[data-action="edit"]')?.click();
+    const again = card(panel, 2).querySelector<HTMLTextAreaElement>("textarea");
+    again?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(card(panel, 2).querySelector("textarea")).toBeNull();
+    expect(entries()[0]?.querySelector(".comment-body")?.textContent).toBe("How short?");
+    expect(reviewOp).toHaveBeenCalledTimes(1);
+  });
+
+  it("add-comment while hidden shows comments", async () => {
+    const { host, controller, docEl } = setup({ visible: false });
+    await controller.load();
+    expect(docEl.querySelectorAll(".lx-cdot")).toHaveLength(0);
+    controller.addAtTop();
+    expect(host.showComments).toHaveBeenCalledTimes(1);
+    expect(docEl.querySelectorAll(".lx-cdot")).toHaveLength(2);
+    expect(editorText()).toBeDefined();
   });
 });
