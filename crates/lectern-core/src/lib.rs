@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod library;
 pub mod perf;
 pub mod render;
+pub mod review;
 pub mod search;
 pub mod store;
 pub mod text;

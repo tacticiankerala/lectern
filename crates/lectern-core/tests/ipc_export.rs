@@ -9,6 +9,7 @@ use lectern_core::ipc::{
     RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
+use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
 
@@ -50,6 +51,9 @@ fn ts_bindings_exported() {
         "Frontmatter",
         "PropValue",
         "UserOpen",
+        "CommentStatus",
+        "ClaudeKind",
+        "EntryAuthor",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -107,6 +111,18 @@ fn ts_unions_follow_the_serde_tags() {
     assert_eq!(
         decl::<FollowResult>(),
         r#"type FollowResult = { "action": "openDoc", path: string, anchor: string | null, line: number | null, } | { "action": "opened" } | { "action": "notFound", message: string, };"#
+    );
+    assert_eq!(
+        decl::<CommentStatus>(),
+        r#"type CommentStatus = "open" | "replied" | "question" | "pushback" | "resolved" | "dismissed";"#
+    );
+    assert_eq!(
+        decl::<ClaudeKind>(),
+        r#"type ClaudeKind = "reply" | "question" | "pushback" | "resolved";"#
+    );
+    assert_eq!(
+        decl::<EntryAuthor>(),
+        r#"type EntryAuthor = "you" | "claude";"#
     );
 }
 

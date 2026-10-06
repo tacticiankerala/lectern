@@ -17,6 +17,7 @@ This repository is public. Everything in it that stands for user data is invente
 - `src-tauri`: the Windows app around it.
 - `ui`: the interface, TypeScript and CSS with no framework. The core tests rewrite the ts-rs bindings in `ui/src/generated`.
 - `fixtures/vault` is the library the tests run against; `fixtures/demo` is the one in the screenshots.
+- `crates/lectern-core/tests/fixtures/review/` holds sidecar golden files; never put `*.review.md` in `fixtures/vault`.
 
 ## Commands
 
