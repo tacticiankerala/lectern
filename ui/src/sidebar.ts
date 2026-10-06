@@ -204,6 +204,7 @@ export class Sidebar {
       children: [],
       readme: null,
       status: null,
+      comments: null,
     };
     const section = h("section", {
       class: "lib-root",

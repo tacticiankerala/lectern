@@ -8,7 +8,7 @@ function root(path: string, truncated: boolean): RootView {
     path,
     name,
     state: { state: "ready" },
-    tree: { name, path, isDir: true, children: [], readme: null, status: null },
+    tree: { name, path, isDir: true, children: [], readme: null, status: null, comments: null },
     truncated,
   };
 }

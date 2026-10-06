@@ -16,4 +16,8 @@ readme: string | null,
 /**
  * The frontmatter `status:` of that README.
  */
-status: string | null, };
+status: string | null, 
+/**
+ * For a note with a review sidecar: its open comments. Never set for a folder.
+ */
+comments: number | null, };

@@ -66,6 +66,15 @@ fn is_doc_event(event: &WatchEvent) -> bool {
     matches!(event, WatchEvent::DocChanged(_) | WatchEvent::DocRemoved(_))
 }
 
+fn is_review_event(event: &WatchEvent) -> bool {
+    matches!(event, WatchEvent::ReviewChanged(_))
+}
+
+/// A sidecar's text, `extra` making each version a different size.
+fn sidecar_text(extra: &str) -> String {
+    format!("---\nlectern-review: 1\nnote: doc.md\n---\n# Review: doc.md\n{extra}")
+}
+
 fn assert_quiet(rx: &Receiver<WatchEvent>, keep: impl Fn(&WatchEvent) -> bool) {
     assert_quiet_for(rx, QUIET, keep);
 }
@@ -174,6 +183,55 @@ fn switching_docs_stops_watching_the_old_one() {
 
     watcher.set_current_doc(None);
     fs::remove_file(&old).unwrap();
+    assert_quiet(&rx, |_| true);
+}
+
+#[test]
+fn sidecar_change_reports_review_changed_for_the_note() {
+    let (tmp, doc) = doc_in_tmp();
+    let sidecar = tmp.path().join("doc.review.md");
+    let (watcher, rx) = watcher(POLL);
+    watcher.set_current_doc(Some(doc.clone()));
+    let review_changed = WatchEvent::ReviewChanged(doc.clone());
+
+    // Created, changed and deleted: each is reported for the note, and the note itself is
+    // untouched.
+    fs::write(&sidecar, sidecar_text("")).unwrap();
+    assert_eq!(next_matching(&rx, |_| true), review_changed);
+    fs::write(&sidecar, sidecar_text("\n## C1 · open · L1\n")).unwrap();
+    assert_eq!(next_matching(&rx, |_| true), review_changed);
+    fs::remove_file(&sidecar).unwrap();
+    assert_eq!(next_matching(&rx, |_| true), review_changed);
+    assert_quiet(&rx, |_| true);
+}
+
+#[test]
+fn notify_reports_sidecar_changes_before_the_poll() {
+    let (tmp, doc) = doc_in_tmp();
+    let (watcher, rx) = watcher(NO_POLL);
+    watcher.watch_roots(&[tmp.path().to_path_buf()]);
+    watcher.set_current_doc(Some(doc.clone()));
+    // Saved as Lectern saves it: a temporary file renamed over the sidecar.
+    let temp = tmp.path().join(".doc.review.md.lectern.tmp");
+    fs::write(&temp, sidecar_text("")).unwrap();
+    fs::rename(&temp, tmp.path().join("doc.review.md")).unwrap();
+    assert_eq!(
+        next_matching(&rx, is_review_event),
+        WatchEvent::ReviewChanged(doc)
+    );
+}
+
+#[test]
+fn switching_docs_stops_watching_the_old_sidecar() {
+    let (tmp, old) = doc_in_tmp();
+    let new = tmp.path().join("new.md");
+    fs::write(&new, "new\n").unwrap();
+    let (watcher, rx) = watcher(POLL);
+    watcher.set_current_doc(Some(old));
+    watcher.set_current_doc(Some(new.clone()));
+    fs::write(tmp.path().join("doc.review.md"), sidecar_text("")).unwrap();
+    fs::write(tmp.path().join("new.review.md"), sidecar_text("")).unwrap();
+    assert_eq!(next_matching(&rx, |_| true), WatchEvent::ReviewChanged(new));
     assert_quiet(&rx, |_| true);
 }
 
@@ -371,4 +429,52 @@ fn a_doc_switched_away_from_mid_batch_gets_no_event() {
     watcher.set_current_doc(Some(other));
     release.send(()).unwrap();
     assert_quiet(&rx, is_doc_event);
+}
+
+#[test]
+fn switching_docs_drops_stale_review_events() {
+    let lib = tempfile::tempdir().unwrap();
+    let lib_root = lib.path().to_path_buf();
+    let (docs, doc) = doc_in_tmp();
+    let other = docs.path().join("other.md");
+    fs::write(&other, "other\n").unwrap();
+
+    // Each `LibraryChanged` for `lib` holds the debounce thread until the test releases it.
+    let (tx, rx) = mpsc::channel();
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let held = WatchEvent::LibraryChanged(lib_root.clone());
+    let watcher = DocWatcher::new(
+        move |event| {
+            let hold = event == held;
+            let _ = tx.send(event);
+            if hold {
+                let _ = gate.lock().unwrap().recv();
+            }
+        },
+        NO_POLL,
+        DEBOUNCE,
+    );
+    watcher.watch_roots(&[lib_root.clone(), docs.path().to_path_buf()]);
+    watcher.set_current_doc(Some(doc.clone()));
+
+    fs::write(lib.path().join("a.md"), "a\n").unwrap();
+    assert_eq!(
+        next_matching(&rx, |_| true),
+        WatchEvent::LibraryChanged(lib_root.clone())
+    );
+    // While that callback runs, another library change and then a sidecar change come in.
+    fs::write(lib.path().join("b.md"), "b\n").unwrap();
+    fs::write(docs.path().join("doc.review.md"), sidecar_text("")).unwrap();
+    // Let both fall due, so they are taken in one batch, library event first, once released.
+    thread::sleep(DEBOUNCE * 3);
+    release.send(()).unwrap();
+    assert_eq!(
+        next_matching(&rx, |_| true),
+        WatchEvent::LibraryChanged(lib_root)
+    );
+    // The document is switched while the batch's library callback runs.
+    watcher.set_current_doc(Some(other));
+    release.send(()).unwrap();
+    assert_quiet(&rx, is_review_event);
 }

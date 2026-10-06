@@ -11,13 +11,13 @@ const ROOT = "C:\\V";
 
 function file(path: string): TreeNode {
   const name = path.slice(path.lastIndexOf("\\") + 1);
-  return { name, path, isDir: false, children: [], readme: null, status: null };
+  return { name, path, isDir: false, children: [], readme: null, status: null, comments: null };
 }
 
 function dir(path: string, children: TreeNode[], status: string | null = null): TreeNode {
   const name = path.slice(path.lastIndexOf("\\") + 1);
   const readme = children.find((c) => c.name === "README.md")?.path ?? null;
-  return { name, path, isDir: true, children, readme, status };
+  return { name, path, isDir: true, children, readme, status, comments: null };
 }
 
 // V: notes/ (a README with a status), plans/ (q1/ and a roadmap), then two files. Folders come

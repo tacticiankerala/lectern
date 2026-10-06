@@ -321,6 +321,8 @@ impl AppState {
             WatchEvent::DocChanged(path) => self.host.emit(UiEvent::DocChanged(path)),
             WatchEvent::DocRemoved(path) => self.host.emit(UiEvent::DocRemoved(path)),
             WatchEvent::LibraryChanged(root) => self.request_scan(&root, None),
+            // Task 5: emit `review-changed` to the UI.
+            WatchEvent::ReviewChanged(_) => {}
         }
     }
 

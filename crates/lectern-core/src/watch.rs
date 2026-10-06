@@ -1,7 +1,7 @@
 //! Live reload. The library roots are watched with the OS's change notifications
-//! (ReadDirectoryChangesW on Windows, inotify on Linux), and the open document is polled as well,
-//! because notifications from a NAS are unreliable. Events are debounced per document and per
-//! root.
+//! (ReadDirectoryChangesW on Windows, inotify on Linux), and the open document and its review
+//! sidecar are polled as well, because notifications from a NAS are unreliable. Events are
+//! debounced per document, per sidecar and per root.
 
 use std::collections::HashMap;
 use std::fs;
@@ -16,6 +16,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::library::ignore::is_ignored;
 use crate::library::{key_under, path_key};
+use crate::review::sidecar_path;
 
 /// How long dropping a watcher waits for its threads to finish.
 const STOP_GRACE: Duration = Duration::from_millis(500);
@@ -29,13 +30,17 @@ pub enum WatchEvent {
     DocRemoved(PathBuf),
     /// Something changed below this library root.
     LibraryChanged(PathBuf),
+    /// The open document's review sidecar was created, changed or deleted. Carries the
+    /// document's path, not the sidecar's.
+    ReviewChanged(PathBuf),
 }
 
-/// Watches the library roots and the open document, and reports changes through a callback.
+/// Watches the library roots, the open document and its review sidecar, and reports changes
+/// through a callback.
 ///
-/// It runs two threads of its own: one polls the open document, the other reports debounced
-/// events, so a stat stalled on a NAS never holds up library events. Dropping the watcher stops
-/// both, and notify's thread with them.
+/// It runs two threads of its own: one polls the open document and its sidecar, the other reports
+/// debounced events, so a stat stalled on a NAS never holds up library events. Dropping the
+/// watcher stops both, and notify's thread with them.
 pub struct DocWatcher {
     shared: Arc<Shared>,
     /// Replaced by each `watch_roots`; `None` without roots, or when the watcher couldn't start.
@@ -61,7 +66,8 @@ struct State {
     doc: Option<Doc>,
     /// Bumped by every `set_current_doc`, so a stat of the previous document is thrown away.
     generation: u64,
-    /// A notification touched the document, so the poll thread checks it straight away.
+    /// A notification touched the document or its sidecar, so the poll thread checks both
+    /// straight away.
     doc_touched: bool,
     /// Events waiting out their debounce.
     pending: HashMap<Key, Pending>,
@@ -81,6 +87,16 @@ struct Doc {
     generation: u64,
     /// The stamp last reported, or seen when the document was set. `None` while it is missing.
     seen: Option<Stamp>,
+    sidecar: Sidecar,
+}
+
+/// The open document's review sidecar, at the path `review::sidecar_path` gives. It may not exist.
+struct Sidecar {
+    /// Absolute, for stats and the key.
+    abs: PathBuf,
+    key: String,
+    /// The stamp last reported, or seen when the document was set. `None` while it is missing.
+    seen: Option<Stamp>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,17 +105,26 @@ struct Stamp {
     size: u64,
 }
 
-/// Events debounce per key: the open document, or a root by its path key.
+/// Events debounce per key: the open document, its sidecar, or a root by its path key.
 #[derive(PartialEq, Eq, Hash)]
 enum Key {
     Doc,
+    Review,
     Root(String),
+}
+
+impl Key {
+    /// Whether events for this key are about the open document, so they're dropped once another
+    /// document is opened.
+    fn is_doc(&self) -> bool {
+        matches!(self, Key::Doc | Key::Review)
+    }
 }
 
 struct Pending {
     event: WatchEvent,
     due: Instant,
-    /// For a document event, the generation of the document it is about.
+    /// For a document or sidecar event, the generation of the document it is about.
     generation: Option<u64>,
 }
 
@@ -162,7 +187,7 @@ impl DocWatcher {
                 })
                 .collect();
             pending.retain(|key, _| match key {
-                Key::Doc => true,
+                Key::Doc | Key::Review => true,
                 Key::Root(root) => watched.iter().any(|r| r.key == *root),
             });
         }
@@ -190,27 +215,34 @@ impl DocWatcher {
         *notify = Some(watcher);
     }
 
-    /// Polls `doc` from now on, every poll interval, in place of the document polled before;
-    /// `None` stops polling. The document's stamp is taken here, so only later changes are
-    /// reported. An event still pending for the previous document is dropped.
+    /// Polls `doc` and its review sidecar from now on, every poll interval, in place of the
+    /// document polled before; `None` stops polling. Their stamps are taken here, so only later
+    /// changes are reported. Events still pending for the previous document are dropped.
     pub fn set_current_doc(&self, doc: Option<PathBuf>) {
-        // Outside the lock. The caller has just read the file, so the stat is quick.
+        // Outside the lock. The caller has just read the file, so the stats are quick.
         let doc = doc.map(|path| {
             let abs = absolute(&path);
-            (stamp_of(&abs), abs, path)
+            let sidecar = sidecar_path(&abs);
+            let sidecar = Sidecar {
+                key: path_key(&sidecar),
+                seen: stamp_of(&sidecar),
+                abs: sidecar,
+            };
+            (stamp_of(&abs), abs, path, sidecar)
         });
         let mut state = self.shared.lock();
         state.generation += 1;
         let generation = state.generation;
-        state.doc = doc.map(|(seen, abs, path)| Doc {
+        state.doc = doc.map(|(seen, abs, path, sidecar)| Doc {
             key: path_key(&abs),
             path,
             abs,
             generation,
             seen,
+            sidecar,
         });
         state.doc_touched = false;
-        state.pending.remove(&Key::Doc);
+        state.pending.retain(|key, _| !key.is_doc());
         drop(state);
         self.shared.wake.notify_all();
     }
@@ -283,19 +315,20 @@ impl Shared {
     }
 
     /// Schedules `event` for once the debounce has passed, replacing what was pending for `key`. A
-    /// document event belongs to the current document.
+    /// document or sidecar event belongs to the current document.
     fn schedule(&self, state: &mut State, key: Key, event: WatchEvent) {
         let pending = Pending {
             event,
             due: Instant::now() + self.debounce,
-            generation: (key == Key::Doc).then_some(state.generation),
+            generation: key.is_doc().then_some(state.generation),
         };
         state.pending.insert(key, pending);
         self.wake.notify_all();
     }
 
-    /// The poll thread. Stats the open document every `interval`, or at once when a notification
-    /// touched it, and schedules an event when its stamp differs from the one last seen.
+    /// The poll thread. Stats the open document and its sidecar every `interval`, or at once when
+    /// a notification touched either, and schedules an event for each whose stamp differs from the
+    /// one last seen.
     fn poll(&self, interval: Duration) {
         let mut state = self.lock();
         let mut next = Instant::now() + interval;
@@ -308,8 +341,11 @@ impl Shared {
                 .doc
                 .as_ref()
                 .filter(|_| state.doc_touched || now >= next)
-                .map(|doc| (doc.path.clone(), doc.abs.clone(), doc.generation));
-            let Some((path, abs, generation)) = due else {
+                .map(|doc| {
+                    let sidecar = doc.sidecar.abs.clone();
+                    (doc.path.clone(), doc.abs.clone(), sidecar, doc.generation)
+                });
+            let Some((path, abs, sidecar, generation)) = due else {
                 let timeout = state
                     .doc
                     .as_ref()
@@ -321,18 +357,31 @@ impl Shared {
             next = now + interval;
             drop(state);
             let stamp = stamp_of(&abs);
+            let sidecar_stamp = stamp_of(&sidecar);
             state = self.lock();
-            if let Some(doc) = state
+            let Some(doc) = state
                 .doc
                 .as_mut()
-                .filter(|doc| doc.generation == generation && doc.seen != stamp)
-            {
+                .filter(|doc| doc.generation == generation)
+            else {
+                continue;
+            };
+            let doc_event = (doc.seen != stamp).then(|| {
                 doc.seen = stamp;
-                let event = match stamp {
-                    Some(_) => WatchEvent::DocChanged(path),
-                    None => WatchEvent::DocRemoved(path),
-                };
+                match stamp {
+                    Some(_) => WatchEvent::DocChanged(path.clone()),
+                    None => WatchEvent::DocRemoved(path.clone()),
+                }
+            });
+            let review_event = (doc.sidecar.seen != sidecar_stamp).then(|| {
+                doc.sidecar.seen = sidecar_stamp;
+                WatchEvent::ReviewChanged(path)
+            });
+            if let Some(event) = doc_event {
                 self.schedule(&mut state, Key::Doc, event);
+            }
+            if let Some(event) = review_event {
+                self.schedule(&mut state, Key::Review, event);
             }
         }
     }
@@ -375,8 +424,9 @@ impl Shared {
         }
     }
 
-    /// notify's handler. A change to the open document has the poll thread check it, which keeps
-    /// one record of what was last reported; a change below a root schedules `LibraryChanged`.
+    /// notify's handler. A change to the open document or its sidecar has the poll thread check
+    /// them, which keeps one record of what was last reported; a change below a root schedules
+    /// `LibraryChanged`.
     fn on_notify(&self, event: &Event) {
         if !changes_files(&event.kind) {
             return;
@@ -399,10 +449,9 @@ impl Shared {
             })
             .map(|root| (root.key.clone(), root.path.clone()))
             .collect();
-        let doc_touched = state
-            .doc
-            .as_ref()
-            .is_some_and(|doc| rescan || keys.contains(&doc.key));
+        let doc_touched = state.doc.as_ref().is_some_and(|doc| {
+            rescan || keys.contains(&doc.key) || keys.contains(&doc.sidecar.key)
+        });
         if doc_touched {
             state.doc_touched = true;
             self.wake.notify_all();
@@ -490,6 +539,7 @@ mod tests {
             "work/._plan.md",
             ".ds_store",
             "thumbs.db",
+            "work/.plan.review.md.lectern.tmp",
         ] {
             assert!(!in_library(rel), "{rel:?} should be ignored");
         }
