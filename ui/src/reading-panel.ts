@@ -1,12 +1,21 @@
 // The reading panel: the "Aa" popover with the theme mode, the light and dark themes, the fonts,
-// size, line height, width and code wrap. Every change goes through the host, which applies it at
-// once and saves it; sliders ask for the save to wait until the drag settles. The panel is built
-// the first time it opens, and asks for the installed fonts only when a font select opens.
+// size, line height, width, code wrap and the sidebars' text size. Every change goes through the
+// host, which applies it at once and saves it; sliders ask for the save to wait until the drag
+// settles. The panel is built the first time it opens, and asks for the installed fonts only when a
+// font select opens.
 import { h } from "./dom";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { ThemeMode } from "./generated/ThemeMode";
-import { FONT_SIZE, LINE_HEIGHT, MEASURE, THEMES, isDark, type ThemeDef } from "./themes";
+import {
+  FONT_SIZE,
+  LINE_HEIGHT,
+  MEASURE,
+  SIDEBAR_FONT_SIZE,
+  THEMES,
+  isDark,
+  type ThemeDef,
+} from "./themes";
 
 export interface ReadingHost {
   settings(): Settings;
@@ -65,6 +74,7 @@ interface Controls {
   measure: HTMLInputElement;
   fullWidth: HTMLInputElement;
   codeWrap: HTMLInputElement;
+  sidebarSize: HTMLInputElement;
   values: Map<HTMLInputElement, HTMLOutputElement>;
 }
 
@@ -152,6 +162,7 @@ export class ReadingPanel {
     ui.measure.disabled = s.measure === "full";
     ui.fullWidth.checked = s.measure === "full";
     ui.codeWrap.checked = s.codeWrap;
+    ui.sidebarSize.value = String(s.sidebarFontSize);
     for (const [input, output] of ui.values) {
       output.textContent = valueText(input);
     }
@@ -212,6 +223,13 @@ export class ReadingPanel {
       measure: slider("lx-measure", "Text width", MEASURE.min, MEASURE.max, 1),
       fullWidth: checkbox("lx-full-width"),
       codeWrap: checkbox("lx-code-wrap"),
+      sidebarSize: slider(
+        "lx-sidebar-font-size",
+        "Sidebar text size",
+        SIDEBAR_FONT_SIZE.min,
+        SIDEBAR_FONT_SIZE.max,
+        1,
+      ),
       values,
     };
 
@@ -239,6 +257,8 @@ export class ReadingPanel {
       sliderRow("Width", ui.measure),
       row("", h("label", { class: "rp-check" }, ui.fullWidth, "Full width"), "check"),
       row("", h("label", { class: "rp-check" }, ui.codeWrap, "Wrap long code lines"), "check"),
+      h("div", { class: "rp-rule" }),
+      sliderRow("Sidebar text", ui.sidebarSize),
       h("datalist", { id: FONT_LIST_ID }),
     );
 
@@ -258,6 +278,9 @@ export class ReadingPanel {
     });
     ui.codeWrap.addEventListener("change", () => {
       this.host.update({ codeWrap: ui.codeWrap.checked });
+    });
+    ui.sidebarSize.addEventListener("input", () => {
+      this.host.update({ sidebarFontSize: Number(ui.sidebarSize.value) }, { debounce: true });
     });
     this.root.append(ui.el);
     return ui;
@@ -430,6 +453,7 @@ function valueText(input: HTMLInputElement): string {
   const value = Number(input.value);
   switch (input.name) {
     case "lx-font-size":
+    case "lx-sidebar-font-size":
       return `${String(value)} px`;
     case "lx-line-height":
       return value.toFixed(2);

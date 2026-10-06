@@ -266,21 +266,20 @@ describe("App quick open candidates", () => {
 describe("App metadata-only refresh", () => {
   it("updates the breadcrumbs when only they changed", async () => {
     const { fake, app } = await started(B);
-    const crumb = () =>
-      [...document.querySelectorAll<HTMLElement>("#lx-breadcrumbs .crumb")].find(
-        (c) => c.textContent === "notes",
-      );
-    expect(crumb()?.classList.contains("has-readme")).toBe(false);
+    const body = document.getElementById("lx-doc")?.firstElementChild;
+    const notes = () => app.state.doc?.breadcrumbs.find((c) => c.name === "notes");
+    expect(notes()?.readme).toBeNull();
     const readme = `${ROOT}\\notes\\README.md`;
     fake.setDoc(readme, "<h1>Notes</h1>");
     fake.emit("doc-changed", { path: B });
     await vi.waitFor(() => {
-      expect(crumb()?.classList.contains("has-readme")).toBe(true);
+      expect(notes()?.readme).toBe(readme);
     });
-    crumb()?.click();
-    await vi.waitFor(() => {
-      expect(app.state.doc?.path).toBe(readme);
-    });
+    // The body stayed as it was.
+    expect(document.getElementById("lx-doc")?.firstElementChild).toBe(body);
+    expect(
+      [...document.querySelectorAll("#lx-breadcrumbs .crumb")].map((c) => c.textContent),
+    ).toEqual(["V", "notes", "b.md"]);
   });
 });
 

@@ -15,7 +15,7 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 
 ## Features
 
-- **Your notes as a library.** Add folders and browse them in the sidebar. A folder with a README shows that README's `status:` as a badge.
+- **Your notes as a library.** Add folders and browse them in the sidebar, or collapse it to give the page the room. Click any breadcrumb to pick a nearby file or folder from a list that goes away once you've chosen. A folder with a README shows that README's `status:` as a badge.
 - **Faithful rendering.** GitHub-flavoured Markdown: tables, task lists, footnotes, alerts, raw HTML (made safe), and highlighted code. Frontmatter shows as a tidy properties strip, with a count of done tasks.
 - **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations.
 - **Find anything.** Quick open by name, search across the whole library, and find in the page.
@@ -77,10 +77,12 @@ status: active
 | Ctrl+O | Open a file |
 | Ctrl+Shift+N | Add a folder to the library |
 | Ctrl+P | Quick open |
+| Ctrl+Shift+. | Open the breadcrumb chooser on the current file's folder |
 | Ctrl+Shift+F | Search the library |
 | Ctrl+F, then F3 / Shift+F3 | Find in the page, next and previous match |
 | Alt+← / Alt+→ | Back and forward (the mouse's side buttons work too) |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Larger text, smaller text, default size |
+| Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0 | Larger, smaller or default text in the library, outline and breadcrumb chooser |
 | Ctrl+Shift+T | Switch between the light and dark theme |
 | Ctrl+B | Show or hide the library |
 | Ctrl+Shift+O | Show or hide the outline |
@@ -102,6 +104,7 @@ Open the **Aa** panel in the toolbar to change how documents look.
 - Lectern follows Windows' light or dark mode, with a light and a dark theme of your choosing, or you can fix it to one.
 - **Bundled fonts:** Inter, Atkinson Hyperlegible Next, Literata and Source Serif 4 for text, and JetBrains Mono for code. Any font installed on your PC works too. The default text font is Segoe UI Variable.
 - Text size runs from 12 to 32 px and line height from 1.3 to 2.0. The reading width is 100 characters by default and adjusts from 60 to 160, or the text can fill the window. Long code lines can scroll or wrap.
+- **Sidebar text** sets the size of the library, the outline and the breadcrumb chooser, from 11 to 20 px (13 by default).
 
 ## Privacy
 

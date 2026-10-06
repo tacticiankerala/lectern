@@ -47,6 +47,13 @@ describe("actionFor", () => {
       // Keyboards with Back and Forward keys.
       [{ key: "BrowserBack" }, "back"],
       [{ key: "BrowserForward" }, "forward"],
+      // The sidebars' text size.
+      [{ key: "=", ctrlKey: true, altKey: true }, "sidebar-font-up"],
+      [{ key: "+", ctrlKey: true, altKey: true, shiftKey: true }, "sidebar-font-up"],
+      [{ key: "-", ctrlKey: true, altKey: true }, "sidebar-font-down"],
+      [{ key: "0", ctrlKey: true, altKey: true }, "sidebar-font-reset"],
+      // VS Code's "focus breadcrumbs": the period key, whatever Shift makes of it.
+      [{ key: ">", code: "Period", ctrlKey: true, shiftKey: true }, "breadcrumbs"],
     ];
     for (const [init, action] of table) {
       expect(actionFor(key(init)), JSON.stringify(init)).toBe(action);
@@ -55,7 +62,10 @@ describe("actionFor", () => {
 
   it("ignores other keys and modifiers", () => {
     expect(actionFor(key({ key: "=" }))).toBeNull();
-    expect(actionFor(key({ key: "=", ctrlKey: true, altKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "p", ctrlKey: true, altKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "0", ctrlKey: true, altKey: true, shiftKey: true }))).toBeNull();
+    expect(actionFor(key({ key: ".", code: "Period", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: ">", code: "Period", shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "t", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "F11", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "p" }))).toBeNull();

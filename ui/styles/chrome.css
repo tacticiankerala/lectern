@@ -1,6 +1,6 @@
 /* The app's chrome: layout, header, sidebars, outline, properties strip, banner, toasts, the
-   welcome and error states, the library tree, menus, quick open, full-text search, the find bar
-   and Preferences. */
+   welcome and error states, the library tree, menus, the breadcrumb chooser, quick open, full-text
+   search, the find bar and Preferences. */
 
 /* ---- Layout ---- */
 
@@ -24,6 +24,13 @@
   --outline-col: 0px;
 }
 
+/* The library's column slides open and shut on a toggle (actions.ts adds `sliding` for it). */
+@media (prefers-reduced-motion: no-preference) {
+  #lx-app.sliding {
+    transition: grid-template-columns 0.15s ease-out;
+  }
+}
+
 #lx-app.no-library > #lx-library,
 #lx-app.no-library > .resizer[data-for="library"],
 #lx-app.no-outline > #lx-outline,
@@ -42,10 +49,14 @@
   user-select: none;
 }
 
+/* The library button leads the header, as the outline button ends it. */
+#lx-library-btn {
+  margin-left: -4px;
+}
+
 #lx-history-nav {
   display: flex;
   gap: 2px;
-  margin-left: -4px;
 }
 
 #lx-breadcrumbs {
@@ -75,9 +86,15 @@ button.crumb {
   cursor: pointer;
 }
 
-button.crumb:hover {
+button.crumb:hover,
+button.crumb[aria-expanded="true"] {
   background: var(--hover);
   color: var(--fg);
+}
+
+/* Inside the crumb, as the breadcrumbs' row would clip a ring around it. */
+button.crumb:focus-visible {
+  outline-offset: -2px;
 }
 
 .crumb.current {
@@ -171,6 +188,8 @@ button.crumb:hover {
 .sidebar {
   min-height: 0;
   overflow: auto;
+  /* Row heights, indents and badges scale with it, in em. */
+  font-size: var(--sidebar-font-size);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--fg) 18%, transparent) transparent;
 }
@@ -460,7 +479,7 @@ button.crumb:hover {
 .outline-title {
   padding: 0 8px 10px 14px;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 0.923em;
   font-weight: 600;
 }
 
@@ -474,7 +493,7 @@ button.crumb:hover {
 .outline-list span {
   display: block;
   overflow: hidden;
-  padding: 3px 8px 3px calc(12px + var(--depth, 0) * 12px);
+  padding: 3px 8px 3px calc(0.923em + var(--depth, 0) * 0.923em);
   border-left: 2px solid transparent;
   border-radius: 0 4px 4px 0;
   color: var(--fg-muted);
@@ -510,9 +529,9 @@ button.crumb:hover {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 26px;
+  height: 2em;
   margin: 0 6px;
-  padding: 0 8px 0 calc(4px + var(--depth, 0) * 14px);
+  padding: 0 8px 0 calc(4px + var(--depth, 0) * 1.077em);
   border-radius: 5px;
   color: var(--fg-muted);
   outline-offset: -2px;
@@ -541,10 +560,12 @@ button.crumb:hover {
 }
 
 .tree-chevron,
-.tree-spacer {
+.tree-spacer,
+.cc-chevron,
+.cc-spacer {
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: 1.231em;
+  height: 1.231em;
 }
 
 .tree-chevron {
@@ -558,10 +579,11 @@ button.crumb:hover {
   cursor: pointer;
 }
 
-.tree-chevron::before {
+.tree-chevron::before,
+.cc-chevron::before {
   content: "";
-  width: 5px;
-  height: 5px;
+  width: 0.385em;
+  height: 0.385em;
   border-right: 1.5px solid currentColor;
   border-bottom: 1.5px solid currentColor;
   transform: translateX(-1px) rotate(-45deg);
@@ -600,21 +622,23 @@ button.crumb:hover {
   outline: 2px solid var(--accent);
 }
 
-.tree-row .badge {
+.tree-row .badge,
+.cc-item .badge {
   flex: none;
   gap: 4px;
   padding: 0 6px 0 5px;
-  font-size: 10.5px;
-  line-height: 16px;
+  font-size: 0.808em;
+  line-height: 1.524;
 }
 
-.tree-row .badge::before {
+.tree-row .badge::before,
+.cc-item .badge::before {
   width: 5px;
   height: 5px;
 }
 
 .lib-root-head {
-  height: 28px;
+  height: 2.154em;
   font-weight: 600;
 }
 
@@ -644,7 +668,7 @@ button.crumb:hover {
   padding: 8px 10px;
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--badge-blocked) 9%, transparent);
-  font-size: 12px;
+  font-size: 0.923em;
 }
 
 .lib-root-state {
@@ -660,7 +684,29 @@ button.crumb:hover {
 .lib-truncated {
   margin: 2px 12px 4px 30px;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: 0.923em;
+}
+
+/* No roots yet: what the library is for, and a way to start one. */
+.lib-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px 0;
+}
+
+.lib-empty p {
+  margin: 0;
+}
+
+.lib-empty-title {
+  font-weight: 600;
+}
+
+.lib-empty-note {
+  color: var(--fg-muted);
+  font-size: 0.923em;
 }
 
 body.resizing {
@@ -721,6 +767,118 @@ body.resizing {
   height: 1px;
   margin: 5px 4px;
   background: var(--border);
+}
+
+/* ---- Breadcrumb chooser (a crumb's popover) ---- */
+
+.crumb-chooser {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  /* 320px at the default sidebar text, wider as it grows. */
+  width: calc(222px + 7.5 * var(--sidebar-font-size));
+  max-width: calc(100vw - 16px);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  box-shadow:
+    0 14px 36px -10px rgb(0 0 0 / 0.32),
+    0 2px 6px rgb(0 0 0 / 0.06);
+  animation: panel-in 0.12s ease-out;
+}
+
+.cc-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px 0 5px;
+}
+
+.cc-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-filter {
+  margin: 5px 8px 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+
+.cc-filter:focus {
+  border-color: var(--accent);
+}
+
+.cc-filter::placeholder {
+  color: var(--fg-muted);
+}
+
+.cc-list {
+  /* The items' offset parent, for keeping the chosen one in view. */
+  position: relative;
+  max-height: min(400px, 60vh);
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 5px 5px;
+  list-style: none;
+  font-size: var(--sidebar-font-size);
+}
+
+.cc-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 2em;
+  padding: 0 8px 0 4px;
+  border-radius: 5px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.cc-item.dir {
+  color: var(--fg);
+}
+
+.cc-item[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--fg);
+}
+
+/* The document on screen. */
+.cc-item.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cc-chevron {
+  display: grid;
+  place-items: center;
+  color: var(--fg-muted);
+}
+
+.cc-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-empty,
+.cc-more {
+  padding: 6px 8px;
+  color: var(--fg-muted);
 }
 
 /* ---- Quick open (Ctrl+P) ---- */
@@ -1757,6 +1915,7 @@ body.focus #lx-doc-pane {
   .reading-panel,
   .toast,
   .menu,
+  .crumb-chooser,
   .quick-open,
   .search-panel,
   .find-bar,

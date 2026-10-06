@@ -2,7 +2,8 @@
 // tree. A folder's rows exist only while it is expanded; which folders are expanded is kept in
 // localStorage. Clicking a folder's name opens its README (and expands it) when it has one, else
 // toggles it; README folders carry their `status:` badge when the setting asks for them. The open
-// document is highlighted, its folders expanded and its row scrolled into view.
+// document is highlighted, its folders expanded and its row scrolled into view. With no roots it
+// offers to add a folder instead.
 import { h, samePath } from "./dom";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
@@ -15,6 +16,8 @@ export interface SidebarHost {
   retry(root: string): void;
   /** The context menu for a row: `root` when it is a root's own row. */
   contextMenu(e: MouseEvent, path: string, root: boolean): void;
+  /** Asks for a folder and adds it to the library. */
+  addFolder(): void;
 }
 
 /** A rendered row and what it shows. */
@@ -153,7 +156,10 @@ export class Sidebar {
     const scrollTop = this.host.scrollTop;
     this.rows.clear();
     this.activeRow = null;
-    this.host.replaceChildren(...this.library.roots.map((root) => this.section(root)));
+    const roots = this.library.roots;
+    this.host.replaceChildren(
+      ...(roots.length === 0 ? [this.emptyHint()] : roots.map((root) => this.section(root))),
+    );
     // Setting it forces a layout, which the first render (at the top) can do without.
     if (scrollTop !== 0) {
       this.host.scrollTop = scrollTop;
@@ -169,6 +175,21 @@ export class Sidebar {
     if (focusedPath !== undefined) {
       this.rows.get(key(focusedPath))?.el.focus({ preventScroll: true });
     }
+  }
+
+  /** With no roots: what the library is for, and a button to start one. */
+  private emptyHint(): HTMLElement {
+    const add = h("button", { type: "button", class: "btn" }, "Add folder…");
+    add.addEventListener("click", () => {
+      this.app.addFolder();
+    });
+    return h(
+      "div",
+      { class: "lib-empty" },
+      h("p", { class: "lib-empty-title" }, "Add a folder to build your library"),
+      add,
+      h("p", { class: "lib-empty-note" }, "Lectern indexes the Markdown files in folders you add."),
+    );
   }
 
   /**

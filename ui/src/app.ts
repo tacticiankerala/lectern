@@ -9,8 +9,9 @@
 // - Navigations are numbered, refreshes apart from them (navigation.ts).
 // - `startupNotice` shows once, as a toast.
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
-//   Preferences, the menus, find in page, full-text search, update checks and About are separate
-//   modules, loaded on first use. The automatic update check runs 5 s after the first paint.
+//   Preferences, the menus, find in page, full-text search, update checks, About and the breadcrumb
+//   chooser are separate modules, loaded on first use. The automatic update check runs 5 s after
+//   the first paint.
 // - The reading position is saved once scrolling stops for a moment and when the document is
 //   left; a document opened without an anchor or line goes back to its saved position.
 import { Actions } from "./actions";
@@ -18,6 +19,7 @@ import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
+import type { Crumb } from "./generated/Crumb";
 import type { DocChanged } from "./generated/DocChanged";
 import type { DocPayload } from "./generated/DocPayload";
 import type { LibraryPayload } from "./generated/LibraryPayload";
@@ -60,6 +62,7 @@ export const DEFAULT_SETTINGS: Settings = {
   editor: { mode: "auto" },
   autoUpdate: true,
   showStatusBadges: true,
+  sidebarFontSize: 13,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -206,6 +209,10 @@ export class App {
     this.nav = new Navigation(this);
     this.library = new LibraryController(this);
     this.actions = new Actions(this);
+    // Whether a crumb opens the chooser, and what the chooser lists, depend on the library's tree.
+    this.on("library", () => {
+      this.renderCrumbs(this.state.doc?.breadcrumbs ?? []);
+    });
     // Once a test replaces the page's app, the old one stops listening.
     installKeymap(root.ownerDocument, (action) => root.isConnected && this.actions.run(action));
   }
@@ -417,7 +424,7 @@ export class App {
       this.state.updated = null;
       this.state.error = result?.error ?? null;
       this.setTitle(null);
-      this.layout.breadcrumbs.replaceChildren();
+      this.renderCrumbs([]);
       this.layout.properties.hidden = true;
       this.layout.banner.hidden = true;
       this.outline.clear();
@@ -463,13 +470,19 @@ export class App {
       ...this.state.recent.filter((r) => !samePath(r.path, doc.path)),
     ].slice(0, MAX_RECENT);
     this.setTitle(doc.title);
-    renderBreadcrumbs(this.layout.breadcrumbs, doc.breadcrumbs, {
-      open: (readme) => void this.open(readme, { push: true }),
-      reveal: (folder) => {
-        this.library.revealFolder(folder);
-      },
-    });
+    this.renderCrumbs(doc.breadcrumbs);
     renderProperties(this.layout.properties, doc, Date.now(), this.state.updated);
+  }
+
+  /** The breadcrumbs, each opening the chooser on its folder; an open chooser follows them. */
+  private renderCrumbs(crumbs: Crumb[]): void {
+    renderBreadcrumbs(
+      this.layout.breadcrumbs,
+      crumbs,
+      this.state.library.roots,
+      (index, anchor) => void this.actions.showChooser(index, anchor, true),
+    );
+    this.actions.refreshChooser();
   }
 
   /** The native window title: the document's, or just Lectern. */
@@ -566,6 +579,7 @@ export class App {
     const root = document.documentElement;
     root.style.setProperty("--library-width", `${String(s.libraryWidth)}px`);
     root.style.setProperty("--outline-width", `${String(s.outlineWidth)}px`);
+    root.style.setProperty("--sidebar-font-size", `${String(s.sidebarFontSize)}px`);
     this.layout.app.classList.toggle("no-library", !s.libraryVisible);
     this.layout.app.classList.toggle("no-outline", !s.outlineVisible);
     this.emit("settings");

@@ -18,6 +18,7 @@ use crate::library::path_key;
 const FONT_SIZE: (u8, u8) = (12, 32);
 const LINE_HEIGHT: (f64, f64) = (1.3, 2.0);
 const MEASURE: (u16, u16) = (60, 160);
+const SIDEBAR_FONT_SIZE: (u8, u8) = (11, 20);
 const DEFAULT_LINE_HEIGHT: f64 = 1.65;
 
 /// Reading positions kept, least recently saved dropped first.
@@ -45,6 +46,7 @@ impl Default for Settings {
             editor: EditorPref::Auto,
             auto_update: true,
             show_status_badges: true,
+            sidebar_font_size: 13,
         }
     }
 }
@@ -75,13 +77,17 @@ impl Settings {
         set(&mut self.editor, p.editor);
         set(&mut self.auto_update, p.auto_update);
         set(&mut self.show_status_badges, p.show_status_badges);
+        set(&mut self.sidebar_font_size, p.sidebar_font_size);
         self.clamp();
     }
 
-    /// Brings font size, line height and measure into range. Call after loading `settings.json`,
-    /// which may have been edited by hand.
+    /// Brings font size, line height, measure and the sidebars' font size into range. Call after
+    /// loading `settings.json`, which may have been edited by hand.
     pub fn clamp(&mut self) {
         self.font_size = self.font_size.clamp(FONT_SIZE.0, FONT_SIZE.1);
+        self.sidebar_font_size = self
+            .sidebar_font_size
+            .clamp(SIDEBAR_FONT_SIZE.0, SIDEBAR_FONT_SIZE.1);
         self.line_height = if self.line_height.is_finite() {
             self.line_height.clamp(LINE_HEIGHT.0, LINE_HEIGHT.1)
         } else {

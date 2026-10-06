@@ -98,6 +98,25 @@ describe("reading panel", () => {
     expect(setSettings).toHaveBeenCalledWith({ fontSize: 22 });
   });
 
+  it("sets the sidebars' text size from 11 to 20 px, live, saving once the drag settles", async () => {
+    const { panel, setSettings } = await setup();
+    const size = control(panel, 'input[name="lx-sidebar-font-size"]');
+    expect([size.min, size.max, size.value]).toEqual(["11", "20", "13"]);
+    expect(size.getAttribute("aria-label")).toBe("Sidebar text size");
+    expect(rootVar("--sidebar-font-size")).toBe("13px");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    for (const value of ["15", "17", "18"]) {
+      size.value = value;
+      size.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    expect(rootVar("--sidebar-font-size")).toBe("18px");
+    expect(size.closest(".rp-slider")?.querySelector("output")?.textContent).toBe("18 px");
+    expect(setSettings).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(150);
+    expect(setSettings).toHaveBeenCalledTimes(1);
+    expect(setSettings).toHaveBeenCalledWith({ sidebarFontSize: 18 });
+  });
+
   it("offers widths from 60 to 160 characters, starting at 100", async () => {
     const { panel } = await setup();
     const width = control(panel, 'input[name="lx-measure"]');
@@ -247,6 +266,23 @@ describe("App shortcuts and focus mode", () => {
     press({ key: "-", ctrlKey: true });
     expect(app.state.settings.fontSize).toBe(19);
     press({ key: "0", ctrlKey: true });
+    expect(app.state.settings.fontSize).toBe(18);
+  });
+
+  it("Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0 change the sidebars' text size, within 11–20", async () => {
+    const { app, panel } = await setup();
+    press({ key: "=", ctrlKey: true, altKey: true });
+    press({ key: "=", ctrlKey: true, altKey: true });
+    expect(app.state.settings.sidebarFontSize).toBe(15);
+    expect(rootVar("--sidebar-font-size")).toBe("15px");
+    expect(control(panel, 'input[name="lx-sidebar-font-size"]').value).toBe("15");
+    for (let i = 0; i < 10; i++) press({ key: "=", ctrlKey: true, altKey: true });
+    expect(app.state.settings.sidebarFontSize).toBe(20);
+    press({ key: "0", ctrlKey: true, altKey: true });
+    expect(app.state.settings.sidebarFontSize).toBe(13);
+    for (let i = 0; i < 5; i++) press({ key: "-", ctrlKey: true, altKey: true });
+    expect(app.state.settings.sidebarFontSize).toBe(11);
+    // The reading size is another setting.
     expect(app.state.settings.fontSize).toBe(18);
   });
 

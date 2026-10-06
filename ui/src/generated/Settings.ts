@@ -25,4 +25,8 @@ measure: Measure, codeWrap: boolean, libraryVisible: boolean, outlineVisible: bo
 /**
  * Badges on library folders from their README's frontmatter `status:` (on by default).
  */
-showStatusBadges: boolean, };
+showStatusBadges: boolean, 
+/**
+ * Pixels, 11–20: the text of the library, the outline and the breadcrumb chooser.
+ */
+sidebarFontSize: number, };

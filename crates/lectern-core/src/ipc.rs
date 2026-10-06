@@ -89,6 +89,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Badges on library folders from their README's frontmatter `status:` (on by default).
     pub show_status_badges: bool,
+    /// Pixels, 11–20: the text of the library, the outline and the breadcrumb chooser.
+    pub sidebar_font_size: u8,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -114,6 +116,7 @@ pub struct SettingsPatch {
     pub editor: Option<EditorPref>,
     pub auto_update: Option<bool>,
     pub show_status_badges: Option<bool>,
+    pub sidebar_font_size: Option<u8>,
 }
 
 /// Where the reader was in a document: the nearest heading and the pixel offset below it, falling

@@ -36,7 +36,16 @@ await mkdir(outdir, { recursive: true });
 // app.js loads before the first paint, so what is only needed later stays out of it: app.ts loads
 // these modules with `import("./<name>.js")` on first use, and each is bundled on its own (a shared
 // chunk would cost app.js a second request before it can run).
-const lazy = ["quick-open", "preferences", "menu", "search-panel", "find", "update", "about"];
+const lazy = [
+  "quick-open",
+  "preferences",
+  "menu",
+  "search-panel",
+  "find",
+  "update",
+  "about",
+  "crumb-chooser",
+];
 await esbuild.build({
   entryPoints: [entry],
   outfile: path.join(outdir, "app.js"),

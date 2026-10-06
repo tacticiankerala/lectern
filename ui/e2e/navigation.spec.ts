@@ -120,19 +120,154 @@ test("quick open lists recent files first and closes on Esc", async ({ page }) =
   await expect(page).toHaveTitle("Wide table — Lectern");
 });
 
-test("breadcrumbs open README folders and reveal the others", async ({ page }) => {
+/** The breadcrumb chooser's parts. */
+function chooser(page: Page) {
+  const panel = page.locator(".crumb-chooser");
+  return {
+    panel,
+    where: panel.locator(".cc-path"),
+    filter: panel.getByRole("combobox", { name: "Filter" }),
+    names: panel.locator(".cc-item .cc-name"),
+    chosen: panel.locator('.cc-item[aria-selected="true"] .cc-name'),
+  };
+}
+
+test("the breadcrumb chooser lists the folder of each kind of crumb", async ({ page }) => {
   await openFixture(page, BIG_PLAN);
   const crumbs = page.locator("#lx-breadcrumbs .crumb");
   await expect(crumbs).toHaveText(["vault", "work", "alpha", "plans", "2026-01-01-big-plan.md"]);
-  // A folder without a README: revealed in the sidebar.
-  await row(page, "work/alpha/plans").locator(".tree-chevron").click();
-  await expect(row(page, BIG_PLAN)).toHaveCount(0);
-  await crumbs.nth(3).click();
-  await expect(row(page, "work/alpha/plans")).toBeFocused();
-  // A folder with a README: opened.
-  await crumbs.nth(2).click();
+  const cc = chooser(page);
+  // The root's crumb: the root's children, folders first.
+  await crumbs.nth(0).click();
+  await expect(cc.panel).toBeVisible();
+  await expect(cc.filter).toBeFocused();
+  await expect(cc.where).toHaveText("vault");
+  await expect(cc.names).toHaveText([
+    "archive",
+    "friends",
+    "memory",
+    "notes",
+    "prompts",
+    "stress",
+    "work",
+    "README.md",
+  ]);
+  await expect(crumbs.nth(0)).toHaveAttribute("aria-expanded", "true");
+  // A folder's crumb: that folder, its README folders badged.
+  await crumbs.nth(1).click();
+  await expect(cc.where).toHaveText("vault / work");
+  await expect(cc.names).toHaveText(["alpha"]);
+  await expect(cc.panel.locator(".cc-item .badge.status-blocked")).toHaveText("blocked");
+  await expect(crumbs.nth(0)).toHaveAttribute("aria-expanded", "false");
+  // The file's crumb: its folder, the file marked and chosen.
+  await crumbs.nth(4).click();
+  await expect(cc.where).toHaveText("vault / work / alpha / plans");
+  await expect(cc.names).toHaveText(["2026-01-01-big-plan.md"]);
+  await expect(cc.chosen).toHaveText("2026-01-01-big-plan.md");
+  await expect(cc.panel.locator(".cc-item.current")).toHaveCount(1);
+  // A second click on the crumb closes it.
+  await crumbs.nth(4).click();
+  await expect(cc.panel).toBeHidden();
+  // Ctrl+Shift+. opens it on the file's crumb.
+  await page.keyboard.press("Control+Shift+Period");
+  await expect(cc.panel).toBeVisible();
+  await expect(cc.chosen).toHaveText("2026-01-01-big-plan.md");
+});
+
+test("the breadcrumb chooser goes into folders, staying open, and opens a file", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const cc = chooser(page);
+  const up = cc.panel.getByRole("button", { name: "Up" });
+  await page.locator("#lx-breadcrumbs .crumb").first().click();
+  await expect(cc.filter).toBeFocused();
+  // Filter, then Enter on a folder: in it, still open.
+  await page.keyboard.type("WOR");
+  await expect(cc.names).toHaveText(["work"]);
+  await page.keyboard.press("Enter");
+  await expect(cc.panel).toBeVisible();
+  await expect(cc.where).toHaveText("vault / work");
+  await expect(cc.filter).toHaveValue("");
+  // → goes in; ← and Backspace go up, choosing the folder just left.
+  await page.keyboard.press("ArrowRight");
+  await expect(cc.where).toHaveText("vault / work / alpha");
+  await expect(cc.names).toHaveText(["notes", "plans", "README.md"]);
+  await page.keyboard.press("ArrowLeft");
+  await expect(cc.where).toHaveText("vault / work");
+  await expect(cc.chosen).toHaveText("alpha");
+  await page.keyboard.press("Backspace");
+  await expect(cc.where).toHaveText("vault");
+  await expect(cc.chosen).toHaveText("work");
+  await expect(up).toBeDisabled();
+  // The mouse: a folder goes in, Up goes up, and the filter keeps the keyboard.
+  await cc.names.filter({ hasText: "work" }).click();
+  await cc.names.filter({ hasText: "alpha" }).click();
+  await expect(cc.where).toHaveText("vault / work / alpha");
+  await up.click();
+  await expect(cc.where).toHaveText("vault / work");
+  await expect(cc.filter).toBeFocused();
+  await cc.names.filter({ hasText: "alpha" }).click();
+  // ↓ to the README and Enter: it opens, the chooser closes, and Back returns.
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(cc.chosen).toHaveText("README.md");
+  await page.keyboard.press("Enter");
   await expect(page).toHaveTitle("Alpha — Lectern");
-  await expect(crumbs).toHaveText(["vault", "work", "alpha", "README.md"]);
+  await expect(cc.panel).toBeHidden();
+  await page.keyboard.press("Alt+ArrowLeft");
+  await expect(page).toHaveTitle("Big Plan — Lectern");
+});
+
+test("Esc or a click outside closes the breadcrumb chooser, and the library is left alone", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const plans = row(page, "work/alpha/plans");
+  await plans.locator(".tree-chevron").click();
+  await expect(plans).toHaveAttribute("aria-expanded", "false");
+  const crumb = page.locator("#lx-breadcrumbs .crumb").nth(3);
+  const cc = chooser(page);
+  await crumb.click();
+  await expect(cc.names).toHaveText(["2026-01-01-big-plan.md"]);
+  await page.keyboard.press("ArrowLeft");
+  await expect(cc.where).toHaveText("vault / work / alpha");
+  await page.keyboard.press("Escape");
+  await expect(cc.panel).toBeHidden();
+  await expect(crumb).toBeFocused();
+  await expect(crumb).toHaveAttribute("aria-expanded", "false");
+  // Nothing was revealed or expanded in the library.
+  await expect(plans).toHaveAttribute("aria-expanded", "false");
+  await expect(row(page, BIG_PLAN)).toHaveCount(0);
+  await expect(page).toHaveTitle("Big Plan — Lectern");
+  await crumb.click();
+  await expect(cc.panel).toBeVisible();
+  await page.locator("#lx-doc h1").first().click();
+  await expect(cc.panel).toBeHidden();
+  await expect(plans).toHaveAttribute("aria-expanded", "false");
+});
+
+test("the breadcrumb chooser and the other overlays close each other", async ({ page }) => {
+  await openFixture(page, BIG_PLAN);
+  const cc = chooser(page);
+  await page.locator("#lx-breadcrumbs .crumb").first().click();
+  await expect(cc.panel).toBeVisible();
+  // Ctrl+F gets through the filter, and the find bar closes the chooser.
+  await page.keyboard.press("Control+f");
+  await expect(page.locator(".find-bar")).toBeVisible();
+  await expect(cc.panel).toBeHidden();
+  await page.keyboard.press("Escape");
+  // Opening the chooser closes quick open; opening quick open closes the chooser.
+  await page.keyboard.press("Control+p");
+  await expect(page.locator(".quick-open")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.locator("#lx-breadcrumbs .crumb").first().focus();
+  await page.keyboard.press("Control+Shift+Period");
+  await expect(cc.panel).toBeVisible();
+  await page.locator("#lx-breadcrumbs .crumb").first().focus();
+  await page.keyboard.press("Control+p");
+  await expect(page.locator(".quick-open")).toBeVisible();
+  await expect(cc.panel).toBeHidden();
 });
 
 test("back and forward restore the reading position", async ({ page }) => {
@@ -245,6 +380,75 @@ test("Ctrl+B and the header button toggle the sidebars", async ({ page }) => {
   await expect(page.locator("#lx-outline")).toBeHidden();
   await page.keyboard.press("Control+Shift+O");
   await expect(page.locator("#lx-outline")).toBeVisible();
+});
+
+test("the library button collapses the library, giving its width to the document, and a reload keeps it", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const button = page.getByRole("button", { name: "Library", exact: true });
+  // At the far left of the header, before back and forward.
+  await expect(page.locator("#lx-header > :first-child")).toHaveId("lx-library-btn");
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+  await expect(button).toHaveAttribute("title", "Hide library (Ctrl+B)");
+  const paneWidth = () =>
+    page.locator("#lx-doc-pane").evaluate((el) => Math.round(el.getBoundingClientRect().width));
+  const before = await paneWidth();
+  await button.click();
+  await expect(page.locator("#lx-library")).toBeHidden();
+  await expect(page.locator(".resizer[data-for=library]")).toBeHidden();
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  await expect(button).toHaveAttribute("title", "Show library (Ctrl+B)");
+  await expect.poll(paneWidth).toBe(before + 280);
+  await page.reload();
+  await page.locator("html[data-lx-ready]").waitFor({ state: "attached" });
+  await expect(page.locator("#lx-library")).toBeHidden();
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  await button.click();
+  await expect(page.locator("#lx-library")).toBeVisible();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(paneWidth).toBe(before);
+  await page.reload();
+  await page.locator("html[data-lx-ready]").waitFor({ state: "attached" });
+  await expect(page.locator("#lx-library")).toBeVisible();
+});
+
+test("in a narrow window the library button shows the library on purpose", async ({ page }) => {
+  await openFixture(page, BIG_PLAN);
+  const button = page.getByRole("button", { name: "Library", exact: true });
+  await page.setViewportSize({ width: 700, height: 800 });
+  await expect(page.locator("#lx-library")).toBeHidden();
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  await button.click();
+  await expect(page.locator("#lx-library")).toBeVisible();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+  await button.click();
+  await expect(page.locator("#lx-library")).toBeHidden();
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  // Wide again, the setting still shows it.
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await expect(page.locator("#lx-library")).toBeVisible();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+});
+
+test("with no library roots, the library offers to add a folder", async ({ page }) => {
+  await launch(page);
+  const hint = page.locator("#lx-library .lib-empty");
+  await expect(hint).toHaveCount(0);
+  for (const name of ["vault", "notes"]) {
+    await page.locator(".lib-root-head", { hasText: name }).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Remove from library" }).click();
+  }
+  await expect(page.locator("#lx-library .lib-root")).toHaveCount(0);
+  await expect(hint).toContainText("Add a folder to build your library");
+  await expect(hint).toContainText("Lectern indexes the Markdown files in folders you add.");
+  await expect(hint.getByRole("button", { name: "Add folder…" })).toBeVisible();
+  // It goes as soon as there is a root.
+  await page.evaluate(() => {
+    window.__fake.drop(["D:\\Elsewhere\\Notes"]);
+  });
+  await expect(page.locator("#lx-library .lib-root")).toHaveCount(1);
+  await expect(hint).toHaveCount(0);
 });
 
 test("dragging the library's edge resizes it, and the width is saved", async ({ page }) => {

@@ -1,8 +1,9 @@
 // What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
-// quick open, Preferences, find in page, full-text search, update checks and About (all loaded on
-// first use), focus mode and the sidebars' widths.
+// quick open, Preferences, find in page, full-text search, update checks, About and the breadcrumb
+// chooser (all loaded on first use), focus mode and the sidebars' visibility and widths.
 import type { About } from "./about";
 import type { App } from "./app";
+import type { CrumbChooser } from "./crumb-chooser";
 import { quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
 import { iconButton, ICONS } from "./icons";
@@ -14,7 +15,7 @@ import type { Preferences } from "./preferences";
 import type { QuickOpen } from "./quick-open";
 import { FlowHold, keepFlow } from "./reflow";
 import type { SearchPanel } from "./search-panel";
-import { bumpFontSize, toggleThemeMode } from "./themes";
+import { bumpFontSize, bumpSidebarFontSize, toggleThemeMode } from "./themes";
 import type { Updater } from "./update";
 
 /** The sidebars' widths, in pixels, as the resizers allow them. */
@@ -22,6 +23,9 @@ const WIDTHS = {
   library: { min: 180, max: 560 },
   outline: { min: 160, max: 480 },
 } as const;
+
+/** How long the library's column takes to open or close (chrome.css), with some to spare. */
+const SLIDE_MS = 200;
 
 export class Actions {
   /** Loaded on first use. */
@@ -31,14 +35,34 @@ export class Actions {
   private find: FindBar | null = null;
   private updater: Updater | null = null;
   private about: About | null = null;
+  private chooser: CrumbChooser | null = null;
   /** The menu open, if any. */
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
+  private readonly libraryButton: HTMLButtonElement;
+  /** Below this width the library hides unless shown on purpose. */
+  private readonly narrowLibrary =
+    typeof matchMedia === "function" ? matchMedia(NARROW.library) : null;
+  /** Ends the library column's slide. */
+  private slideTimer?: ReturnType<typeof setTimeout>;
   private focusMode = false;
   private readonly hold: FlowHold;
 
   constructor(private readonly app: App) {
     this.hold = new FlowHold(app.scroller);
+    this.libraryButton = iconButton("lx-library-btn", "Library", ICONS.library);
+    this.libraryButton.addEventListener("click", () => {
+      this.toggleSidebar("library");
+    });
+    app.layout.header.prepend(this.libraryButton);
+    // Whether the library shows follows the layout's classes (the setting, and a narrow window's
+    // `show-library`) and the window's width.
+    const sync = (): void => {
+      this.syncLibraryButton();
+    };
+    new MutationObserver(sync).observe(app.layout.app, { attributeFilter: ["class"] });
+    this.narrowLibrary?.addEventListener("change", sync);
+    sync();
     const outlineButton = iconButton("lx-outline-btn", "Outline", ICONS.outline);
     outlineButton.addEventListener("click", () => {
       this.toggleSidebar("outline");
@@ -119,6 +143,17 @@ export class Actions {
       case "font-reset":
         this.app.updateSettings(bumpFontSize(s, 0));
         return true;
+      case "sidebar-font-up":
+        this.app.updateSettings(bumpSidebarFontSize(s, 1), { debounce: true });
+        return true;
+      case "sidebar-font-down":
+        this.app.updateSettings(bumpSidebarFontSize(s, -1), { debounce: true });
+        return true;
+      case "sidebar-font-reset":
+        this.app.updateSettings(bumpSidebarFontSize(s, 0));
+        return true;
+      case "breadcrumbs":
+        return this.chooseFromLastCrumb();
       case "toggle-theme":
         this.app.updateSettings(toggleThemeMode(s, this.app.systemDark()));
         return true;
@@ -128,6 +163,7 @@ export class Actions {
       case "escape":
         for (const overlay of [
           this.menu,
+          this.chooser,
           this.quickOpen,
           this.search,
           this.preferences,
@@ -268,13 +304,56 @@ export class Actions {
   }
 
   /**
-   * Before `opening` opens: closes the menu and every other overlay (quick open, search,
-   * Preferences, About, the reading panel), so only one is ever on top. The find bar stays: it
-   * sits above the document rather than over it, as before.
+   * The breadcrumb chooser on crumb `index`, hanging from its button `anchor`. With `toggle` (a
+   * click), on the crumb it already hangs from, it closes instead.
+   */
+  async showChooser(index: number, anchor: HTMLElement, toggle = false): Promise<void> {
+    if (toggle && this.chooser?.anchor === anchor) {
+      this.chooser.close();
+      return;
+    }
+    const { CrumbChooser, crumbFolder } = await import("./crumb-chooser.js");
+    const doc = this.app.state.doc;
+    // The crumbs may have been drawn again while the module loaded.
+    const target =
+      anchor.isConnected &&
+      doc &&
+      crumbFolder(this.app.state.library.roots, doc.breadcrumbs, index);
+    if (!target) {
+      return;
+    }
+    this.chooser ??= new CrumbChooser(this.app.layout.overlayRoot, {
+      open: (path) => void this.app.open(path, { push: true }),
+      badges: () => this.app.state.settings.showStatusBadges,
+    });
+    this.closeOverlays(this.chooser);
+    this.chooser.open(anchor, target);
+  }
+
+  /** After the crumbs are drawn again: an open chooser follows them (crumb-chooser.ts). */
+  refreshChooser(): void {
+    this.chooser?.follow(this.app.layout.breadcrumbs, this.app.state.library.roots);
+  }
+
+  /** Ctrl+Shift+.: the chooser on the file's own crumb; false when it has none. */
+  private chooseFromLastCrumb(): boolean {
+    const crumb = this.app.layout.breadcrumbs.querySelector<HTMLElement>("button.crumb.current");
+    if (crumb?.dataset.index === undefined) {
+      return false;
+    }
+    void this.showChooser(Number(crumb.dataset.index), crumb);
+    return true;
+  }
+
+  /**
+   * Before `opening` opens: closes the menu and every other overlay (the breadcrumb chooser, quick
+   * open, search, Preferences, About, the reading panel), so only one is ever on top. The find bar
+   * stays: it sits above the document rather than over it, as before.
    */
   private closeOverlays(opening: { close(): void }): void {
     this.menu?.close(false);
     for (const overlay of [
+      this.chooser,
       this.quickOpen,
       this.search,
       this.preferences,
@@ -384,10 +463,18 @@ export class Actions {
 
   /**
    * Shows or hides a sidebar. In a window too narrow for it, it shows on request for the session
-   * (`show-<side>`) without changing the setting, unless the setting hid it.
+   * (`show-<side>`) without changing the setting, unless the setting hid it. The library's column
+   * slides open or shut (chrome.css), only on these toggles: never while a resizer drags it.
    */
   toggleSidebar(side: "library" | "outline"): void {
     const app = this.app.layout.app;
+    if (side === "library") {
+      app.classList.add("sliding");
+      clearTimeout(this.slideTimer);
+      this.slideTimer = setTimeout(() => {
+        app.classList.remove("sliding");
+      }, SLIDE_MS);
+    }
     const visibleKey = side === "library" ? "libraryVisible" : "outlineVisible";
     const visible = this.app.state.settings[visibleKey];
     const showClass = `show-${side}`;
@@ -401,6 +488,16 @@ export class Actions {
       app.classList.remove(showClass);
       this.app.updateSettings({ [visibleKey]: !visible });
     }
+  }
+
+  /** The library button: pressed while the library shows, its tooltip saying what a click does. */
+  private syncLibraryButton(): void {
+    const app = this.app.layout.app;
+    const narrow = this.narrowLibrary?.matches === true;
+    const showing =
+      !app.classList.contains("no-library") && (!narrow || app.classList.contains("show-library"));
+    this.libraryButton.setAttribute("aria-pressed", String(showing));
+    this.libraryButton.title = `${showing ? "Hide" : "Show"} library (Ctrl+B)`;
   }
 
   /** Opens the document in the editor at the line being read; false without a document. */
