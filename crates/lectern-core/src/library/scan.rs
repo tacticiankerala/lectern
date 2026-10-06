@@ -17,6 +17,7 @@ use rayon::prelude::*;
 use super::ignore::is_ignored;
 use super::{is_markdown, join_rel, FileEntry, RootIndex};
 use crate::frontmatter::{parse_frontmatter, Frontmatter, PropValue};
+use crate::review::{self, format};
 
 /// How much of each Markdown file `read_heads` reads.
 const HEAD_BYTES: usize = 4096;
@@ -127,6 +128,9 @@ fn file_of(root: &Path, entry: jwalk::Result<WalkEntry>) -> io::Result<Option<Fi
         size: stat.size,
         fm_name: None,
         fm_status: None,
+        review_of: None,
+        review_open: None,
+        is_sidecar: false,
     }))
 }
 
@@ -187,8 +191,8 @@ fn unix_millis(t: SystemTime) -> i64 {
 }
 
 /// Fills `fm_name` and `fm_status` for every Markdown file from the frontmatter in its first
-/// 4 KiB, in parallel, then refreshes the lookup maps. A file that can't be read keeps what it
-/// had; a NAS can fail single reads.
+/// 4 KiB, and `review_of` and `review_open` for review sidecars, in parallel, then refreshes the
+/// lookup maps. A file that can't be read keeps what it had; a NAS can fail single reads.
 pub fn read_heads(root: &mut RootIndex) {
     let base = root.root.clone();
     let read = |file: &mut FileEntry| {
@@ -200,6 +204,7 @@ pub fn read_heads(root: &mut RootIndex) {
             let (name, status) = head_fields(&head);
             file.fm_name = name;
             file.fm_status = status;
+            (file.review_of, file.review_open) = review_fields(&path, &file.rel, &head);
         }
     };
     match rayon::ThreadPoolBuilder::new()
@@ -209,6 +214,7 @@ pub fn read_heads(root: &mut RootIndex) {
         Ok(pool) => pool.install(|| root.files.par_iter_mut().for_each(read)),
         Err(_) => root.files.iter_mut().for_each(read),
     }
+    root.heads_read = true;
     root.finalize();
 }
 
@@ -218,6 +224,41 @@ fn read_head(path: &Path) -> io::Result<Vec<u8>> {
         .take(HEAD_BYTES as u64)
         .read_to_end(&mut head)?;
     Ok(head)
+}
+
+/// For a file named like a review sidecar whose head has sidecar frontmatter: the note it names,
+/// and its open comments. Counting reads the whole file, unless the head already holds it, and
+/// gives `None` for one over `MAX_SIDECAR_BYTES` or that can't be read.
+fn review_fields(path: &Path, rel: &str, head: &[u8]) -> (Option<String>, Option<u32>) {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if !review::is_sidecar_name(name) {
+        return (None, None);
+    }
+    let Some(note) = review::sidecar_note(&String::from_utf8_lossy(head)) else {
+        return (None, None);
+    };
+    let open = if head.len() < HEAD_BYTES {
+        Some(open_comments(head))
+    } else {
+        read_sidecar(path).map(|text| open_comments(&text))
+    };
+    (Some(note), open)
+}
+
+/// The whole sidecar at `path`, `None` when it's over `MAX_SIDECAR_BYTES` or can't be read.
+fn read_sidecar(path: &Path) -> Option<Vec<u8>> {
+    let mut text = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(review::MAX_SIDECAR_BYTES + 1)
+        .read_to_end(&mut text)
+        .ok()?;
+    let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    (len <= review::MAX_SIDECAR_BYTES).then_some(text)
+}
+
+fn open_comments(text: &[u8]) -> u32 {
+    format::parse(&String::from_utf8_lossy(text)).open_count()
 }
 
 /// `name:` and `status:` from the frontmatter at the start of `head`.
@@ -322,6 +363,9 @@ mod tests {
             size: 0,
             fm_name: None,
             fm_status: None,
+            review_of: None,
+            review_open: None,
+            is_sidecar: false,
         }
     }
 

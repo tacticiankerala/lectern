@@ -9,6 +9,9 @@ use lectern_core::ipc::{
     RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
+use lectern_core::review::anchor::AnchorState;
+use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
+use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
 
@@ -50,6 +53,17 @@ fn ts_bindings_exported() {
         "Frontmatter",
         "PropValue",
         "UserOpen",
+        "CommentStatus",
+        "ClaudeKind",
+        "EntryAuthor",
+        "AnchorState",
+        "NewAnchor",
+        "ReviewOp",
+        "StatusChange",
+        "ReviewPayload",
+        "CommentView",
+        "EntryView",
+        "UnreadableView",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -108,6 +122,79 @@ fn ts_unions_follow_the_serde_tags() {
         decl::<FollowResult>(),
         r#"type FollowResult = { "action": "openDoc", path: string, anchor: string | null, line: number | null, } | { "action": "opened" } | { "action": "notFound", message: string, };"#
     );
+    assert_eq!(
+        decl::<CommentStatus>(),
+        r#"type CommentStatus = "open" | "replied" | "question" | "pushback" | "resolved" | "dismissed";"#
+    );
+    assert_eq!(
+        decl::<ClaudeKind>(),
+        r#"type ClaudeKind = "reply" | "question" | "pushback" | "resolved";"#
+    );
+    assert_eq!(
+        decl::<EntryAuthor>(),
+        r#"type EntryAuthor = "you" | "claude";"#
+    );
+    assert_eq!(
+        decl::<AnchorState>(),
+        r#"type AnchorState = "anchored" | "moved" | "detached";"#
+    );
+    assert_eq!(
+        decl::<StatusChange>(),
+        r#"type StatusChange = "resolve" | "reopen" | "dismiss";"#
+    );
+    assert_eq!(
+        decl::<NewAnchor>(),
+        concat!(
+            "type NewAnchor = { startLine: number, endLine: number, quote: string, \n",
+            "/**\n",
+            " * Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,\n",
+            " * which tell apart a phrase found more than once in its lines; empty for a whole block.\n",
+            " */\n",
+            "prefix: string, };",
+        )
+    );
+    assert_eq!(
+        decl::<ReviewOp>(),
+        concat!(
+            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, } | "#,
+            r#"{ "op": "reply", id: number, text: string, } | "#,
+            r#"{ "op": "setStatus", id: number, change: StatusChange, } | "#,
+            r#"{ "op": "reattach", id: number, anchor: NewAnchor, } | "#,
+            r#"{ "op": "edit", id: number, entry: number, text: string, };"#,
+        )
+    );
+}
+
+#[test]
+fn review_ops_are_tagged_by_op() {
+    let op: ReviewOp =
+        serde_json::from_value(json!({"op": "setStatus", "id": 3, "change": "resolve"})).unwrap();
+    assert_eq!(
+        op,
+        ReviewOp::SetStatus {
+            id: 3,
+            change: StatusChange::Resolve
+        }
+    );
+    let add = ReviewOp::Add {
+        anchor: NewAnchor {
+            start_line: 4,
+            end_line: 6,
+            quote: "batches of at most 50".to_owned(),
+            prefix: String::new(),
+        },
+        text: "Why 50?".to_owned(),
+    };
+    assert_eq!(
+        serde_json::to_value(&add).unwrap(),
+        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50", "prefix": ""}, "text": "Why 50?"})
+    );
+    // An anchor sent without a prefix has an empty one.
+    let without: ReviewOp = serde_json::from_value(
+        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50"}, "text": "Why 50?"}),
+    )
+    .unwrap();
+    assert_eq!(without, add);
 }
 
 #[test]

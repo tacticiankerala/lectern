@@ -1,9 +1,10 @@
 // The library sidebar (spec §6): a section per root with its name and state, and a lazily built
 // tree. A folder's rows exist only while it is expanded; which folders are expanded is kept in
 // localStorage. Clicking a folder's name opens its README (and expands it) when it has one, else
-// toggles it; README folders carry their `status:` badge when the setting asks for them. The open
-// document is highlighted, its folders expanded and its row scrolled into view. With no roots it
-// offers to add a folder instead.
+// toggles it; README folders carry their `status:` badge when the setting asks for them, and notes
+// with review comments their count of open ones while the feature is on. The open document is
+// highlighted, its folders expanded and its row scrolled into view. With no roots it offers to add
+// a folder instead.
 import { h, samePath } from "./dom";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
@@ -75,6 +76,8 @@ export class Sidebar {
   private started = false;
   /** README folders show their `status:` badge (a setting, on by default). */
   private badges = true;
+  /** Notes show their count of open review comments (while the feature is on). */
+  private counts = true;
 
   constructor(
     private readonly host: HTMLElement,
@@ -117,6 +120,17 @@ export class Sidebar {
       return;
     }
     this.badges = show;
+    if (this.started) {
+      this.render();
+    }
+  }
+
+  /** Shows or hides notes' counts of open review comments. */
+  setCommentCounts(show: boolean): void {
+    if (show === this.counts) {
+      return;
+    }
+    this.counts = show;
     if (this.started) {
       this.render();
     }
@@ -204,6 +218,7 @@ export class Sidebar {
       children: [],
       readme: null,
       status: null,
+      comments: null,
     };
     const section = h("section", {
       class: "lib-root",
@@ -251,7 +266,10 @@ export class Sidebar {
     return section;
   }
 
-  /** A row: chevron for a folder, the name, and a README folder's badge when badges show. */
+  /**
+   * A row: chevron for a folder, the name, a README folder's badge when badges show, and a note's
+   * count of open review comments when counts show.
+   */
   private rowElement(node: TreeNode, depth: number, expandable: boolean): HTMLElement {
     const el = h("div", {
       class: node.isDir ? "tree-row dir" : "tree-row file",
@@ -275,6 +293,13 @@ export class Sidebar {
     el.append(h("button", { type: "button", class: "tree-name", title: node.name }, node.name));
     if (this.badges && node.isDir && node.status !== null) {
       el.append(badge(node.status));
+    }
+    const open = node.comments ?? 0;
+    if (this.counts && !node.isDir && open > 0) {
+      const label = `${String(open)} open ${open === 1 ? "comment" : "comments"}`;
+      el.append(
+        h("span", { class: "tree-count", title: label, "aria-label": label }, String(open)),
+      );
     }
     return el;
   }

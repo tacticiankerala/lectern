@@ -18,6 +18,7 @@ mod open;
 mod open_queue;
 mod paths;
 mod profile;
+mod review;
 mod saver;
 mod scan;
 mod startup;
@@ -314,13 +315,24 @@ impl AppState {
         settings
     }
 
-    /// Reports a watcher event: document changes go to the UI, library changes rescan the root.
-    /// Runs on the watcher's thread, so it never calls back into the watcher.
+    /// Reports a watcher event: document and review changes go to the UI, library changes rescan
+    /// the root. A review change also rescans the library roots holding the note, for its comment
+    /// count: on a share without change notifications the poll that saw it is all there is. Runs
+    /// on the watcher's thread, so it never calls back into the watcher.
     pub fn on_watch_event(self: &Arc<Self>, event: WatchEvent) {
         match event {
             WatchEvent::DocChanged(path) => self.host.emit(UiEvent::DocChanged(path)),
             WatchEvent::DocRemoved(path) => self.host.emit(UiEvent::DocRemoved(path)),
             WatchEvent::LibraryChanged(root) => self.request_scan(&root, None),
+            // The watcher stats the sidecar either way; with the feature off nothing comes of it.
+            WatchEvent::ReviewChanged(path) => {
+                if self.reviews_on() {
+                    for root in self.user_roots_holding(&path) {
+                        self.request_scan(&root, None);
+                    }
+                    self.host.emit(UiEvent::ReviewChanged(path));
+                }
+            }
         }
     }
 

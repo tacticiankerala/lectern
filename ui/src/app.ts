@@ -12,11 +12,14 @@
 //   Preferences, the menus, find in page, full-text search, update checks, About and the breadcrumb
 //   chooser are separate modules, loaded on first use. The automatic update check runs 5 s after
 //   the first paint.
+// - The review comments module loads after the first paint while the feature is on, and goes when
+//   it's switched off. `#lx-app.no-comments` marks every comment surface hidden.
 // - The reading position is saved once scrolling stops for a moment and when the document is
 //   left; a document opened without an anchor or line goes back to its saved position.
 import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
+import type { CommentsController } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import type { Crumb } from "./generated/Crumb";
@@ -31,13 +34,14 @@ import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
 import { installKeymap } from "./keymap";
-import { LibraryController } from "./library-controller";
+import { LibraryController, NARROW } from "./library-controller";
 import { Navigation } from "./navigation";
 import { Outline } from "./outline";
 import { trackProgress } from "./progress";
 import { renderProperties } from "./properties";
 import { ReadingPanel } from "./reading-panel";
 import { flowAnchor, keepFlow, type FlowAnchor } from "./reflow";
+import { RightPanel } from "./right-panel";
 import { applySettings, loadFonts, loadRememberedFonts } from "./themes";
 import { Toasts } from "./toast";
 import { renderError, renderWelcome } from "./welcome";
@@ -63,6 +67,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autoUpdate: true,
   showStatusBadges: true,
   sidebarFontSize: 13,
+  reviewComments: true,
+  commentsVisible: true,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -140,6 +146,8 @@ export class App {
   readonly nav: Navigation;
   readonly library: LibraryController;
   readonly actions: Actions;
+  /** The right panel: its Outline and Comments tabs. */
+  readonly rightPanel: RightPanel;
   private readonly toasts: Toasts;
   private readonly outline: Outline;
   /** The OS colour scheme, which `system` theme mode follows. */
@@ -155,6 +163,11 @@ export class App {
   private started = false;
   /** The latest `open-request` that arrived before startup finished. */
   private queued: OpenRequest | null = null;
+  /** Set once the first paint is done: modules loaded after it may load. */
+  private painted = false;
+  /** The review comments, while the feature is on and their module has loaded. */
+  private comments: CommentsController | null = null;
+  private commentsLoading: Promise<void> | null = null;
   /** Saves the reading position once scrolling has stopped for a moment. */
   private positionTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -165,7 +178,8 @@ export class App {
     this.layout = buildLayout(root);
     this.toasts = new Toasts(this.layout.toasts);
     this.view = new DocView(this.layout.doc, this);
-    this.outline = new Outline(this.layout.outline, this.layout.docPane, (id) => {
+    this.rightPanel = new RightPanel(this.layout.outline);
+    this.outline = new Outline(this.rightPanel.outlinePane, this.layout.docPane, (id) => {
       this.view.scrollToAnchor(id);
     });
     this.updateProgress = trackProgress(this.layout.docPane, this.layout.progress);
@@ -201,6 +215,7 @@ export class App {
     });
     this.on("settings", () => {
       this.panel.refresh();
+      this.syncComments();
     });
     this.darkQuery?.addEventListener("change", () => {
       this.applySettings();
@@ -269,12 +284,14 @@ export class App {
     await Promise.race([fonts, delay(FONT_WAIT_MS)]);
     await nextPaint();
     this.backend.perfMark("first-paint");
+    this.painted = true;
     // The sidebar fills in right after, before the window shows.
     this.library.start();
     quietly(this.backend.showWindow());
     // Nothing can be dropped on a window that isn't showing yet.
     this.backend.onDragDrop((paths) => void this.nav.dropped(paths));
     this.library.watchIndex();
+    this.syncComments();
     // Off unless the setting is on when the time comes; not for an app a test has replaced.
     setTimeout(() => {
       if (this.layout.app.isConnected && this.state.settings.autoUpdate) {
@@ -572,6 +589,110 @@ export class App {
     );
   }
 
+  /**
+   * Ctrl+Alt+M: a comment on the text selected in the note, else on the block at the top of the
+   * view, once the comments module is there.
+   */
+  async addComment(): Promise<void> {
+    if (this.commentsLoading) {
+      await this.commentsLoading;
+    }
+    const comments = this.comments;
+    if (comments && !comments.addFromSelection()) {
+      comments.addAtTop();
+    }
+  }
+
+  /** Whether comments show: the feature on and not hidden by the header toggle. */
+  private commentsShown(): boolean {
+    const s = this.state.settings;
+    return s.reviewComments && s.commentsVisible;
+  }
+
+  /**
+   * Whether the right panel shows: its setting, and in a narrow window, shown on purpose. Focus
+   * mode hides it.
+   */
+  private rightPanelOpen(): boolean {
+    if (this.actions.inFocusMode) {
+      return false;
+    }
+    const app = this.layout.app;
+    const narrow = typeof matchMedia === "function" && matchMedia(NARROW.outline).matches;
+    return (
+      !app.classList.contains("no-outline") && (!narrow || app.classList.contains("show-outline"))
+    );
+  }
+
+  /**
+   * Starts the review comments, stops them, or shows or hides them, as the settings have it. Not
+   * before the first paint, which their module stays out of.
+   */
+  private syncComments(): void {
+    if (!this.painted) {
+      return;
+    }
+    if (!this.state.settings.reviewComments) {
+      this.comments?.dispose();
+      this.comments = null;
+    } else if (this.comments) {
+      this.comments.setVisible(this.commentsShown());
+    } else {
+      this.commentsLoading ??= this.startComments();
+    }
+  }
+
+  private async startComments(): Promise<void> {
+    try {
+      const { CommentsController } = await import("./comments.js");
+      // Not when switched off while it loaded, nor for an app a test has replaced.
+      if (this.state.settings.reviewComments && this.layout.app.isConnected) {
+        this.comments = new CommentsController({
+          backend: this.backend,
+          doc: () => (this.state.doc ? this.layout.doc : null),
+          docPath: () => this.state.doc?.path ?? null,
+          panel: this.rightPanel,
+          scroller: this.scroller,
+          toast: (message) => {
+            this.toast(message);
+          },
+          setBadge: (n) => {
+            this.actions.setCommentCount(n);
+          },
+          // A line before every block (frontmatter, blank lines) is the note's top.
+          jumpToLine: (line) => {
+            if (!this.view.scrollToLine(line)) {
+              this.scroller.scrollTop = 0;
+            }
+          },
+          follow: (link) => {
+            this.view.follow(link);
+          },
+          onDoc: (cb) => this.on("doc", cb),
+          visible: () => this.commentsShown(),
+          panelOpen: () => this.rightPanelOpen(),
+          openPanel: () => {
+            if (!this.rightPanelOpen()) this.actions.toggleSidebar("outline");
+          },
+          pulseBadge: () => {
+            this.actions.pulseCommentBadge();
+          },
+          focusMode: () => this.actions.inFocusMode,
+          showComments: () => {
+            if (!this.state.settings.commentsVisible) {
+              this.updateSettings({ commentsVisible: true });
+            }
+          },
+        });
+        quietly(this.comments.load());
+      }
+    } catch (e) {
+      console.warn(e);
+    } finally {
+      this.commentsLoading = null;
+    }
+  }
+
   /** Applies the settings: the theme and reading ones (themes.ts), then the layout. */
   private applySettings(): void {
     const s = this.state.settings;
@@ -582,6 +703,8 @@ export class App {
     root.style.setProperty("--sidebar-font-size", `${String(s.sidebarFontSize)}px`);
     this.layout.app.classList.toggle("no-library", !s.libraryVisible);
     this.layout.app.classList.toggle("no-outline", !s.outlineVisible);
+    this.layout.app.classList.toggle("no-comments", !this.commentsShown());
+    this.rightPanel.setCommentsEnabled(this.commentsShown());
     this.emit("settings");
   }
 }

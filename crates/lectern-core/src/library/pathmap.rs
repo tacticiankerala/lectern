@@ -99,6 +99,83 @@ impl PathMapper {
         }
         Some(windows_join(&format!(r"\\wsl.localhost\{distro}"), raw))
     }
+
+    /// The path a WSL shell knows a local file by, the reverse of [`PathMapper::map`]:
+    /// 1. the longest user mapping from a Linux folder whose Windows side covers whole folders of
+    ///    `path` (any letter case, either separator) gives that Linux folder;
+    /// 2. `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` give `/…`;
+    /// 3. `X:\…` gives `/mnt/x/…`.
+    ///
+    /// Any other path, such as a share on another machine, has none.
+    pub fn to_wsl(&self, path: &Path) -> Option<String> {
+        let raw = path.to_string_lossy();
+        self.user_unmapped(&raw)
+            .or_else(|| wsl_share_path(&raw))
+            .or_else(|| mnt_path(&raw))
+    }
+
+    /// `raw` under the longest mapping target that ends at a folder boundary, on the Linux side.
+    /// Mappings from a Windows path (`C:\Old`, `\\server\share`) have no Linux side.
+    fn user_unmapped(&self, raw: &str) -> Option<String> {
+        self.mappings
+            .iter()
+            .filter(|(source, _)| source.starts_with('/') && !source.starts_with("//"))
+            .filter_map(|(linux, target)| {
+                let target = target.to_string_lossy();
+                let target = target.trim_end_matches(['/', '\\']);
+                if target.is_empty() {
+                    return None;
+                }
+                let rest = strip_prefix_like_windows(raw, target)?;
+                let rest = match rest.strip_prefix(['/', '\\']) {
+                    Some(rest) => rest,
+                    None if rest.is_empty() => rest,
+                    None => return None,
+                };
+                Some((target.len(), linux, rest))
+            })
+            .max_by_key(|&(len, ..)| len)
+            .map(|(_, linux, rest)| linux_join(linux, rest))
+    }
+}
+
+/// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`.
+fn wsl_share_path(raw: &str) -> Option<String> {
+    let mut parts = raw
+        .strip_prefix(r"\\")
+        .or_else(|| raw.strip_prefix("//"))?
+        .split(['/', '\\']);
+    let host = parts.next()?;
+    if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
+        return None;
+    }
+    parts.next().filter(|distro| !distro.is_empty())?;
+    let rest: Vec<&str> = parts.filter(|part| !part.is_empty()).collect();
+    Some(format!("/{}", rest.join("/")))
+}
+
+/// `C:\Users\me` → `/mnt/c/Users/me`.
+fn mnt_path(raw: &str) -> Option<String> {
+    let b = raw.as_bytes();
+    let drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    drive.then(|| {
+        let letter = char::from(b[0].to_ascii_lowercase());
+        linux_join(&format!("/mnt/{letter}"), &raw[3..])
+    })
+}
+
+/// `base` and the `/`- or `\`-separated `rest`, joined with `/`: the result is a Linux path.
+fn linux_join(base: &str, rest: &str) -> String {
+    let mut path = base.trim_end_matches('/').to_owned();
+    for part in components(rest) {
+        path.push('/');
+        path.push_str(part);
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    path
 }
 
 /// A mapping prefix (trailing separators trimmed) that names a drive (`C:`, `C:\Old`) or a UNC

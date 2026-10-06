@@ -70,6 +70,15 @@ fn ignore_rules_keep_hidden_files_and_ordinary_dirs() {
 }
 
 #[test]
+fn ignore_rules_skip_lectern_temp_files() {
+    assert!(is_ignored(".plan.review.md.lectern.tmp", false));
+    assert!(is_ignored(".Plan.Review.md.LECTERN.TMP", false));
+    assert!(!is_ignored("plan.lectern.tmp.md", false));
+    assert!(!is_ignored("plan.tmp", false));
+    assert!(!is_ignored("plan.review.md", false));
+}
+
+#[test]
 fn scan_finds_md_and_other_files() {
     let (_tmp, vault) = common::vault_copy();
     let r = scan(&vault);
@@ -322,6 +331,51 @@ fn heads_accept_crlf_and_bom_but_skip_unterminated_and_late_frontmatter() {
     assert_eq!(entry(&r, "late.md").fm_name, None);
     assert_eq!(entry(&r, "empty.md").fm_name, None);
     assert_eq!(entry(&r, "notes.txt").fm_name, None);
+}
+
+#[test]
+fn heads_read_a_sidecar_note_and_its_open_comments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let comment = |id: u32, status: &str| {
+        format!("## C{id} · {status} · L1 · Notes\n> quoted\n\n**You:** A remark.\n\n")
+    };
+    let head = "---\nlectern-review: 1\nnote: plan.md\n---\n# Review: plan.md\n\n";
+    let small = format!("{head}{}{}", comment(1, "open"), comment(2, "dismissed"));
+    // Longer than a head, so it is read in full; the open comment comes after the first 4 KiB.
+    let padding = format!("Notes on the plan.\n{}\n", "x".repeat(5000));
+    let long = format!(
+        "{head}{padding}{}{}",
+        comment(1, "resolved"),
+        comment(2, "question")
+    );
+    let huge = format!(
+        "{head}{}{}",
+        "y".repeat(2 * 1024 * 1024),
+        comment(1, "open")
+    );
+    for (name, text) in [
+        ("small.review.md", small.as_str()),
+        ("long.review.md", long.as_str()),
+        ("huge.review.md", huge.as_str()),
+        ("plain.review.md", "# Not a sidecar\n"),
+        ("plan.md", head),
+    ] {
+        fs::write(root.join(name), text).unwrap();
+    }
+    let mut r = scan(root);
+    read_heads(&mut r);
+    let fields = |rel| {
+        let f = entry(&r, rel);
+        (f.review_of.as_deref(), f.review_open)
+    };
+    assert_eq!(fields("small.review.md"), (Some("plan.md"), Some(1)));
+    assert_eq!(fields("long.review.md"), (Some("plan.md"), Some(1)));
+    // Over 2 MB, so the comments aren't counted.
+    assert_eq!(fields("huge.review.md"), (Some("plan.md"), None));
+    assert_eq!(fields("plain.review.md"), (None, None));
+    // Only names that end in `.review.md` are read as sidecars.
+    assert_eq!(fields("plan.md"), (None, None));
 }
 
 #[test]

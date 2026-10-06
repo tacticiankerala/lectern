@@ -6,6 +6,11 @@
    Contrast floors, checked by test/themes.test.ts: text ≥ 7:1 and muted text ≥ 4.5:1 on `--bg`;
    every syntax colour ≥ 4.5:1 on `--code-bg`.
 
+   Review comments (`--comment`, `--comment-focus` for the selected one, `--comment-dot` for the
+   margin dot) are a translucent teal in every theme: a hue apart from find's yellow `--mark` and
+   from the selection, so comments and matches never look alike. Text keeps ≥ 4.5:1 on either
+   highlight over `--bg`, and the dot ≥ 3:1 against it.
+
    Catppuccin and Nord use their official palettes. Where an official colour misses the 4.5:1 floor
    it keeps its hue and chroma and only its OKLCH lightness moves, as little as passes; each such
    value names its source. */
@@ -25,6 +30,9 @@ html[data-theme="paper"] {
   --link: #93542a;
   --selection: rgb(154 91 46 / 0.2);
   --mark: rgb(236 190 76 / 0.42);
+  --comment: rgb(46 139 120 / 0.2);
+  --comment-focus: rgb(46 139 120 / 0.38);
+  --comment-dot: #2f7d6d;
   --badge-active: #3b7340;
   --badge-blocked: #a8392c;
   --badge-parked: #6f6a60;
@@ -59,6 +67,9 @@ html[data-theme="daylight"] {
   --link: #0969da;
   --selection: rgb(9 105 218 / 0.18);
   --mark: rgb(255 212 59 / 0.45);
+  --comment: rgb(26 158 128 / 0.18);
+  --comment-focus: rgb(26 158 128 / 0.34);
+  --comment-dot: #1a7f6a;
   --badge-active: #1a7f37;
   --badge-blocked: #cf222e;
   --badge-parked: #59636e;
@@ -94,6 +105,9 @@ html[data-theme="sepia"] {
   --link: #8b4513;
   --selection: rgb(139 69 19 / 0.2);
   --mark: rgb(222 168 56 / 0.4);
+  --comment: rgb(60 130 110 / 0.2);
+  --comment-focus: rgb(60 130 110 / 0.36);
+  --comment-dot: #3d7566;
   --badge-active: #4d6625;
   --badge-blocked: #a03a22;
   --badge-parked: #6f6250;
@@ -129,6 +143,9 @@ html[data-theme="latte"] {
   --link: #135cea; /* Blue #1e66f5, darkened */
   --selection: rgb(124 127 147 / 0.25); /* Overlay 2 */
   --mark: rgb(223 142 29 / 0.3); /* Yellow */
+  --comment: rgb(23 146 153 / 0.2); /* Teal */
+  --comment-focus: rgb(23 146 153 / 0.32); /* Teal */
+  --comment-dot: #179299; /* Teal */
   --badge-active: #1f7802; /* Green #40a02b, darkened */
   --badge-blocked: #d20f39; /* Red */
   --badge-parked: #636679; /* Overlay 2 #7c7f93, darkened */
@@ -164,6 +181,9 @@ html[data-theme="graphite"] {
   --link: #7aa2f7;
   --selection: rgb(122 162 247 / 0.3);
   --mark: rgb(224 175 104 / 0.32);
+  --comment: rgb(108 194 166 / 0.2);
+  --comment-focus: rgb(108 194 166 / 0.3);
+  --comment-dot: #6cc2a6;
   --badge-active: #6cc287;
   --badge-blocked: #ec7f86;
   --badge-parked: #9a9da5;
@@ -198,6 +218,9 @@ html[data-theme="midnight"] {
   --link: #8ab4f8;
   --selection: rgb(138 180 248 / 0.3);
   --mark: rgb(253 214 99 / 0.3);
+  --comment: rgb(111 209 180 / 0.2);
+  --comment-focus: rgb(111 209 180 / 0.3);
+  --comment-dot: #6fd1b4;
   --badge-active: #81c995;
   --badge-blocked: #f28b82;
   --badge-parked: #8e8e96;
@@ -233,6 +256,9 @@ html[data-theme="nord"] {
   --link: #88c0d0; /* nord8 */
   --selection: rgb(76 86 106 / 0.8); /* nord3 */
   --mark: rgb(235 203 139 / 0.28); /* nord13 */
+  --comment: rgb(143 188 187 / 0.22); /* nord7 */
+  --comment-focus: rgb(143 188 187 / 0.34); /* nord7 */
+  --comment-dot: #8fbcbb; /* nord7 */
   --badge-active: #a3be8c; /* nord14 */
   --badge-blocked: #e28189; /* nord11 #bf616a, lightened */
   --badge-parked: #d8dee9; /* nord4 */
@@ -267,6 +293,9 @@ html[data-theme="mocha"] {
   --link: #89b4fa; /* Blue */
   --selection: rgb(147 153 178 / 0.25); /* Overlay 2 */
   --mark: rgb(249 226 175 / 0.25); /* Yellow */
+  --comment: rgb(148 226 213 / 0.16); /* Teal */
+  --comment-focus: rgb(148 226 213 / 0.26); /* Teal */
+  --comment-dot: #94e2d5; /* Teal */
   --badge-active: #a6e3a1; /* Green */
   --badge-blocked: #f38ba8; /* Red */
   --badge-parked: #9399b2; /* Overlay 2 */

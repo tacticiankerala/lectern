@@ -5,3 +5,5 @@
 *.icns binary
 fixtures/**/._* binary
 fixtures/**/.DS_Store binary
+# A sidecar golden that must keep its CRLF line endings (and BOM) byte for byte.
+crates/lectern-core/tests/fixtures/review/*-crlf.review.md -text

@@ -8,7 +8,7 @@ function root(path: string, truncated: boolean): RootView {
     path,
     name,
     state: { state: "ready" },
-    tree: { name, path, isDir: true, children: [], readme: null, status: null },
+    tree: { name, path, isDir: true, children: [], readme: null, status: null, comments: null },
     truncated,
   };
 }
@@ -27,6 +27,38 @@ describe("Sidebar", () => {
     const noted = sections.filter((s) => s.querySelector(".lib-truncated") !== null);
     expect(noted.map((s) => s.dataset.root)).toEqual(["C:\\Code"]);
     expect(noted[0]?.querySelector(".lib-truncated")?.textContent).toContain("too many files");
+  });
+
+  it("counts a note's open review comments while the feature is on", () => {
+    const el = document.createElement("div");
+    const sidebar = new Sidebar(el, host());
+    const notes = root("C:\\Notes", false);
+    const file = (name: string, comments: number | null) => ({
+      name,
+      path: `C:\\Notes\\${name}`,
+      isDir: false,
+      children: [],
+      readme: null,
+      status: null,
+      comments,
+    });
+    notes.tree?.children.push(file("plan.md", 2), file("ideas.md", 0), file("log.md", null));
+    sidebar.start();
+    sidebar.setLibrary({ roots: [notes] });
+    const counts = () =>
+      [...el.querySelectorAll<HTMLElement>(".tree-row")].map((row) => [
+        row.dataset.path,
+        row.querySelector(".tree-count")?.textContent ?? null,
+      ]);
+    expect(counts()).toEqual([
+      ["C:\\Notes", null],
+      ["C:\\Notes\\plan.md", "2"],
+      ["C:\\Notes\\ideas.md", null],
+      ["C:\\Notes\\log.md", null],
+    ]);
+    expect(el.querySelector(".tree-count")?.getAttribute("title")).toBe("2 open comments");
+    sidebar.setCommentCounts(false);
+    expect(el.querySelectorAll(".tree-count")).toHaveLength(0);
   });
 
   it("with no roots, offers to add a folder, until there is one", () => {

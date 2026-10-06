@@ -60,6 +60,19 @@ describe("actionFor", () => {
     }
   });
 
+  it("maps the comment shortcuts", () => {
+    expect(actionFor(key({ key: "M", ctrlKey: true, shiftKey: true }))).toBe("toggle-comments");
+    expect(actionFor(key({ key: "m", ctrlKey: true, altKey: true }))).toBe("add-comment");
+    // Caps Lock gives a capital without Shift.
+    expect(actionFor(key({ key: "M", ctrlKey: true, altKey: true }))).toBe("add-comment");
+    // Ctrl+Alt with other letters stays free.
+    expect(actionFor(key({ key: "p", ctrlKey: true, altKey: true }))).toBeNull();
+    // AltGr (Ctrl+Alt on Windows) types µ on some layouts: that's typing, not the shortcut.
+    expect(actionFor(key({ key: "µ", code: "KeyM", ctrlKey: true, altKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "m", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "M", ctrlKey: true, altKey: true, shiftKey: true }))).toBeNull();
+  });
+
   it("ignores other keys and modifiers", () => {
     expect(actionFor(key({ key: "=" }))).toBeNull();
     expect(actionFor(key({ key: "p", ctrlKey: true, altKey: true }))).toBeNull();

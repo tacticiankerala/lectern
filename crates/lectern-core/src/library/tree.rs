@@ -22,6 +22,9 @@ pub struct TreeNode {
     pub readme: Option<String>,
     /// The frontmatter `status:` of that README.
     pub status: Option<String>,
+    /// For a note with a review sidecar: its open comments. Never set for a folder.
+    #[serde(default)]
+    pub comments: Option<u32>,
 }
 
 /// Files and subfolders of one folder while the tree is assembled.
@@ -82,6 +85,7 @@ fn folder_node(root: &RootIndex, name: String, rel: String, folder: Folder) -> T
             children: Vec::new(),
             readme: None,
             status: None,
+            comments: root.comment_count(&file.rel),
         })
         .collect();
     folders.sort_by(|a, b| natural_cmp(&a.name, &b.name));
@@ -94,6 +98,7 @@ fn folder_node(root: &RootIndex, name: String, rel: String, folder: Folder) -> T
         children: folders,
         readme: readme.map(|file| abs_string(root, &file.rel)),
         status: readme.and_then(|file| file.fm_status.clone()),
+        comments: None,
     }
 }
 

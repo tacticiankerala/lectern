@@ -169,4 +169,9 @@ export class FlowHold {
     frame = requestAnimationFrame(tick);
     this.stopHold = stop;
   }
+
+  /** Ends the hold in progress, if any, leaving the place where it is now. */
+  stop(): void {
+    this.stopHold?.();
+  }
 }

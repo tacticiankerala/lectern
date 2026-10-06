@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod library;
 pub mod perf;
 pub mod render;
+pub mod review;
 pub mod search;
 pub mod store;
 pub mod text;
@@ -23,6 +24,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_workspace_manifest() {
-        assert_eq!(version(), "0.1.1");
+        assert_eq!(version(), "0.2.0");
     }
 }

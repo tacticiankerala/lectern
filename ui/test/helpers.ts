@@ -29,7 +29,15 @@ export function rendered(title: string, html: string): RenderedDoc {
 export function fixtures(docs: Record<string, RenderedDoc> = {}): Fixtures {
   return {
     root: ROOT,
-    tree: { name: "V", path: ROOT, isDir: true, children: [], readme: null, status: null },
+    tree: {
+      name: "V",
+      path: ROOT,
+      isDir: true,
+      children: [],
+      readme: null,
+      status: null,
+      comments: null,
+    },
     candidates: [],
     docs: {
       [A]: rendered("Aye", "<h1 id='aye'>Aye</h1>"),

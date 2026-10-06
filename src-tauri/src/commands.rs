@@ -8,6 +8,8 @@ use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, RecentEntry, SavedPosition,
     Settings, SettingsPatch, StartupPayload, UpdateInfo, UserOpen,
 };
+use lectern_core::review::ops::ReviewOp;
+use lectern_core::review::view::ReviewPayload;
 use lectern_core::search::FileHits;
 use tauri::{AppHandle, State, WebviewWindow};
 
@@ -93,6 +95,22 @@ pub async fn open_in_editor(
     state: Shared<'_>,
 ) -> Result<(), String> {
     blocking(state.inner(), move |s| s.open_in_editor(&path, line)).await?
+}
+
+/// The open note's review comments.
+#[tauri::command]
+pub async fn load_review(path: String, state: Shared<'_>) -> Result<ReviewPayload, String> {
+    blocking(state.inner(), move |s| s.load_review(&path)).await?
+}
+
+/// Saves a change to the open note's review comments; returns them as saved.
+#[tauri::command]
+pub async fn review_op(
+    path: String,
+    op: ReviewOp,
+    state: Shared<'_>,
+) -> Result<ReviewPayload, String> {
+    blocking(state.inner(), move |s| s.review_op(&path, op)).await?
 }
 
 #[tauri::command]

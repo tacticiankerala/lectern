@@ -1,7 +1,7 @@
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lectern_core::library::pathmap::{split_line_suffix, LineRef, Mapped, PathMapper};
 
@@ -255,4 +255,83 @@ fn unc_hosts_are_read_from_either_separator_and_verbatim_paths() {
     assert!(!unc_host_trusted(r"\\attacker\s\x.png", &trusted));
     assert!(!unc_host_trusted(r"\\?\UNC\attacker\s\x.png", &trusted));
     assert!(!unc_host_trusted(r"\\.\pipe\x", &trusted));
+}
+
+#[test]
+fn to_wsl_reverses_user_mappings_first() {
+    let m = mapper(&[("/home/me/shared", r"S:\Shared")]);
+    assert_eq!(
+        m.to_wsl(Path::new(r"S:\Shared\notes\a.md")).as_deref(),
+        Some("/home/me/shared/notes/a.md")
+    );
+    assert_eq!(
+        m.to_wsl(Path::new("s:/shared/notes/a.md")).as_deref(),
+        Some("/home/me/shared/notes/a.md")
+    );
+    // Whole folders only: `S:\SharedOld` is not under `S:\Shared`, so it falls back to `/mnt`.
+    assert_eq!(
+        m.to_wsl(Path::new(r"S:\SharedOld\a.md")).as_deref(),
+        Some("/mnt/s/SharedOld/a.md")
+    );
+}
+
+#[test]
+fn to_wsl_takes_the_longest_mapped_folder() {
+    let m = mapper(&[
+        ("/home/me/all", r"S:\"),
+        ("/home/me/shared/", r"S:\Shared\"),
+    ]);
+    assert_eq!(
+        m.to_wsl(Path::new(r"S:\Shared\a.md")).as_deref(),
+        Some("/home/me/shared/a.md")
+    );
+    assert_eq!(
+        m.to_wsl(Path::new(r"S:\Other\a.md")).as_deref(),
+        Some("/home/me/all/Other/a.md")
+    );
+}
+
+#[test]
+fn to_wsl_reverses_only_mappings_from_linux_paths() {
+    // On a tie the last mapping would win, so the Linux one goes first.
+    let m = mapper(&[
+        ("/home/me/shared", r"S:\Shared"),
+        (r"C:\Old", r"D:\New"),
+        (r"\\nas\share", r"S:\Shared"),
+        ("//nas/share", r"S:\Shared"),
+    ]);
+    assert_eq!(
+        m.to_wsl(Path::new(r"D:\New\a.md")).as_deref(),
+        Some("/mnt/d/New/a.md"),
+        "a Windows source isn't a WSL path"
+    );
+    assert_eq!(
+        m.to_wsl(Path::new(r"S:\Shared\a.md")).as_deref(),
+        Some("/home/me/shared/a.md"),
+        "the Linux source wins over UNC ones onto the same folder"
+    );
+}
+
+#[test]
+fn to_wsl_handles_wsl_unc_and_drives() {
+    let m = mapper(&[]);
+    assert_eq!(
+        m.to_wsl(Path::new(r"\\wsl.localhost\Ubuntu\home\me\a.md"))
+            .as_deref(),
+        Some("/home/me/a.md")
+    );
+    assert_eq!(
+        m.to_wsl(Path::new(r"\\wsl$\Ubuntu\home\me\a.md"))
+            .as_deref(),
+        Some("/home/me/a.md")
+    );
+    assert_eq!(
+        m.to_wsl(Path::new(r"C:\Users\me\a.md")).as_deref(),
+        Some("/mnt/c/Users/me/a.md")
+    );
+}
+
+#[test]
+fn to_wsl_gives_none_for_other_unc() {
+    assert_eq!(mapper(&[]).to_wsl(Path::new(r"\\nas\share\a.md")), None);
 }
