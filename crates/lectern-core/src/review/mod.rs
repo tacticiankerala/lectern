@@ -15,7 +15,9 @@ use ts_rs::TS;
 pub mod anchor;
 pub mod format;
 pub mod ops;
+pub mod store;
 pub mod text;
+pub mod view;
 
 /// What every sidecar's file name ends with.
 pub const SIDECAR_SUFFIX: &str = ".review.md";
@@ -267,7 +269,7 @@ impl Review {
 }
 
 /// The `<n>` of a raw section that starts `## C<n>`.
-fn raw_section_id(section: &str) -> Option<u32> {
+pub(crate) fn raw_section_id(section: &str) -> Option<u32> {
     let rest = section.strip_prefix("## C")?;
     let digits = rest
         .find(|c: char| !c.is_ascii_digit())

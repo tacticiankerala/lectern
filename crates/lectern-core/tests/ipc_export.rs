@@ -60,6 +60,10 @@ fn ts_bindings_exported() {
         "NewAnchor",
         "ReviewOp",
         "StatusChange",
+        "ReviewPayload",
+        "CommentView",
+        "EntryView",
+        "UnreadableView",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
