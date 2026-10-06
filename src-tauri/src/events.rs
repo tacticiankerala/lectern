@@ -18,6 +18,9 @@ pub const OPEN_REQUEST: &str = "open-request";
 pub const LIBRARY_UPDATED: &str = "library-updated";
 /// A root's index, frontmatter names included, is complete (the root's path).
 pub const INDEX_READY: &str = "index-ready";
+/// The open document's review sidecar was created, changed or deleted (`DocChanged`, holding the
+/// document's path).
+pub const REVIEW_CHANGED: &str = "review-changed";
 
 /// An event for the UI.
 #[derive(Debug, Clone)]
@@ -27,6 +30,8 @@ pub enum UiEvent {
     OpenRequest(OpenRequest),
     LibraryUpdated(LibraryPayload),
     IndexReady(PathBuf),
+    /// Holds the document's path, not the sidecar's.
+    ReviewChanged(PathBuf),
 }
 
 /// What the app state needs from Tauri.
@@ -46,6 +51,7 @@ impl Host for TauriHost {
             UiEvent::OpenRequest(request) => emit(&self.0, OPEN_REQUEST, request),
             UiEvent::LibraryUpdated(library) => emit(&self.0, LIBRARY_UPDATED, library),
             UiEvent::IndexReady(root) => emit(&self.0, INDEX_READY, root.to_string_lossy()),
+            UiEvent::ReviewChanged(path) => emit(&self.0, REVIEW_CHANGED, doc(&path)),
         }
     }
 

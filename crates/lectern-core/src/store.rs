@@ -47,6 +47,8 @@ impl Default for Settings {
             auto_update: true,
             show_status_badges: true,
             sidebar_font_size: 13,
+            review_comments: true,
+            comments_visible: true,
         }
     }
 }
@@ -78,6 +80,8 @@ impl Settings {
         set(&mut self.auto_update, p.auto_update);
         set(&mut self.show_status_badges, p.show_status_badges);
         set(&mut self.sidebar_font_size, p.sidebar_font_size);
+        set(&mut self.review_comments, p.review_comments);
+        set(&mut self.comments_visible, p.comments_visible);
         self.clamp();
     }
 

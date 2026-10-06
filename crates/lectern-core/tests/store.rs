@@ -59,6 +59,8 @@ fn settings_defaults_match_spec() {
     assert!(s.auto_update);
     assert!(s.show_status_badges);
     assert_eq!(s.sidebar_font_size, 13);
+    assert!(s.review_comments);
+    assert!(s.comments_visible);
 }
 
 #[test]
@@ -184,6 +186,25 @@ fn apply_sets_only_the_patched_fields() {
 }
 
 #[test]
+fn apply_sets_each_review_setting_on_its_own() {
+    let mut s = Settings::default();
+    s.apply(SettingsPatch {
+        review_comments: Some(false),
+        ..Default::default()
+    });
+    assert!(!s.review_comments);
+    assert!(s.comments_visible);
+
+    let mut s = Settings::default();
+    s.apply(SettingsPatch {
+        comments_visible: Some(false),
+        ..Default::default()
+    });
+    assert!(s.review_comments);
+    assert!(!s.comments_visible);
+}
+
+#[test]
 fn settings_json_shape() {
     let j = serde_json::to_value(Settings::default()).unwrap();
     assert_eq!(j["themeMode"], "system");
@@ -195,6 +216,8 @@ fn settings_json_shape() {
     assert_eq!(j["autoUpdate"], true);
     assert_eq!(j["showStatusBadges"], true);
     assert_eq!(j["sidebarFontSize"], 13);
+    assert_eq!(j["reviewComments"], true);
+    assert_eq!(j["commentsVisible"], true);
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -235,6 +258,9 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     assert!(s.show_status_badges);
     // And sets the sidebars in the size they always had.
     assert_eq!(s.sidebar_font_size, 13);
+    // And has review comments on, and shown.
+    assert!(s.review_comments);
+    assert!(s.comments_visible);
 }
 
 #[test]

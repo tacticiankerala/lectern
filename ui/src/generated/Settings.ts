@@ -29,4 +29,14 @@ showStatusBadges: boolean,
 /**
  * Pixels, 11–20: the text of the library, the outline and the breadcrumb chooser.
  */
-sidebarFontSize: number, };
+sidebarFontSize: number, 
+/**
+ * The review comments feature, switched in Preferences (on by default). Off, no sidecar is
+ * loaded or written and no comment UI shows.
+ */
+reviewComments: boolean, 
+/**
+ * The header toggle (on by default). Off, all comment UI is hidden, from the highlights to the
+ * Comments tab.
+ */
+commentsVisible: boolean, };

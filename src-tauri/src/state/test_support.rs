@@ -68,6 +68,17 @@ impl FakeHost {
             .count()
     }
 
+    /// The documents of the `review-changed` events sent, in order.
+    pub(super) fn review_changes(&self) -> Vec<PathBuf> {
+        lock(&self.events)
+            .iter()
+            .filter_map(|e| match e {
+                UiEvent::ReviewChanged(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(super) fn indexed(&self, root: &Path) -> bool {
         lock(&self.events)
             .iter()

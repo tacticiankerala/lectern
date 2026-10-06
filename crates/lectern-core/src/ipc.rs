@@ -91,6 +91,12 @@ pub struct Settings {
     pub show_status_badges: bool,
     /// Pixels, 11–20: the text of the library, the outline and the breadcrumb chooser.
     pub sidebar_font_size: u8,
+    /// The review comments feature, switched in Preferences (on by default). Off, no sidecar is
+    /// loaded or written and no comment UI shows.
+    pub review_comments: bool,
+    /// The header toggle (on by default). Off, all comment UI is hidden, from the highlights to the
+    /// Comments tab.
+    pub comments_visible: bool,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -117,6 +123,8 @@ pub struct SettingsPatch {
     pub auto_update: Option<bool>,
     pub show_status_badges: Option<bool>,
     pub sidebar_font_size: Option<u8>,
+    pub review_comments: Option<bool>,
+    pub comments_visible: Option<bool>,
 }
 
 /// Where the reader was in a document: the nearest heading and the pixel offset below it, falling

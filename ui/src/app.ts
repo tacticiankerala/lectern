@@ -63,6 +63,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autoUpdate: true,
   showStatusBadges: true,
   sidebarFontSize: 13,
+  reviewComments: true,
+  commentsVisible: true,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */

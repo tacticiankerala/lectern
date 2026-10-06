@@ -119,6 +119,8 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::follow,
             commands::reveal_in_explorer,
             commands::open_in_editor,
+            commands::load_review,
+            commands::review_op,
             commands::get_settings,
             commands::set_settings,
             commands::save_position,
