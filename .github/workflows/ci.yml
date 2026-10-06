@@ -17,6 +17,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Test data must be invented. This fails on any tracked text file holding a real-looking user
+  # profile path: X:\Users\<name>, /home/<name> (also \home\<name>, as under \\wsl.localhost) or
+  # /Users/<name>, with single or doubled separators, unless the whole <name> is an invented
+  # stand-in or a file name. It prints only file:line, so a leak isn't repeated in the public log.
+  privacy:
+    name: Privacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: No real user-profile paths
+        run: |
+          # c is one character of a <name>: anything but whitespace, a separator, a quote, a
+          # bracket, a placeholder sign ($ %) or punctuation no user name holds.
+          c='[^\s\\/"\x27\x60()[\]{}<>|*?:,;$%]'
+          sep='[\\/]{1,2}'
+          root="(?:[a-z]:)?$sep(?:home|users)$sep"
+          # A <name> that passes: a stand-in, a … placeholder, or a file such as C:\Users\notes.md.
+          ok="(?:me|dev|devx|u|user|you|alice|bob|runner|runneradmin|public|default|…|$c*\.(?:md|txt|html?|json|png|jpe?g|pdf))"
+          # <name> ends where no name character follows (a full stop may close a sentence), unless
+          # more words run on to a separator or closing quote, as in a name with spaces.
+          end="\.?(?!$c|(?:\s+$c+)+(?:$sep|[\"\x27\x60]))"
+          pattern="(?i)$root(?!$ok$end)$c"
+          status=0
+          hits=$(git grep -P -n -I -e "$pattern" -- . ':(exclude)Cargo.lock' ':(exclude)ui/package-lock.json' \
+            ':(exclude)*.woff2' ':(exclude)*.png' ':(exclude)*.ico' ':(exclude)*.icns') || status=$?
+          # git grep exits 0 on a match, 1 on none, and higher on an error.
+          if [ "$status" -eq 0 ]; then
+            printf '%s\n' "$hits" | cut -d: -f1,2
+            printf '%s\n' 'Use invented stand-ins (C:\Users\me, /home/me, \\nas\share, S:\Notes\My Vault); test data must never come from a real machine or vault.'
+            exit 1
+          elif [ "$status" -ne 1 ]; then
+            exit "$status"
+          fi
+
   core:
     name: Core (Linux)
     runs-on: ubuntu-latest
