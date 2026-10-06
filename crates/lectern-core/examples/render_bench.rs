@@ -93,11 +93,13 @@ fn main() {
     review_bench(&source);
 }
 
-/// Comments on 100 passages of the plan, then the plan with 3 lines added at the top of its body:
-/// times building the text map and re-anchoring every comment, as opening a note with a sidecar
-/// does. A second run rewords 20 of the quotes, so those take the fuzzy search.
+/// Comments on 100 passages of the plan: times building the text map, re-anchoring every comment
+/// and finding where each is in the text for the UI, as opening a note with a sidecar does. First
+/// on the plan unchanged, then with 3 lines added at the top of its body, then with 20 of the
+/// quotes reworded too, so those take the fuzzy search.
 fn review_bench(source: &str) {
     let mut review = review_of(source);
+    time_review("note unchanged", &review, source);
     let body = frontmatter_end(source);
     let shifted = format!(
         "{}Three lines\nadded at\nthe top.\n{}",
@@ -148,6 +150,7 @@ fn review_of(source: &str) -> Review {
             start_line: block.start_line,
             end_line: block.end_line,
             quote,
+            prefix: String::new(),
         };
         let op = ReviewOp::Add {
             anchor,
@@ -176,9 +179,16 @@ fn reword(quote: &str) -> String {
 
 fn time_review(label: &str, review: &Review, source: &str) {
     let fp = fingerprint(source);
+    // As the payload does: a comment left where it was is looked for in its lines.
     let resolve = || {
         let map = TextMap::build(source);
-        anchor::resolve_all(review, &map, &fp)
+        let mut resolved = anchor::resolve_all(review, &map, &fp);
+        for (r, c) in resolved.iter_mut().zip(review.comments()) {
+            if r.state == AnchorState::Anchored && r.span.is_none() {
+                r.span = anchor::stored_span(c, &map);
+            }
+        }
+        resolved
     };
     let states = resolve();
     let count = |state| states.iter().filter(|r| r.state == state).count();
@@ -191,7 +201,7 @@ fn time_review(label: &str, review: &Review, source: &str) {
         .collect();
     times.sort();
     println!(
-        "review: {} comments, {label}, text map + re-anchoring, {RUNS} runs: \
+        "review: {} comments, {label}, text map + re-anchoring + places, {RUNS} runs: \
          min {:.2} ms, median {:.2} ms, max {:.2} ms \
          ({} anchored, {} moved, {} detached)",
         states.len(),

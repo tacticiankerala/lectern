@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import type { CommentView } from "../src/generated/CommentView";
 import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { ReviewPayload } from "../src/generated/ReviewPayload";
-import { fixturePath, openFixture } from "./util";
+import { LANDING_PX, LANDING_SLACK_PX, fixturePath, headingOffset, openFixture } from "./util";
 
 const ALPHA = "work/alpha/README.md";
 const PLAN = "work/alpha/plans/2026-01-01-big-plan.md";
@@ -39,6 +39,8 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     jumpLine: 1,
     pinnedHeading: null,
     quote: "",
+    textStart: null,
+    textEnd: null,
     currentText: null,
     entries: [],
     ...over,
@@ -145,45 +147,53 @@ function wordPoint(page: Page, word: string): Promise<{ x: number; y: number }> 
 
 /**
  * Selects `phrase` in the note by dragging the mouse from the middle of its first character's left
- * half to the middle of its last character's right half, inside the first block holding it.
+ * half to the middle of its last character's right half, inside the first block holding it: its
+ * first occurrence there, or with `nth`, the one after `nth` others.
  */
-async function dragSelect(page: Page, phrase: string): Promise<void> {
-  const ends = await page.evaluate(async (phrase) => {
-    const block = [...document.querySelectorAll<HTMLElement>("#lx-doc [data-sourcepos]")]
-      .reverse()
-      .find((el) => el.textContent.includes(phrase));
-    const walker = document.createTreeWalker(block ?? document.body, NodeFilter.SHOW_TEXT);
-    let text: Text | null = null;
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (n instanceof Text && n.data.includes(phrase)) {
-        text = n;
-        break;
+async function dragSelect(page: Page, phrase: string, nth = 0): Promise<void> {
+  const ends = await page.evaluate(
+    async ({ phrase, nth }) => {
+      const block = [...document.querySelectorAll<HTMLElement>("#lx-doc [data-sourcepos]")]
+        .reverse()
+        .find((el) => el.textContent.includes(phrase));
+      const walker = document.createTreeWalker(block ?? document.body, NodeFilter.SHOW_TEXT);
+      let text: Text | null = null;
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n instanceof Text && n.data.includes(phrase)) {
+          text = n;
+          break;
+        }
       }
-    }
-    if (!text) throw new Error(`no text node with ${phrase}`);
-    // Blocks near the view take their real height a frame later: scroll until it holds still.
-    const holder = text.parentElement;
-    for (let tries = 0, last = NaN; tries < 10; tries++) {
-      holder?.scrollIntoView({ block: "center" });
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const top = holder?.getBoundingClientRect().top ?? 0;
-      if (Math.abs(top - last) < 1) break;
-      last = top;
-    }
-    const at = text.data.indexOf(phrase);
-    const charBox = (i: number) => {
-      const range = document.createRange();
-      range.setStart(text, i);
-      range.setEnd(text, i + 1);
-      return range.getBoundingClientRect();
-    };
-    const first = charBox(at);
-    const last = charBox(at + phrase.length - 1);
-    return {
-      from: { x: first.left + first.width / 4, y: first.top + first.height / 2 },
-      to: { x: last.right - last.width / 4, y: last.top + last.height / 2 },
-    };
-  }, phrase);
+      if (!text) throw new Error(`no text node with ${phrase}`);
+      // Blocks near the view take their real height a frame later: scroll until it holds still.
+      const holder = text.parentElement;
+      for (let tries = 0, last = NaN; tries < 10; tries++) {
+        holder?.scrollIntoView({ block: "center" });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const top = holder?.getBoundingClientRect().top ?? 0;
+        if (Math.abs(top - last) < 1) break;
+        last = top;
+      }
+      let at = text.data.indexOf(phrase);
+      for (let skipped = 0; skipped < nth; skipped++) {
+        at = text.data.indexOf(phrase, at + 1);
+      }
+      if (at === -1) throw new Error(`no occurrence ${String(nth)} of ${phrase}`);
+      const charBox = (i: number) => {
+        const range = document.createRange();
+        range.setStart(text, i);
+        range.setEnd(text, i + 1);
+        return range.getBoundingClientRect();
+      };
+      const first = charBox(at);
+      const last = charBox(at + phrase.length - 1);
+      return {
+        from: { x: first.left + first.width / 4, y: first.top + first.height / 2 },
+        to: { x: last.right - last.width / 4, y: last.top + last.height / 2 },
+      };
+    },
+    { phrase, nth },
+  );
   await page.mouse.move(ends.from.x, ends.from.y);
   await page.mouse.down();
   await page.mouse.move(ends.to.x, ends.to.y, { steps: 8 });
@@ -400,6 +410,8 @@ test("an edit that deletes the passage shows the comment as detached with its or
     "a review from the platform team",
   );
   await expect(card(page, 1)).toContainText("Detached");
+  // With no heading left to pin it to, it goes to the note's top.
+  await expect(card(page, 1).locator(".comment-place")).toBeEnabled();
   await expect(page.locator('#lx-doc .lx-cdot[data-comments="1"]')).toHaveCount(0);
   await expect(page.locator('#lx-doc .lx-cdot[data-comments="2"]')).toHaveCount(1);
 });
@@ -822,4 +834,213 @@ test("find in page paints over comment highlights", async ({ page }) => {
       ["comment", "find", "find-current"].map((name) => CSS.highlights.get(name)?.priority),
     ),
   ).toEqual([0, 2, 3]);
+});
+
+test("a phrase twice in a paragraph: the comment marks the one selected", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  const path = fixturePath(ALPHA);
+  const text = "Before: check the gauge now. After: check the gauge later.";
+  // The paragraph under the title, as core would render and read it.
+  await page.evaluate(
+    ({ path, text }) => {
+      const blocks = window.__fake
+        .blocksOf(path)
+        .map(([start, end, t]): [number, number, string] =>
+          start === 8 ? [8, 8, text] : [start, end, t],
+        );
+      const html = window.__fake.html(path) ?? "";
+      window.__fake.setDoc(
+        path,
+        html.replace(
+          /<p data-sourcepos="8:1-8:\d+">[^<]*<\/p>/,
+          `<p data-sourcepos="8:1-8:58">${text}</p>`,
+        ),
+      );
+      window.__fake.setText(path, blocks);
+      window.__fake.emit("doc-changed", { path });
+    },
+    { path, text },
+  );
+  await expect(page.locator('#lx-doc p[data-sourcepos="8:1-8:58"]')).toHaveText(text);
+  await dragSelect(page, "check the gauge", 1);
+  await page.locator("#lx-doc-pane button.lx-sel-comment").click();
+  await page.keyboard.type("Which gauge?");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 1)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 1)).toHaveClass(/selected/);
+  const marked = () =>
+    page.evaluate(() =>
+      ["comment", "comment-focus"].map((name) =>
+        [...(CSS.highlights.get(name) ?? [])]
+          .map((r) => r as Range)
+          .map((r) => [
+            r.toString(),
+            r.startContainer.parentElement?.getAttribute("data-sourcepos"),
+            r.startOffset,
+          ]),
+      ),
+    );
+  const second = text.lastIndexOf("check the gauge");
+  await expect
+    .poll(marked)
+    .toEqual([
+      [["check the gauge", "8:1-8:58", second]],
+      [["check the gauge", "8:1-8:58", second]],
+    ]);
+
+  // And one on the first: each marks its own.
+  await dragSelect(page, "check the gauge", 0);
+  await page.locator("#lx-doc-pane button.lx-sel-comment").click();
+  await page.keyboard.type("And this one?");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 2)).toHaveClass(/selected/);
+  const first = text.indexOf("check the gauge");
+  await expect.poll(marked).toEqual([
+    [
+      ["check the gauge", "8:1-8:58", second],
+      ["check the gauge", "8:1-8:58", first],
+    ],
+    [["check the gauge", "8:1-8:58", first]],
+  ]);
+});
+
+test("a half-written comment survives a visit to another note", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  await page.keyboard.press("Control+Alt+KeyM");
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Half a thought");
+  // Another note, from the library: the editor goes with its note.
+  const memory = page.locator(
+    `#lx-library .tree-row[data-path="${fixturePath("memory").replaceAll("\\", "\\\\")}"]`,
+  );
+  await memory.locator(".tree-name").click();
+  await page
+    .locator(
+      `#lx-library .tree-row[data-path="${fixturePath("memory/index.md").replaceAll("\\", "\\\\")}"]`,
+    )
+    .locator(".tree-name")
+    .click();
+  await expect(page).toHaveTitle("Memory index — Lectern");
+  await expect(editor(page)).toBeHidden();
+
+  // Back: it's open again, by its block, with the text, in view and focused.
+  await page.keyboard.press("Alt+ArrowLeft");
+  await expect(page).toHaveTitle("Alpha — Lectern");
+  await expect(editor(page)).toBeVisible();
+  const area = editor(page).locator("textarea");
+  await expect(area).toHaveValue("Half a thought");
+  await expect(area).toBeFocused();
+  await expect(editor(page)).toBeInViewport({ ratio: 1 });
+  // And it saves to its own note.
+  await page.keyboard.press("Control+Enter");
+  await expect(editor(page)).toBeHidden();
+  await expect(card(page, 1).locator(".comment-entry.you .comment-body")).toHaveText(
+    "Half a thought",
+  );
+  await expect(card(page, 1).locator(".comment-quote")).toHaveText("Alpha");
+});
+
+test("clicking a card's quote scrolls to its text and flashes it", async ({ page }) => {
+  await openFixture(page, PLAN);
+  const path = fixturePath(PLAN);
+  await seed(page, {
+    notePath: path,
+    sidecarPath: path.replace(/\.md$/, ".review.md"),
+    noteWslPath: null,
+    sidecarWslPath: null,
+    exists: true,
+    readOnly: null,
+    comments: [
+      comment({
+        id: 1,
+        startLine: 225,
+        endLine: 225,
+        headingPath: ["Section 2"],
+        jumpLine: 225,
+        quote: "covers the search area",
+        entries: [you("Which area?")],
+      }),
+    ],
+    unreadable: [],
+    openCount: 1,
+  });
+  await page.getByRole("tab", { name: /^Comments/ }).click();
+  const paragraph = page.locator("#lx-doc p", { hasText: "Section 2 covers the search area" });
+  await expect(paragraph).not.toBeInViewport();
+  await card(page, 1).locator(".comment-quote").click();
+  await expect(card(page, 1)).toHaveClass(/selected/);
+  await expect(paragraph).toBeInViewport();
+  await expect(paragraph).toHaveClass(/lx-flash/);
+  expect(await paragraph.evaluate((el) => getComputedStyle(el).animationName)).toBe(
+    "lx-comment-flash",
+  );
+  // A moment later it's back as it was.
+  await expect(paragraph).not.toHaveClass(/lx-flash/);
+  await expect.poll(() => page.evaluate(() => CSS.highlights.has("comment-focus"))).toBe(true);
+});
+
+test("a detached comment with no heading left goes to the top of a note with frontmatter", async ({
+  page,
+}) => {
+  await openFixture(page, PLAN);
+  const path = fixturePath(PLAN);
+  const pane = page.locator("#lx-doc-pane");
+  const scrolled = () => pane.evaluate((el) => el.scrollTop);
+  await seed(page, {
+    notePath: path,
+    sidecarPath: path.replace(/\.md$/, ".review.md"),
+    noteWslPath: null,
+    sidecarWslPath: null,
+    exists: true,
+    readOnly: null,
+    comments: [
+      // Line 1 is the frontmatter's, which holds no block.
+      comment({
+        id: 1,
+        state: "detached",
+        startLine: 225,
+        endLine: 225,
+        headingPath: ["Section 99"],
+        jumpLine: 1,
+        quote: "a passage long gone",
+        entries: [you("Still true?")],
+      }),
+      comment({
+        id: 2,
+        startLine: 225,
+        endLine: 225,
+        headingPath: ["Section 2"],
+        jumpLine: 225,
+        quote: "covers the search area",
+        entries: [you("Which area?")],
+      }),
+    ],
+    unreadable: [],
+    openCount: 2,
+  });
+  await page.getByRole("tab", { name: /^Comments/ }).click();
+  await card(page, 2).locator(".comment-place").click();
+  await expect.poll(scrolled).toBeGreaterThan(1000);
+  await card(page, 1).locator(".comment-place").click();
+  await expect.poll(scrolled).toBe(0);
+
+  // Detached by an edit, the fake (as core) sends the note's first block, the title on line 6.
+  await page.evaluate((path) => {
+    const blocks = window.__fake.blocksOf(path);
+    window.__fake.setText(
+      path,
+      blocks.filter(([, , text]) => !text.includes("covers the search area")),
+    );
+    window.__fake.emit("review-changed", { path });
+  }, path);
+  await expect(card(page, 2)).toHaveAttribute("data-state", "detached");
+  await pane.evaluate((el) => {
+    el.scrollTop = 5000;
+  });
+  await card(page, 2).locator(".comment-place").click();
+  // The title lands where a jump lands, at the top of the pane.
+  await expect
+    .poll(() => headingOffset(page, "big-plan"))
+    .toBeLessThanOrEqual(LANDING_PX + LANDING_SLACK_PX);
+  expect(await headingOffset(page, "big-plan")).toBeGreaterThanOrEqual(0);
 });

@@ -75,13 +75,16 @@ export function normalize(s: string): string {
 /**
  * Visible text and where each of its characters comes from: `text[i]` is
  * `nodes[nodeOf[i]].data[offOf[i]]`, except for a space that joins two blocks, which points just
- * past the end of the node before it.
+ * past the end of the node before it. `nodeIndex` finds a node's place in `nodes`, and `starts`
+ * where in the text each node's characters begin (with the space joining it to the one before).
  */
 export interface TextIndex {
   text: string;
   nodes: Text[];
   nodeOf: Uint32Array;
   offOf: Uint32Array;
+  nodeIndex: Map<Text, number>;
+  starts: Uint32Array;
 }
 
 /** The visible text of `roots`, in order. */
@@ -90,6 +93,7 @@ export function buildTextIndex(roots: Node[]): TextIndex {
   const chars: string[] = [];
   const nodeOf: number[] = [];
   const offOf: number[] = [];
+  const starts: number[] = [];
   let pendingSpace = false;
   let lastBlock: Element | null = null;
   for (const root of roots) {
@@ -113,6 +117,7 @@ export function buildTextIndex(roots: Node[]): TextIndex {
       }
       const n = nodes.length;
       nodes.push(node);
+      starts.push(chars.length);
       const data = node.data;
       for (let i = 0; i < data.length; i++) {
         const ch = data.charAt(i);
@@ -139,6 +144,8 @@ export function buildTextIndex(roots: Node[]): TextIndex {
     nodes,
     nodeOf: Uint32Array.from(nodeOf),
     offOf: Uint32Array.from(offOf),
+    nodeIndex: new Map(nodes.map((node, i) => [node, i])),
+    starts: Uint32Array.from(starts),
   };
 }
 
@@ -147,6 +154,9 @@ export function docText(doc: Element): string {
   return buildTextIndex([doc]).text;
 }
 
+/** The characters of text kept before a selection, as core keeps them (its `CONTEXT_CHARS`). */
+const PREFIX_CHARS = 32;
+
 /** The first place `needle` (normalised) is in the text, as a Range; null when it isn't there. */
 export function locate(index: TextIndex, needle: string): Range | null {
   const wanted = normalize(needle);
@@ -154,19 +164,53 @@ export function locate(index: TextIndex, needle: string): Range | null {
     return null;
   }
   const at = index.text.indexOf(wanted);
-  if (at === -1) {
+  return at === -1 ? null : rangeAt(index, at, at + wanted.length);
+}
+
+/** The text from `start` up to `end` as a Range; null when that's empty or not all in the text. */
+export function rangeAt(index: TextIndex, start: number, end: number): Range | null {
+  if (start < 0 || end > index.text.length || start >= end) {
     return null;
   }
-  const last = at + wanted.length - 1;
-  const startNode = index.nodes[index.nodeOf[at] ?? 0];
+  const last = end - 1;
+  const startNode = index.nodes[index.nodeOf[start] ?? 0];
   const endNode = index.nodes[index.nodeOf[last] ?? 0];
   if (!startNode || !endNode) {
     return null;
   }
   const range = document.createRange();
-  range.setStart(startNode, index.offOf[at] ?? 0);
+  range.setStart(startNode, index.offOf[start] ?? 0);
   range.setEnd(endNode, Math.min(endNode.length, (index.offOf[last] ?? 0) + 1));
   return range;
+}
+
+/**
+ * Up to `chars` characters of the text of `index` (the note's, `docText`) just before where
+ * `range` starts, as core keeps the text before a quote; "" when the range doesn't start in it.
+ * Looks only at the node the range starts in.
+ */
+export function textBefore(index: TextIndex, range: Range, chars = PREFIX_CHARS): string {
+  const start = range.startContainer;
+  const n = start instanceof Text ? index.nodeIndex.get(start) : undefined;
+  if (n === undefined) {
+    return "";
+  }
+  // The selection's first character: the first of the text that isn't a space, at or after its
+  // start. From where the node's characters begin, it's no further than the node's end.
+  let at = -1;
+  for (let i = index.starts[n] ?? 0; i < index.text.length && at === -1; i++) {
+    const after = (index.nodeOf[i] ?? 0) > n || (index.offOf[i] ?? 0) >= range.startOffset;
+    if (after && index.text[i] !== " ") {
+      at = i;
+    }
+  }
+  if (at === -1) {
+    return "";
+  }
+  // Characters as Rust counts them: code points, not UTF-16 units.
+  return Array.from(index.text.slice(Math.max(0, at - 2 * chars), at))
+    .slice(-chars)
+    .join("");
 }
 
 /** The visible text a selection covers, normalised: what a comment on it quotes. */

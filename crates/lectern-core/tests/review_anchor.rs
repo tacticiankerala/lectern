@@ -12,6 +12,11 @@ use lectern_core::review::{
 const NOTE: &str = "---\ntitle: Tide sync\n---\n# Tide sync\n\nIntro line.\n\n## Batching\n\nThe client uploads readings in batches of at most 50 so a slow link stays responsive.\n\n- [ ] Reject readings older than a week\n- [x] Keep **bold** and `code` text[^1]\n\n```rust\nlet batch = 50;\n```\n\n| Station | Batch |\n|---|---|\n| North | 50 |\n\n## Retries\n\nRetry with jitter after a failed upload.\n\n[^1]: A footnote body.\n";
 
 fn add(src: &str, quote: &str, start: u32, end: u32) -> Review {
+    add_after(src, "", quote, start, end)
+}
+
+/// A review with one comment on `quote`, selected right after the visible text `prefix`.
+fn add_after(src: &str, prefix: &str, quote: &str, start: u32, end: u32) -> Review {
     let tm = TextMap::build(src);
     let fp = fingerprint(src);
     let mut r = format::new_review("tide.md");
@@ -22,6 +27,7 @@ fn add(src: &str, quote: &str, start: u32, end: u32) -> Review {
                 start_line: start,
                 end_line: end,
                 quote: quote.into(),
+                prefix: prefix.into(),
             },
             text: "why?".into(),
         },
@@ -137,6 +143,7 @@ fn a_whole_document_rewrite_detaches_every_comment_and_loses_none() {
                 start_line: 25,
                 end_line: 25,
                 quote: "Retry with jitter".into(),
+                prefix: String::new(),
             },
             text: "formula?".into(),
         },
@@ -164,6 +171,35 @@ fn duplicate_quotes_are_resolved_by_context() {
     );
     let shifted = src.replace("# A\n", "# A\n\nPreface.\n");
     assert_eq!(state(&r, &shifted).start_line, 7);
+}
+
+#[test]
+fn a_phrase_repeated_in_one_block_anchors_to_the_occurrence_selected() {
+    let src = "# A\n\nBefore: check the gauge now. After: check the gauge later.\n";
+    let quote = "check the gauge";
+    // The UI sends the 32 characters of visible text before the selection.
+    let r = add_after(src, "re: check the gauge now. After: ", quote, 3, 3);
+    let c = r.comments().next().unwrap();
+    let meta = c.anchor.as_ref().unwrap();
+    assert_eq!(meta.prefix, "re: check the gauge now. After: ");
+    assert_eq!(meta.suffix, " later.", "the second occurrence's context");
+
+    // An edit above it: still the second occurrence.
+    let shifted = src.replace("# A\n", "# A\n\nPreface.\n");
+    let second = TextMap::build(&shifted).text().rfind(quote).unwrap();
+    let s = state(&r, &shifted);
+    assert_eq!(s.state, AnchorState::Anchored);
+    assert_eq!(s.span, Some((second, second + quote.len())));
+
+    // The first, selected after its own text, or with no text before it given, stays the first.
+    for prefix in ["A Before: ", ""] {
+        let r = add_after(src, prefix, quote, 3, 3);
+        let meta = r.comments().next().unwrap().anchor.clone().unwrap();
+        assert_eq!(
+            meta.suffix, " now. After: check the gauge lat",
+            "{prefix:?}"
+        );
+    }
 }
 
 #[test]
@@ -328,6 +364,7 @@ fn refresh_leaves_moved_detached_and_unchanged_comments_alone() {
             start_line: line,
             end_line: line,
             quote: quote.into(),
+            prefix: String::new(),
         };
         let op = ReviewOp::Add {
             anchor,

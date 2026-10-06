@@ -155,6 +155,11 @@ interface StoredComment {
   endLine: number;
   headingPath: string[];
   quote: string;
+  /** The text before the quote, as the UI sent it (core works it out from its own text). */
+  prefix: string;
+  /** Where it was seeded as being in the note's text, kept while that text is unknown. */
+  textStart: number | null;
+  textEnd: number | null;
   entries: EntryView[];
   /** Its state when seeded, kept while the note's text is unknown. */
   state: AnchorState;
@@ -247,6 +252,69 @@ function resolveState(c: StoredComment, text: string | null): AnchorState {
   }
   const needle = normalize(matchPart(c.quote));
   return needle !== "" && text.includes(needle) ? "anchored" : "detached";
+}
+
+/**
+ * Where core finds an attached comment's quote in the note's text (`blocks` joined by spaces), as
+ * offsets: of its places, one in the comment's lines, else one touching them, else any; then the
+ * one after the text most like its prefix, then the one nearest its first line, then the first.
+ * Null when it isn't there.
+ */
+function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [number, number] | null {
+  const text = blocks.map(([, , t]) => t).join(" ");
+  const needle = normalize(matchPart(c.quote));
+  // Where each block's text starts in the note's.
+  const starts: number[] = [];
+  let offset = 0;
+  for (const [, , t] of blocks) {
+    starts.push(offset);
+    offset += t.length + 1;
+  }
+  const linesOf = (from: number, to: number): [number, number] => {
+    let first = Infinity;
+    let last = -Infinity;
+    blocks.forEach(([start, end, t], i) => {
+      const at = starts[i] ?? 0;
+      if (at < to && from < at + t.length) {
+        first = Math.min(first, start);
+        last = Math.max(last, end);
+      }
+    });
+    return [first, last];
+  };
+  const agreement = (at: number): number => {
+    let n = 0;
+    while (
+      n < c.prefix.length &&
+      n < at &&
+      text[at - 1 - n] === c.prefix[c.prefix.length - 1 - n]
+    ) {
+      n++;
+    }
+    return n;
+  };
+  let best: { key: [number, number, number]; at: number } | null = null;
+  for (
+    let at = needle === "" ? -1 : text.indexOf(needle);
+    at !== -1;
+    at = text.indexOf(needle, at + 1)
+  ) {
+    const [first, last] = linesOf(at, at + needle.length);
+    const fit =
+      first >= c.startLine && last <= c.endLine
+        ? 0
+        : first <= c.endLine && last >= c.startLine
+          ? 1
+          : 2;
+    const key: [number, number, number] = [fit, -agreement(at), Math.abs(first - c.startLine)];
+    const better =
+      best === null ||
+      key[0] < best.key[0] ||
+      (key[0] === best.key[0] &&
+        (key[1] < best.key[1] || (key[1] === best.key[1] && key[2] < best.key[2])));
+    if (better) best = { key, at };
+  }
+  return best === null ? null : [best.at, best.at + needle.length];
 }
 
 /** As core caps a quote: 500 characters, then an ellipsis. */
@@ -562,6 +630,9 @@ export class FakeBackend implements Backend, FakeControl {
         endLine: c.endLine,
         headingPath: [...c.headingPath],
         quote: c.quote,
+        prefix: "",
+        textStart: c.textStart,
+        textEnd: c.textEnd,
         entries: structuredClone(c.entries),
         state: c.state,
         movedTo: c.state === "moved" ? c.currentText : null,
@@ -630,6 +701,9 @@ export class FakeBackend implements Backend, FakeControl {
         endLine: op.anchor.endLine,
         headingPath: [],
         quote: capQuote(normalize(op.anchor.quote)),
+        prefix: op.anchor.prefix,
+        textStart: null,
+        textEnd: null,
         entries: [entry("you", null, text)],
         state: "anchored",
         movedTo: null,
@@ -657,6 +731,7 @@ export class FakeBackend implements Backend, FakeControl {
         c.startLine = op.anchor.startLine;
         c.endLine = op.anchor.endLine;
         c.quote = capQuote(normalize(op.anchor.quote));
+        c.prefix = op.anchor.prefix;
         c.state = "anchored";
         c.movedTo = null;
         c.jumpLine = op.anchor.startLine;
@@ -682,9 +757,26 @@ export class FakeBackend implements Backend, FakeControl {
     const review = this.reviews.get(key(path));
     const blocks = this.textBlocks.get(key(path));
     const text = blocks === undefined ? null : this.coreText(path);
+    // The note's first line with text, as core's top for a detached comment; else line 1.
+    const top =
+      (blocks ?? []).reduce<number | null>(
+        (min, [start]) => (min === null ? start : Math.min(min, start)),
+        null,
+      ) ?? 1;
     const comments = (review?.comments ?? []).map((c) => {
       const state = resolveState(c, text);
       const detached = state === "detached";
+      let span: [number, number] | null = null;
+      if (blocks === undefined) {
+        span =
+          !detached && c.textStart !== null && c.textEnd !== null ? [c.textStart, c.textEnd] : null;
+      } else if (state === "moved" && c.movedTo !== null) {
+        const passage = normalize(c.movedTo);
+        const at = (text ?? "").indexOf(passage);
+        span = at === -1 ? null : [at, at + passage.length];
+      } else if (state === "anchored") {
+        span = quoteSpan(c, blocks);
+      }
       return {
         id: c.id,
         status: effectiveStatus(c),
@@ -692,9 +784,12 @@ export class FakeBackend implements Backend, FakeControl {
         startLine: c.startLine,
         endLine: c.endLine,
         headingPath: [...c.headingPath],
-        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : null) : c.startLine,
+        // Detached by an edit, as core with no heading left: the note's top, its first block.
+        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : c.startLine,
         pinnedHeading: detached && c.state === "detached" ? c.pinnedHeading : null,
         quote: c.quote,
+        textStart: span?.[0] ?? null,
+        textEnd: span?.[1] ?? null,
         currentText: state === "moved" ? c.movedTo : null,
         entries: structuredClone(c.entries),
       };

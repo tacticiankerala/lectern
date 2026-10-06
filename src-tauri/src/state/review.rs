@@ -8,11 +8,12 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use lectern_core::library::is_markdown;
 use lectern_core::review::anchor::resolve_all;
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::TextMap;
 use lectern_core::review::view::{build_payload, PayloadInput, ReviewPayload};
-use lectern_core::review::{fingerprint, iso_utc, sidecar_path, store, Review};
+use lectern_core::review::{fingerprint, is_sidecar_name, iso_utc, sidecar_path, store, Review};
 
 use super::doc::{read_text, render_text};
 use super::sync::{lock, read};
@@ -20,6 +21,7 @@ use super::{trust, AppState};
 
 const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
+const NOT_A_NOTE: &str = "Comments can only be added to Markdown notes.";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -29,10 +31,23 @@ struct Target {
     note_name: String,
 }
 
+impl Target {
+    /// Whether the note can have comments: it's Markdown, and not a sidecar itself. Anything else
+    /// would get a sidecar the library never hides (`notes.txt.review.md`), or a sidecar's sidecar
+    /// (`plan.review.review.md`).
+    fn takes_comments(&self) -> bool {
+        is_markdown(&self.note_name) && !is_sidecar_name(&self.note_name)
+    }
+}
+
 impl AppState {
-    /// The open note's comments. Without a sidecar the note isn't read.
+    /// The open note's comments. Without a sidecar the note isn't read. A file that can't take
+    /// comments (see `review_target`) shows none, read-only, and nothing is read.
     pub fn load_review(&self, path: &str) -> Result<ReviewPayload, String> {
-        let target = self.review_target(path)?;
+        let target = self.open_target(path)?;
+        if !target.takes_comments() {
+            return Ok(self.review_payload(&target, None, Some(NOT_A_NOTE.to_owned())));
+        }
         if let Err(e) = fs::metadata(&target.sidecar) {
             if e.kind() == io::ErrorKind::NotFound {
                 return Ok(self.review_payload(&target, None, None));
@@ -69,9 +84,19 @@ impl AppState {
         read(&self.settings).review_comments
     }
 
-    /// `path` as a note a review command may touch: the feature is on, the path is trusted, and
-    /// it is the open note. Every check is in memory.
+    /// `path` as a note a review command may change the sidecar of: the open note (see
+    /// `open_target`), and a Markdown note rather than a sidecar itself.
     fn review_target(&self, path: &str) -> Result<Target, String> {
+        let target = self.open_target(path)?;
+        if !target.takes_comments() {
+            return Err(NOT_A_NOTE.to_owned());
+        }
+        Ok(target)
+    }
+
+    /// `path` as a note a review command may look at: the feature is on, the path is trusted, and
+    /// it is the open note. Every check is in memory.
+    fn open_target(&self, path: &str) -> Result<Target, String> {
         if !self.reviews_on() {
             return Err(FEATURE_OFF.to_owned());
         }
@@ -169,6 +194,7 @@ mod tests {
                 start_line: 5,
                 end_line: 5,
                 quote: "batches of at most 50".to_owned(),
+                prefix: String::new(),
             },
             text: text.to_owned(),
         }
@@ -304,6 +330,27 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_note_that_is_not_markdown_or_is_a_sidecar() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        for name in ["a/tide.txt", "b/plan.review.md", "c/PLAN.Review.MD"] {
+            let doc = f.dir.file(name, NOTE);
+            let path = path_string(&doc);
+            opened_path(&f.state.open_document(&path));
+            assert_eq!(
+                f.state.review_op(&path, add("Why 50?")).unwrap_err(),
+                NOT_A_NOTE,
+                "{name}"
+            );
+            assert!(!sidecar_path(&doc).exists(), "{name}");
+            // Shown read-only with the reason, so nothing offers to add one.
+            let loaded = f.state.load_review(&path).unwrap();
+            assert!(!loaded.exists, "{name}");
+            assert!(loaded.comments.is_empty(), "{name}");
+            assert_eq!(loaded.read_only.as_deref(), Some(NOT_A_NOTE), "{name}");
+        }
+    }
+
+    #[test]
     fn refuses_when_the_feature_is_off() {
         let (f, note) = with_open_note();
         let path = path_string(&note);
@@ -347,6 +394,66 @@ mod tests {
         f.state
             .on_watch_event(WatchEvent::ReviewChanged(note.clone()));
         assert_eq!(f.host.review_changes(), [note]);
+    }
+
+    /// Whether a scan of any root is running or asked for.
+    fn scanning(f: &Fixture) -> bool {
+        lock(&f.state.library).roots.iter().any(|r| r.scanning)
+    }
+
+    /// On a share without change notifications the poll that saw the sidecar change is all there
+    /// is, so it brings the note's comment count in the library up to date.
+    #[test]
+    fn review_changed_rescans_the_library_root_holding_the_note() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let note = dir.file("vault/notes/tide.md", NOTE);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.state.window_shown();
+        wait_until("the root is indexed", || settled(&f, &root));
+        let path = path_string(&note);
+        opened_path(&f.state.open_document(&path));
+        f.state.review_op(&path, add("Why 50?")).unwrap();
+        let count = |f: &Fixture| {
+            f.state
+                .index()
+                .root_for(&note)
+                .and_then(|r| r.comment_count("notes/tide.md"))
+        };
+        assert_eq!(count(&f), None, "no watcher here, so no scan yet");
+
+        f.state
+            .on_watch_event(WatchEvent::ReviewChanged(note.clone()));
+
+        wait_until("the count is in", || count(&f) == Some(1));
+        assert_eq!(f.host.review_changes(), [note]);
+    }
+
+    /// Notes outside every library root, and their folder's ad-hoc root, aren't scanned again, nor
+    /// is anything while the feature is off.
+    #[test]
+    fn review_changed_rescans_nothing_outside_the_user_roots_or_while_off() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let inside = dir.file("vault/tide.md", NOTE);
+        let outside = dir.file("elsewhere/tide.md", NOTE);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.state.window_shown();
+        opened_path(&f.state.open_document(&path_string(&outside)));
+        let adhoc = outside.parent().unwrap().to_path_buf();
+        wait_until("both roots are indexed", || {
+            settled(&f, &root) && settled(&f, &adhoc)
+        });
+
+        f.state
+            .on_watch_event(WatchEvent::ReviewChanged(outside.clone()));
+        assert!(!scanning(&f), "the ad-hoc root isn't the user's");
+
+        set_reviews(&f, false);
+        f.state
+            .on_watch_event(WatchEvent::ReviewChanged(inside.clone()));
+        assert!(!scanning(&f), "the feature is off");
+        assert_eq!(f.host.review_changes(), [outside]);
     }
 
     /// The watcher stats the sidecar whatever the settings say; with the feature off the UI hears

@@ -235,6 +235,25 @@ fn unknown_sections_are_kept_raw_and_count_for_ids() {
 }
 
 #[test]
+fn a_section_swallowed_by_an_unclosed_fence_still_reserves_its_id() {
+    // Claude left a code fence open in a reply, so C7 below it reads as part of C1's reply.
+    let text = "---\nlectern-review: 1\nnote: tide.md\n---\n# Review: tide.md\n\n\
+        ## C1 · open · L5\n> batches of at most 50\n\n**You:** Why 50?\n\n\
+        **Claude (reply):** Like this:\n\n```\nlet batch = 50;\n\n\
+        ## C7 · open · L9\n> Retry with jitter\n\n**You:** Which formula?\n";
+    let r = format::parse(text);
+    assert_eq!(r.comments().count(), 1, "C7 was swallowed");
+    assert!(r.items.iter().all(|i| matches!(i, Item::Comment(_))));
+    assert_eq!(r.next_id(), 8, "C7 is still taken");
+
+    // The same inside a section kept raw.
+    let raw = text.replace("## C1 · open · L5", "## Notes");
+    let r = format::parse(&raw);
+    assert_eq!(r.comments().count(), 0);
+    assert_eq!(r.next_id(), 8);
+}
+
+#[test]
 fn fingerprint_and_iso_time() {
     assert_eq!(review::fingerprint(""), "fnv1a64:cbf29ce484222325");
     assert_eq!(review::fingerprint("abc"), "fnv1a64:e71fa2190541574b");

@@ -244,16 +244,18 @@ impl Review {
         })
     }
 
-    /// The id for a new comment: one more than any in the file, counting `## C<n>` sections that
-    /// are kept raw, so an id is never reused.
+    /// The id for a new comment: one more than any in the file, so an id is never reused. Every
+    /// `## C<n>` line read counts: those starting sections kept raw, and those inside a section's
+    /// text, where a code fence Claude left open swallowed the sections after it.
     pub fn next_id(&self) -> u32 {
-        let raw_ids = self.items.iter().filter_map(|item| match item {
-            Item::Raw(section) => raw_section_id(section),
-            Item::Comment(_) => None,
+        let read = self.items.iter().filter_map(|item| match item {
+            Item::Raw(section) => Some(section.as_str()),
+            Item::Comment(c) => c.raw.as_deref(),
         });
+        let read_ids = read.flat_map(|text| text.lines().filter_map(raw_section_id));
         self.comments()
             .map(|c| c.id)
-            .chain(raw_ids)
+            .chain(read_ids)
             .max()
             .map_or(1, |max| max.saturating_add(1))
     }

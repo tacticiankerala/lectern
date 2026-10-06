@@ -33,6 +33,7 @@ fn new_anchor(line: u32, quote: &str) -> NewAnchor {
         start_line: line,
         end_line: line,
         quote: quote.into(),
+        prefix: String::new(),
     }
 }
 

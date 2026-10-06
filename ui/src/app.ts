@@ -659,8 +659,11 @@ export class App {
           setBadge: (n) => {
             this.actions.setCommentCount(n);
           },
+          // A line before every block (frontmatter, blank lines) is the note's top.
           jumpToLine: (line) => {
-            this.view.scrollToLine(line);
+            if (!this.view.scrollToLine(line)) {
+              this.scroller.scrollTop = 0;
+            }
           },
           follow: (link) => {
             this.view.follow(link);

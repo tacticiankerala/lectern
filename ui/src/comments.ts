@@ -8,7 +8,14 @@
 //   drops the answer. `review-changed` for another note is ignored.
 // - The marks follow the list: each comment the filter shows that is attached to the note gets its
 //   quote highlighted (`comment`, and `comment-focus` for the selected one) and a dot on its first
-//   block. A re-render of the note wipes the dots, so they're put back on every "doc".
+//   block. The highlight goes where core found the quote in the note's text (`textStart` to
+//   `textEnd`): the note's visible text is the same on both sides. When the text there isn't the
+//   quote, it goes on the quote's first place in its blocks instead. A re-render of the note wipes
+//   the dots, so they're put back on every "doc".
+// - The note's visible text is indexed once per render, when first needed (for a highlight, or
+//   the text before a selection), and dropped on every "doc".
+// - A click on a card's quote or header (not its buttons) selects it and goes to its text, as its
+//   place button does; going there flashes the blocks holding the text for a moment.
 // - Hidden comments (the header toggle) keep their cards and badge but mark nothing, and nothing
 //   offers to add one.
 // - Loads and operations go to the backend one at a time, in the order they were asked for, so
@@ -36,7 +43,15 @@ import {
   placeLabel,
   type Filter,
 } from "./comments-model";
-import { blockForLine, buildTextIndex, elementsForLines, locate } from "./comments-text";
+import {
+  blockForLine,
+  buildTextIndex,
+  elementsForLines,
+  locate,
+  normalize,
+  rangeAt,
+  type TextIndex,
+} from "./comments-text";
 import { h, samePath } from "./dom";
 import type { CommentView } from "./generated/CommentView";
 import type { DocChanged } from "./generated/DocChanged";
@@ -81,6 +96,8 @@ export interface CommentsHost {
 const EMPTY = "No comments yet. Select text in the note, or hover a paragraph and press +.";
 /** Where a card scrolled to lands below the pane's top, in pixels. */
 const CARD_GAP = 12;
+/** How long the blocks a card went to stay flashed, in ms: its animation's (comments.css). */
+const FLASH_MS = 600;
 
 const supported = (): boolean => typeof Highlight === "function" && "highlights" in CSS;
 
@@ -92,7 +109,12 @@ export class CommentsController {
   private shown: boolean;
   /** Where each marked comment's text is in the note, by id. */
   private readonly ranges = new Map<number, Range[]>();
+  /** The visible text of the note on screen, built when first needed after its render. */
+  private index: TextIndex | null = null;
   private focused: number | null = null;
+  /** The blocks flashed because a card went to them, and the timer that unflashes them. */
+  private flashed: HTMLElement[] = [];
+  private flashTimer: ReturnType<typeof setTimeout> | undefined;
   /** What's typed in the open reply boxes: by note (`noteKey`), then comment id. */
   private readonly drafts = new Map<string, Map<number, string>>();
   /** The replies being saved, by `draftKey`: their boxes are disabled meanwhile. */
@@ -192,6 +214,7 @@ export class CommentsController {
         this.ensureShown();
       },
       readOnly: () => this.review?.readOnly ?? null,
+      textIndex: () => this.docIndex(),
       perform: (op, path) => this.perform(op, path),
       showing: (path) => this.showing(path),
       ids: () => this.review?.comments.map((c) => c.id) ?? [],
@@ -371,7 +394,9 @@ export class CommentsController {
     this.closeMenu();
     this.adding.dispose();
     this.edit = null;
+    this.unflash();
     this.unmark();
+    this.index = null;
     if (supported()) {
       CSS.highlights.delete("comment");
       CSS.highlights.delete("comment-focus");
@@ -391,6 +416,7 @@ export class CommentsController {
    * note ends what was being added, re-attached or edited on the last.
    */
   private onDoc(): void {
+    this.index = null;
     const path = this.host.docPath();
     const note = path === null ? null : noteKey(path);
     this.adding.docChanged();
@@ -894,7 +920,11 @@ export class CommentsController {
       return;
     }
     const button = target?.closest<HTMLButtonElement>("button[data-action]");
-    const id = Number(button?.closest<HTMLElement>(".comment-card")?.dataset.id);
+    const id = Number(target?.closest<HTMLElement>(".comment-card")?.dataset.id);
+    if (!button && Number.isInteger(id) && target && onCardPlace(target)) {
+      this.select(id, true);
+      return;
+    }
     if (!button || button.disabled || !Number.isInteger(id)) {
       return;
     }
@@ -979,7 +1009,7 @@ export class CommentsController {
 
   /**
    * Selects a comment: its card, and its text as the focused highlight. Its text scrolls into view
-   * when `jump` (the card's place button) or when it's off screen.
+   * when `jump` (the card asked to go there), flashing its blocks, or when it's off screen.
    */
   private select(id: number, jump: boolean): void {
     const c = this.review?.comments.find((x) => x.id === id);
@@ -999,6 +1029,35 @@ export class CommentsController {
     if (c.jumpLine !== null && (jump || !this.onScreen(id))) {
       this.host.jumpToLine(c.jumpLine);
     }
+    if (jump) {
+      this.flash(c);
+    }
+  }
+
+  /** Flashes the blocks holding a comment's highlighted text for a moment; nothing if it has none. */
+  private flash(c: CommentView): void {
+    this.unflash();
+    const doc = this.host.doc();
+    if (!doc || !this.ranges.has(c.id)) {
+      return;
+    }
+    this.flashed = elementsForLines(doc, c.startLine, c.endLine);
+    // Lays out with the class gone first, so flashing the same blocks again starts over.
+    doc.getBoundingClientRect();
+    for (const el of this.flashed) {
+      el.classList.add("lx-flash");
+    }
+    this.flashTimer = setTimeout(() => {
+      this.unflash();
+    }, FLASH_MS);
+  }
+
+  private unflash(): void {
+    clearTimeout(this.flashTimer);
+    for (const el of this.flashed) {
+      el.classList.remove("lx-flash");
+    }
+    this.flashed = [];
   }
 
   private scrollCardIntoView(card: HTMLElement): void {
@@ -1030,10 +1089,7 @@ export class CommentsController {
     if (this.shown && doc && p && path !== null && samePath(p.notePath, path)) {
       const blocks = new Map<HTMLElement, number[]>();
       for (const c of orderComments(p.comments, this.filter).attached) {
-        const els = elementsForLines(doc, c.startLine, c.endLine);
-        const needle =
-          c.state === "moved" && c.currentText !== null ? c.currentText : matchPart(c.quote);
-        const range = els.length > 0 ? locate(buildTextIndex(els), needle) : null;
+        const range = this.rangeOf(c, doc);
         if (range) {
           this.ranges.set(c.id, [range]);
         }
@@ -1047,6 +1103,36 @@ export class CommentsController {
       }
     }
     this.paint();
+  }
+
+  /** The visible text of the note on screen, indexed on first use after its render; or null. */
+  private docIndex(): TextIndex | null {
+    const doc = this.host.doc();
+    if (!doc) {
+      return null;
+    }
+    this.index ??= buildTextIndex([doc]);
+    return this.index;
+  }
+
+  /**
+   * Where a comment's text is in `doc`: its quote, or the passage it became when it moved. At the
+   * place core found it when the note's text holds it there, else its first place in its blocks.
+   */
+  private rangeOf(c: CommentView, doc: HTMLElement): Range | null {
+    const needle =
+      c.state === "moved" && c.currentText !== null ? c.currentText : matchPart(c.quote);
+    if (c.textStart !== null && c.textEnd !== null) {
+      const index = this.docIndex();
+      if (index && index.text.slice(c.textStart, c.textEnd) === normalize(needle)) {
+        const range = rangeAt(index, c.textStart, c.textEnd);
+        if (range) {
+          return range;
+        }
+      }
+    }
+    const els = elementsForLines(doc, c.startLine, c.endLine);
+    return els.length > 0 ? locate(buildTextIndex(els), needle) : null;
   }
 
   /** Takes the dots out of the note and forgets the highlighted ranges. */
@@ -1099,6 +1185,18 @@ interface EditBox extends ReplyBox {
   entry: number;
   /** Its text is being saved. */
   busy: boolean;
+}
+
+/**
+ * Whether a click on `target` in a card is one that goes to its text: on its quote or header, and
+ * not on a button, a link or a text box there.
+ */
+function onCardPlace(target: Element): boolean {
+  return (
+    target.closest(".comment-quote, .comment-head") !== null &&
+    target.closest("button, a, textarea") === null &&
+    document.getSelection()?.isCollapsed !== false
+  );
 }
 
 /** A reply draft's key: its note and comment. */

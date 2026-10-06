@@ -144,7 +144,14 @@ fn ts_unions_follow_the_serde_tags() {
     );
     assert_eq!(
         decl::<NewAnchor>(),
-        r#"type NewAnchor = { startLine: number, endLine: number, quote: string, };"#
+        concat!(
+            "type NewAnchor = { startLine: number, endLine: number, quote: string, \n",
+            "/**\n",
+            " * Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,\n",
+            " * which tell apart a phrase found more than once in its lines; empty for a whole block.\n",
+            " */\n",
+            "prefix: string, };",
+        )
     );
     assert_eq!(
         decl::<ReviewOp>(),
@@ -174,13 +181,20 @@ fn review_ops_are_tagged_by_op() {
             start_line: 4,
             end_line: 6,
             quote: "batches of at most 50".to_owned(),
+            prefix: String::new(),
         },
         text: "Why 50?".to_owned(),
     };
     assert_eq!(
         serde_json::to_value(&add).unwrap(),
-        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50"}, "text": "Why 50?"})
+        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50", "prefix": ""}, "text": "Why 50?"})
     );
+    // An anchor sent without a prefix has an empty one.
+    let without: ReviewOp = serde_json::from_value(
+        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50"}, "text": "Why 50?"}),
+    )
+    .unwrap();
+    assert_eq!(without, add);
 }
 
 #[test]

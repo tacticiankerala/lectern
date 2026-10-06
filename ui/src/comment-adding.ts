@@ -8,17 +8,32 @@
 //   comments do, outside focus mode, and for a review that isn't read-only; the "+" not while the
 //   editor is open, the selection button not either unless it re-attaches.
 // - A comment on a selection is anchored by the lines of the blocks its text starts and ends in,
-//   and that text as core sees it (comments-text.ts); on a block, by the block's lines and text.
+//   that text as core sees it (comments-text.ts), and the text just before it, which tells apart
+//   a phrase found twice in those lines; on a block, by the block's lines and text.
 // - Ctrl+Alt+M with nothing selected comments on the deepest block crossing the top of the view,
 //   else the first below it. A selection scrolled out of view comes back into view first, so the
 //   editor opens by it.
 // - Typed text is never lost but on purpose: while the editor holds text, asking for another
-//   comment brings it back into focus instead, and re-attaching leaves it open.
+//   comment brings it back into focus instead, and re-attaching leaves it open. Text typed for a
+//   note that goes off screen (another note opens, or a save finds it gone) or for comments the
+//   header toggle hides is kept for that note, and comes back in the editor, by its block and in
+//   view, when the note and comments show again, or when another comment is asked for on it.
+//   Text kept while it was being saved waits for the save: saved, it's gone; not, it comes back
+//   first. A note may have several kept: none replaces another, and they come back one at a time.
 // - Re-attach mode turns the selection button into "Attach C<n> here" until it's used, cancelled
 //   or Esc is pressed, or the comment, the note or the comments' visibility goes.
 // - Every operation is for the note it was asked on (see `AddingHost.perform`).
 import { CommentEditor, type EditorAnchor } from "./comment-editor";
-import { SKIP, blockLines, buildTextIndex, leafBlockOf, quoteFromRange } from "./comments-text";
+import {
+  SKIP,
+  blockForLine,
+  blockLines,
+  buildTextIndex,
+  leafBlockOf,
+  quoteFromRange,
+  textBefore,
+  type TextIndex,
+} from "./comments-text";
 import { h } from "./dom";
 import type { NewAnchor } from "./generated/NewAnchor";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -43,6 +58,8 @@ export interface AddingHost {
   show: () => void;
   /** Why the review on screen is read-only, or null when it isn't. */
   readOnly: () => string | null;
+  /** The note's visible text, indexed once per render (comments.ts); null without a note. */
+  textIndex: () => TextIndex | null;
   /** Applies an operation to the note at `path`, after those before it (comments.ts). */
   perform: (op: ReviewOp, path: string) => Promise<Outcome>;
   /** Whether the note at `path` is still the one on screen. */
@@ -114,8 +131,15 @@ export class CommentAdding {
   /** The comment being re-attached, and its note (`noteKey`). */
   private attach: { id: number; note: string } | null = null;
   private readonly editor: CommentEditor;
-  /** The note (`noteKey`) the editor was last opened on. */
+  /** The note (`noteKey`) the editor was last opened on, and what the comment is on. */
   private editorNote: string | null = null;
+  private editorAnchor: NewAnchor | null = null;
+  /** Text typed in the editor before its note went off screen or comments were hidden. */
+  private kept: Draft[] = [];
+  /** The save the open editor is waiting on, kept as it is if the editor goes meanwhile. */
+  private editorSave: Draft | null = null;
+  /** The frame a kept text waits for before it comes back (see `restoreSoon`). */
+  private restoreFrame = 0;
   private readonly selButton: HTMLButtonElement;
   private readonly plus: HTMLButtonElement;
   /** The block the "+" is by. */
@@ -247,13 +271,16 @@ export class CommentAdding {
     }
   }
 
-  /** Comments shown or hidden: hidden, nothing offers to add one. */
+  /** Comments shown or hidden: hidden, nothing offers to add one, and typed text is kept. */
   setVisible(on: boolean): void {
     if (!on) {
+      this.keepTyped();
       this.editor.close();
       this.leaveAttach();
       this.showPlus(null);
       this.hideSelButton();
+    } else {
+      this.restoreSoon();
     }
   }
 
@@ -264,13 +291,20 @@ export class CommentAdding {
     }
   }
 
-  /** The document re-rendered or changed: another note ends the editor and re-attach mode. */
+  /**
+   * The document re-rendered or changed: another note ends the editor, keeping what's typed in it
+   * for its note, and re-attach mode; text kept for the note now on screen comes back.
+   */
   docChanged(): void {
     const path = this.host.docPath();
     const note = path === null ? null : noteKey(path);
     this.showPlus(null);
-    if (this.editorNote !== note) this.editor.close();
+    if (this.editorNote !== note) {
+      this.keepTyped();
+      this.editor.close();
+    }
     if (this.attach !== null && this.attach.note !== note) this.leaveAttach();
+    this.restoreSoon();
   }
 
   /** Takes the buttons, the editor and the listeners away. */
@@ -278,6 +312,7 @@ export class CommentAdding {
     this.disposed = true;
     this.stop();
     cancelAnimationFrame(this.selFrame);
+    cancelAnimationFrame(this.restoreFrame);
     this.editor.dispose();
     this.selButton.remove();
     this.plus.remove();
@@ -337,7 +372,13 @@ export class CommentAdding {
     if (!start || !end || quote === "") {
       return null;
     }
-    return { startLine: start[0], endLine: Math.max(start[0], end[1]), quote };
+    const index = this.host.textIndex();
+    return {
+      startLine: start[0],
+      endLine: Math.max(start[0], end[1]),
+      quote,
+      prefix: index ? textBefore(index, range) : "",
+    };
   }
 
   /** A comment on a whole block: its lines and its text. */
@@ -349,7 +390,7 @@ export class CommentAdding {
     }
     this.ensureShown();
     this.openEditor(
-      { startLine: lines[0], endLine: lines[1], quote },
+      { startLine: lines[0], endLine: lines[1], quote, prefix: "" },
       block.getBoundingClientRect(),
     );
   }
@@ -404,10 +445,11 @@ export class CommentAdding {
   }
 
   /**
-   * The editor on what `anchor` says, by `at`, saving a new comment on the note on screen. An
-   * editor holding text comes back into focus instead, so the text isn't lost.
+   * The editor on what `anchor` says, by `at`, holding `text`, saving a new comment on the note on
+   * screen. An editor holding text comes back into focus instead, and so does text kept for the
+   * note when a new comment is asked for (no `text`), so neither is lost.
    */
-  private openEditor(anchor: NewAnchor, at: EditorAnchor): void {
+  private openEditor(anchor: NewAnchor, at: EditorAnchor, text?: string): void {
     const path = this.host.docPath();
     if (path === null) {
       return;
@@ -418,8 +460,77 @@ export class CommentAdding {
       this.editor.focus();
       return;
     }
+    if (text === undefined && this.restoreKept()) {
+      return;
+    }
     this.editorNote = noteKey(path);
-    this.editor.open({ at, save: (text) => this.saveNew(path, anchor, text) });
+    this.editorAnchor = anchor;
+    this.editorSave = null;
+    this.editor.open({ at, text, save: (typed) => this.saveNew(path, anchor, typed) });
+  }
+
+  /**
+   * Keeps what's typed in the editor for its note, to come back when the note shows again: as the
+   * save it's waiting on, when it is.
+   */
+  private keepTyped(): void {
+    if (!this.editor.hasText || this.editorNote === null || this.editorAnchor === null) {
+      return;
+    }
+    if (this.editor.saving && this.editorSave !== null) {
+      this.kept.push(this.editorSave);
+      return;
+    }
+    this.kept.push({
+      note: this.editorNote,
+      anchor: this.editorAnchor,
+      text: this.editor.text,
+      saving: false,
+    });
+  }
+
+  /**
+   * Brings back the text kept for the note on screen (see `restoreKept`) once the note has been
+   * laid out, a couple of frames on, so its block is where it stays.
+   */
+  private restoreSoon(): void {
+    cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = requestAnimationFrame(() => {
+      this.restoreFrame = requestAnimationFrame(() => {
+        this.restoreFrame = 0;
+        this.restoreKept();
+      });
+    });
+  }
+
+  /**
+   * Opens the editor with the first text kept for the note on screen that isn't being saved, by
+   * its block (or at the top of the view when the block is gone) and brought into view, while
+   * comments may be added there and the editor holds no text. True when it did.
+   */
+  private restoreKept(): boolean {
+    const path = this.host.docPath();
+    const doc = this.host.doc();
+    if (path === null || !doc || !this.offering() || this.editor.hasText) {
+      return false;
+    }
+    const note = noteKey(path);
+    const at = this.kept.findIndex((d) => d.note === note && !d.saving);
+    const kept = this.kept[at];
+    if (!kept) {
+      return false;
+    }
+    this.kept.splice(at, 1);
+    const block = blockForLine(doc, kept.anchor.startLine);
+    const view = this.host.scroller.getBoundingClientRect();
+    const where = block?.getBoundingClientRect() ?? {
+      left: view.left,
+      top: view.top,
+      bottom: view.top,
+    };
+    this.openEditor(kept.anchor, where, kept.text);
+    this.editor.focus();
+    return true;
   }
 
   /**
@@ -427,9 +538,25 @@ export class CommentAdding {
    * new review) selected. False when it wasn't saved, said in a toast.
    */
   private async saveNew(path: string, anchor: NewAnchor, text: string): Promise<boolean> {
+    const save: Draft = { note: noteKey(path), anchor, text, saving: true };
+    this.editorSave = save;
     const outcome = await this.host.perform({ op: "add", anchor, text }, path);
+    if (this.editorSave === save) {
+      this.editorSave = null;
+    }
+    save.saving = false;
     if (outcome === "skipped" && !this.disposed) {
-      this.host.toast("Your comment wasn't saved: the note changed.");
+      this.host.toast("Your comment wasn't saved: the note changed. It's kept as a draft.");
+    }
+    // Kept while it was being saved (its note went off screen, or comments were hidden): saved,
+    // it mustn't come back; not, it comes back now, before any other kept for its note.
+    const at = this.kept.indexOf(save);
+    if (at !== -1) {
+      this.kept.splice(at, 1);
+      if (outcome !== "applied") {
+        this.kept.unshift(save);
+        this.restoreSoon();
+      }
     }
     if (outcome !== "applied") {
       return false;
@@ -607,6 +734,16 @@ export class CommentAdding {
       this.hideSelButton();
     }
   };
+}
+
+/** Text typed in the editor for a new comment, kept while its note or comments are off screen. */
+interface Draft {
+  /** The note (`noteKey`) it's for. */
+  note: string;
+  anchor: NewAnchor;
+  text: string;
+  /** Its save is on its way: it comes back only if that fails. */
+  saving: boolean;
 }
 
 /** A note's path as comments keep things by it: compared as on Windows, as `samePath` does. */

@@ -24,6 +24,8 @@ export interface EditorAnchor {
 
 export interface EditorRequest {
   at: EditorAnchor;
+  /** The text it opens with; none when omitted. */
+  text?: string;
   /** Saves the text; true when it was saved. */
   save: (text: string) => Promise<boolean>;
 }
@@ -82,6 +84,16 @@ export class CommentEditor {
     return this.isOpen && this.area.value.trim() !== "";
   }
 
+  /** The text in it, as typed. */
+  get text(): string {
+    return this.area.value;
+  }
+
+  /** Whether it's open with its text being saved. */
+  get saving(): boolean {
+    return this.isOpen && this.busy;
+  }
+
   /** Brings it back into view and puts the focus in its text box. */
   focus(): void {
     if (this.isOpen) {
@@ -97,14 +109,14 @@ export class CommentEditor {
     }
   }
 
-  /** Opens an empty editor by `request.at`, replacing any open one. */
+  /** Opens the editor by `request.at`, with `request.text` in it, replacing any open one. */
   open(request: EditorRequest): void {
     if (this.isOpen) {
       this.close();
     }
     this.request = request;
     this.busy = false;
-    this.area.value = "";
+    this.area.value = request.text ?? "";
     this.returnFocus = document.activeElement;
     this.el.hidden = false;
     this.sync();

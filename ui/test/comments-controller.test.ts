@@ -28,6 +28,8 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     jumpLine: 1,
     pinnedHeading: null,
     quote: "",
+    textStart: null,
+    textEnd: null,
     currentText: null,
     entries: [],
     ...over,
@@ -185,6 +187,13 @@ function selectBetween(root: Element, from: string, to: string): Range {
   selection?.removeAllRanges();
   selection?.addRange(range);
   return range;
+}
+
+/** Lets `n` animation frames go by. */
+async function frames(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
 }
 
 /** The selection changed: lets the controller's frame run. */
@@ -523,10 +532,175 @@ describe("CommentsController", () => {
     card(panel, 2).querySelector<HTMLButtonElement>("button.comment-place")?.click();
     expect(host.jumpToLine).toHaveBeenCalledWith(5);
     expect(card(panel, 2).classList.contains("selected")).toBe(true);
-    // A detached comment with no surviving heading has nowhere to go.
+    // Without a place to go (none here, though core always gives one now), nothing to press.
     expect(card(panel, 4).querySelector<HTMLButtonElement>("button.comment-place")?.disabled).toBe(
       true,
     );
+  });
+
+  it("a detached comment with no heading left goes to the note's top", async () => {
+    const { fake, panel, host, controller } = setup();
+    const p = review(A);
+    // As core sends one whose headings are all gone: pinned to nothing, its place the first line.
+    const c4 = p.comments[3];
+    if (!c4) throw new Error("no C4");
+    c4.jumpLine = 1;
+    fake.setReview(A, p);
+    await controller.load();
+    const place = card(panel, 4).querySelector<HTMLButtonElement>("button.comment-place");
+    expect(place?.disabled).toBe(false);
+    place?.click();
+    expect(host.jumpToLine).toHaveBeenCalledWith(1);
+    expect(card(panel, 4).classList.contains("selected")).toBe(true);
+  });
+
+  it("a click on a card's quote or header goes to its text and flashes it", async () => {
+    vi.stubGlobal("Highlight", FakeHighlight);
+    vi.stubGlobal("CSS", { highlights: new Map<string, FakeHighlight>() });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { panel, host, controller, docEl } = setup();
+      await controller.load();
+      const paragraph = docEl.querySelector("p");
+      card(panel, 1).querySelector<HTMLElement>(".comment-quote")?.click();
+      expect(host.jumpToLine).toHaveBeenLastCalledWith(3);
+      expect(card(panel, 1).classList.contains("selected")).toBe(true);
+      expect(paragraph?.classList.contains("lx-flash")).toBe(true);
+      vi.advanceTimersByTime(600);
+      expect(paragraph?.classList.contains("lx-flash")).toBe(false);
+
+      card(panel, 2).querySelector<HTMLElement>(".comment-id")?.click();
+      expect(host.jumpToLine).toHaveBeenLastCalledWith(5);
+      expect(card(panel, 2).classList.contains("selected")).toBe(true);
+      expect(docEl.querySelector("li")?.classList.contains("lx-flash")).toBe(true);
+
+      // Its buttons and its thread don't go anywhere.
+      host.jumpToLine.mockClear();
+      action(panel, 1, "reply").click();
+      card(panel, 1).querySelector<HTMLElement>(".comment-body")?.click();
+      expect(host.jumpToLine).not.toHaveBeenCalled();
+      expect(card(panel, 2).classList.contains("selected")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("highlights a quote where core found it in the note's text", async () => {
+    vi.stubGlobal("Highlight", FakeHighlight);
+    vi.stubGlobal("CSS", { highlights: new Map<string, FakeHighlight>() });
+    const gauge = "check the gauge";
+    /** The note: a title, then one paragraph saying `text` twice over. */
+    const note = (text: string): string =>
+      `<h1 data-sourcepos="1:1-1:3">A</h1>\n<p data-sourcepos="3:1-3:${String(text.length)}">${text}</p>`;
+    /** Each painted range: its text, and where it starts in the paragraph. */
+    const painted = (): [string, number][] =>
+      [...(CSS.highlights.get("comment") as unknown as FakeHighlight)].map((r) => [
+        r.toString(),
+        r.startOffset,
+      ]);
+    const on = (textStart: number | null, textEnd: number | null): CommentView =>
+      comment({
+        id: 1,
+        startLine: 3,
+        endLine: 3,
+        jumpLine: 3,
+        quote: gauge,
+        textStart,
+        textEnd,
+        entries: [you("Which gauge?")],
+      });
+
+    // The first of two, in a note unchanged since: the note's text is "A check the gauge now. …".
+    const twice = "check the gauge now. check the gauge later.";
+    const first = setup({ html: note(twice) });
+    first.fake.setReview(A, { ...review(A), comments: [on(2, 17)], openCount: 1 });
+    await first.controller.load();
+    expect(painted()).toEqual([[gauge, 0]]);
+    first.controller.dispose();
+
+    // Edited outside Lectern, so that the text before each one points at the other: core still
+    // found the first, by what follows it, and the highlight goes there too.
+    const swapped =
+      "Today: check the gauge now and log the reading in the book. Before: check the gauge later.";
+    const second = setup({ html: note(swapped) });
+    second.fake.setReview(A, { ...review(A), comments: [on(9, 24)], openCount: 1 });
+    await second.controller.load();
+    expect(painted()).toEqual([[gauge, swapped.indexOf(gauge)]]);
+    second.controller.dispose();
+
+    // Where the note's text there isn't the quote (the two sides disagree), the quote's first place
+    // in its blocks.
+    const third = setup({ html: note(twice) });
+    third.fake.setReview(A, { ...review(A), comments: [on(24, 39)], openCount: 1 });
+    await third.controller.load();
+    expect(painted()).toEqual([[gauge, 0]]);
+    third.fake.setReview(A, { ...review(A), comments: [on(23, 38)], openCount: 1 });
+    await third.controller.load();
+    expect(painted()).toEqual([[gauge, twice.lastIndexOf(gauge)]]);
+  });
+
+  it("indexes the note's text once per render, and only for comments that need it", async () => {
+    vi.stubGlobal("Highlight", FakeHighlight);
+    vi.stubGlobal("CSS", { highlights: new Map<string, FakeHighlight>() });
+    const { fake, controller, docEl, rerender } = setup();
+    const walk = vi.spyOn(document, "createTreeWalker");
+    // The note's text indexed whole: a walk over its text and elements from its root.
+    const builds = (): number =>
+      walk.mock.calls.filter(
+        ([root, show]) =>
+          root === docEl && show === (NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT),
+      ).length;
+    // Without places in the text, nothing is indexed whole.
+    await controller.load();
+    expect(builds()).toBe(0);
+
+    // "Tide sync The client sends at most fifty changes per batch to the hub. Retry …"
+    const p = review(A);
+    const [c1, c2] = p.comments;
+    if (!c1 || !c2) throw new Error("no C1 or C2");
+    Object.assign(c1, { textStart: 21, textEnd: 48 });
+    Object.assign(c2, { textStart: 71, textEnd: 97 });
+    fake.setReview(A, p);
+    await controller.load();
+    expect(builds()).toBe(1);
+    await controller.load();
+    expect(builds()).toBe(1);
+    const ranges = () => [...(CSS.highlights.get("comment") as unknown as FakeHighlight)];
+    expect(ranges().map((r) => r.toString())).toEqual([
+      "sends at most fifty changes",
+      "Retry with a short backoff",
+    ]);
+
+    // A new render is a new text: indexed again, and the highlights are in it.
+    rerender();
+    await controller.load();
+    expect(builds()).toBe(2);
+    expect(ranges().every((r) => r.startContainer.isConnected)).toBe(true);
+    expect(ranges().map((r) => r.toString())).toEqual([
+      "sends at most fifty changes",
+      "Retry with a short backoff",
+    ]);
+  });
+
+  it("a file that isn't a Lectern comments file says so and offers nothing to add", async () => {
+    const { fake, panel, host, controller, docEl } = setup();
+    const reason = "This file isn't a Lectern comments file, so Lectern won't change it.";
+    fake.setReview(A, { ...review(A), readOnly: reason, comments: [], openCount: 0 });
+    await controller.load();
+    const banner = panel.commentsPane.querySelector<HTMLElement>(".comments-banner");
+    expect(banner?.hidden).toBe(false);
+    expect(banner?.textContent).toBe(reason);
+    expect(panel.commentsPane.querySelector(".comment-card")).toBeNull();
+
+    selectBetween(docEl, "sends", "fifty");
+    await selectionSettles();
+    expect(host.scroller.querySelector<HTMLElement>("button.lx-sel-comment")?.hidden).toBe(true);
+    controller.addFromSelection();
+    controller.addAtTop();
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    expect(host.toast).toHaveBeenLastCalledWith(reason);
+    docEl.querySelector("p")?.dispatchEvent(new MouseEvent("pointermove", { bubbles: true }));
+    expect(host.scroller.querySelector<HTMLElement>("button.lx-block-plus")?.hidden).toBe(true);
   });
 
   it("op failure toasts and keeps the reply draft", async () => {
@@ -823,7 +997,13 @@ describe("CommentsController", () => {
     await vi.waitFor(() => {
       expect(reviewOp).toHaveBeenCalledWith(A, {
         op: "add",
-        anchor: { startLine: 3, endLine: 5, quote: "sends at most fifty changes per batch. Retry" },
+        anchor: {
+          startLine: 3,
+          endLine: 5,
+          quote: "sends at most fifty changes per batch. Retry",
+          // The text before it, which tells it apart from the same words elsewhere in its lines.
+          prefix: "Tide sync The client ",
+        },
         text: "Why fifty?",
       });
     });
@@ -873,6 +1053,7 @@ describe("CommentsController", () => {
           startLine: 3,
           endLine: 3,
           quote: "The client sends at most fifty changes per batch.",
+          prefix: "Tide sync ",
         },
         text: "Per batch, or per minute?",
       });
@@ -909,6 +1090,8 @@ describe("CommentsController", () => {
           startLine: 3,
           endLine: 3,
           quote: "The client sends at most fifty changes per batch to the hub.",
+          // A whole block: nothing before it to tell apart.
+          prefix: "",
         },
         text: "Is fifty enough?",
       });
@@ -950,7 +1133,7 @@ describe("CommentsController", () => {
     await vi.waitFor(() => {
       expect(reviewOp).toHaveBeenLastCalledWith(A, {
         op: "add",
-        anchor: { startLine: 5, endLine: 5, quote: "Retry with a short backoff" },
+        anchor: { startLine: 5, endLine: 5, quote: "Retry with a short backoff", prefix: "" },
         text: "How short?",
       });
     });
@@ -974,6 +1157,253 @@ describe("CommentsController", () => {
     controller.addAtTop();
     expect(area.value).toBe("Half a thought");
   });
+
+  it("a half-written comment waits for its note and comes back with it", async () => {
+    const { fake, state, controller, rerender } = setup();
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Half a thought";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+
+    // Another note opens: the editor goes, its text kept for its own note only.
+    state.path = B;
+    rerender();
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    await frames(3);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+
+    // Back on the note, a couple of frames on, it's open again with the text, by its block.
+    state.path = A;
+    rerender();
+    await frames(3);
+    expect(editorText().value).toBe("Half a thought");
+    expect(document.activeElement).toBe(editorText());
+    ctrlEnter(editorText());
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledWith(A, {
+        op: "add",
+        anchor: {
+          startLine: 1,
+          endLine: 1,
+          quote: "Tide sync",
+          prefix: "",
+        },
+        text: "Half a thought",
+      });
+    });
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    });
+    // Saved, it's gone for good.
+    rerender();
+    await frames(3);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+  });
+
+  it("a comment whose save found its note gone is kept for the note", async () => {
+    const { fake, host, state, controller, rerender } = setup();
+    await controller.load();
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Lost in transit?";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    // The save waits its turn behind a load on its way; meanwhile another note opens.
+    const gate = deferred();
+    const real = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path) => {
+      await gate.promise;
+      return real(path);
+    });
+    void controller.load();
+    ctrlEnter(area);
+    state.path = B;
+    rerender();
+    gate.resolve();
+    await vi.waitFor(() => {
+      expect(host.toast).toHaveBeenCalledWith(
+        "Your comment wasn't saved: the note changed. It's kept as a draft.",
+      );
+    });
+    state.path = A;
+    rerender();
+    await frames(3);
+    expect(editorText().value).toBe("Lost in transit?");
+  });
+
+  it("a comment saving while comments hide and show isn't brought back to save again", async () => {
+    const { fake, panel, state, controller } = setup();
+    await controller.load();
+    const gate = deferred();
+    const real = fake.reviewOp.bind(fake);
+    const reviewOp = vi.spyOn(fake, "reviewOp").mockImplementationOnce(async (path, op) => {
+      await gate.promise;
+      return real(path, op);
+    });
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Saved once";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    await vi.waitFor(() => {
+      expect(reviewOp).toHaveBeenCalledTimes(1);
+    });
+    // Hidden and shown again while it saves: the editor waits for the save.
+    state.visible = false;
+    controller.setVisible(false);
+    state.visible = true;
+    controller.setVisible(true);
+    await frames(3);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    gate.resolve();
+    await vi.waitFor(() => {
+      expect(card(panel, 5).textContent).toContain("Saved once");
+    });
+    await frames(3);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    expect(reviewOp).toHaveBeenCalledTimes(1);
+  });
+
+  it("a comment whose save fails while comments are hidden comes back", async () => {
+    const { fake, host, state, controller } = setup();
+    await controller.load();
+    const gate = deferred();
+    vi.spyOn(fake, "reviewOp").mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error("Couldn't save the comment: the file kept changing.");
+    });
+    controller.addAtTop();
+    const area = editorText();
+    area.value = "Try again";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    state.visible = false;
+    controller.setVisible(false);
+    state.visible = true;
+    controller.setVisible(true);
+    await frames(3);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    gate.resolve();
+    await vi.waitFor(() => {
+      expect(host.toast).toHaveBeenCalled();
+    });
+    await frames(3);
+    expect(editorText().value).toBe("Try again");
+  });
+
+  it("a failed save comes back first, and another draft kept meanwhile isn't lost", async () => {
+    const { fake, host, state, controller } = setup();
+    await controller.load();
+    const gate = deferred();
+    vi.spyOn(fake, "reviewOp").mockImplementationOnce(async () => {
+      await gate.promise;
+      throw new Error("Couldn't save the comment: the file kept changing.");
+    });
+    const type = (text: string): HTMLTextAreaElement => {
+      const area = editorText();
+      area.value = text;
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      return area;
+    };
+    const hideAndShow = async (show: boolean): Promise<void> => {
+      state.visible = false;
+      controller.setVisible(false);
+      if (show) {
+        state.visible = true;
+        controller.setVisible(true);
+      }
+      await frames(3);
+    };
+    controller.addAtTop();
+    ctrlEnter(type("First thought"));
+    // Hidden and shown while it saves: a second comment, typed and hidden in turn.
+    await hideAndShow(true);
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    controller.addAtTop();
+    expect(editorText().value).toBe("");
+    type("Second thought");
+    await hideAndShow(false);
+
+    // The first one's save fails: shown again, it's the one back in the editor.
+    gate.resolve();
+    await vi.waitFor(() => {
+      expect(host.toast).toHaveBeenCalledWith(expect.stringContaining("the file kept changing"));
+    });
+    state.visible = true;
+    controller.setVisible(true);
+    await frames(3);
+    expect(editorText().value).toBe("First thought");
+    // Put away, the second is still kept, and comes back when a comment is asked for.
+    editorText().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+    controller.addAtTop();
+    expect(editorText().value).toBe("Second thought");
+  });
+
+  it("takes the text before a selection from the note's index, built once per render", async () => {
+    const paragraphs = Array.from(
+      { length: 1200 },
+      (_, i) => `Reading ${String(i)} came from station ${String(i % 7)}.`,
+    );
+    const html = paragraphs
+      .map(
+        (t, i) =>
+          `<p data-sourcepos="${String(2 * i + 1)}:1-${String(2 * i + 1)}:${String(t.length)}">${t}</p>`,
+      )
+      .join("\n");
+    const { fake, controller, docEl, rerender } = setup({ html });
+    await controller.load();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    const walk = vi.spyOn(document, "createTreeWalker");
+    // The note's text indexed whole: a walk over its text and elements from its root.
+    const builds = (): number =>
+      walk.mock.calls.filter(
+        ([root, show]) =>
+          root === docEl && show === (NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT),
+      ).length;
+    const text = paragraphs.join(" ");
+    /** Selects "station" in paragraph `i`, comments on it, and returns the prefix it was sent with. */
+    const commentOn = async (i: number): Promise<string> => {
+      const node = docEl.querySelectorAll("p")[i]?.firstChild;
+      if (!(node instanceof Text)) throw new Error(`no paragraph ${String(i)}`);
+      const range = document.createRange();
+      const at = node.data.indexOf("station");
+      range.setStart(node, at);
+      range.setEnd(node, at + "station".length);
+      document.getSelection()?.removeAllRanges();
+      document.getSelection()?.addRange(range);
+      expect(controller.addFromSelection()).toBe(true);
+      const area = editorText();
+      area.value = `About ${String(i)}`;
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      const calls = reviewOp.mock.calls.length;
+      ctrlEnter(area);
+      await vi.waitFor(() => {
+        expect(reviewOp.mock.calls.length).toBe(calls + 1);
+      });
+      const op = reviewOp.mock.calls[calls]?.[1];
+      return op?.op === "add" ? op.anchor.prefix : "";
+    };
+    /** The 32 characters of the note's text before "station" in paragraph `i`. */
+    const expected = (i: number): string => {
+      const start = paragraphs.slice(0, i).reduce((n, t) => n + t.length + 1, 0);
+      const at = start + (paragraphs[i] ?? "").indexOf("station");
+      return text.slice(at - 32, at);
+    };
+
+    expect(await commentOn(1000)).toBe(expected(1000));
+    expect(expected(1000)).toBe("ation 5. Reading 1000 came from ");
+    expect(await commentOn(10)).toBe(expected(10));
+    expect(builds()).toBe(1);
+    // A new render: indexed again.
+    rerender();
+    expect(await commentOn(999)).toBe(expected(999));
+    expect(builds()).toBe(2);
+    // jsdom's selector matching makes a big note slow to mark; the browser isn't.
+  }, 20_000);
 
   it("reattach mode sends a reattach op", async () => {
     const { fake, panel, host, controller, docEl } = setup();
@@ -1008,7 +1438,12 @@ describe("CommentsController", () => {
       expect(reviewOp).toHaveBeenCalledWith(A, {
         op: "reattach",
         id: 4,
-        anchor: { startLine: 6, endLine: 6, quote: "Log every failure" },
+        anchor: {
+          startLine: 6,
+          endLine: 6,
+          quote: "Log every failure",
+          prefix: "hub. Retry with a short backoff ",
+        },
       });
     });
     await vi.waitFor(() => {

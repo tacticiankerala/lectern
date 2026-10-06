@@ -20,6 +20,10 @@ pub struct NewAnchor {
     pub start_line: u32,
     pub end_line: u32,
     pub quote: String,
+    /// Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,
+    /// which tell apart a phrase found more than once in its lines; empty for a whole block.
+    #[serde(default)]
+    pub prefix: String,
 }
 
 /// A status the reader can set.

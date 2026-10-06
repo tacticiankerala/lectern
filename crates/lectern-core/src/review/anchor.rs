@@ -5,6 +5,7 @@
 //! that's gone is looked for word by word, and a passage holding most of its words is taken as
 //! the quote reworded. Failing that the comment is detached, its quote and thread kept.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -102,18 +103,19 @@ pub struct AnchorParts {
 /// Anchors a new comment, or a reattached one, to the text the UI sent.
 ///
 /// The whole selection is found in the note's text, preferring an occurrence within the given
-/// lines, and gives the lines, prefix and suffix; only its first [`QUOTE_CAP`] characters are
-/// stored as the quote. A selection that isn't there whole is looked for by that excerpt. If
-/// neither is there (the UI and core disagree, or the note changed under the reader), the given
-/// lines are kept with an empty fingerprint, so they are never trusted.
+/// lines and, among those, the one after the text the UI saw before the selection; it gives the
+/// lines, prefix and suffix. Only its first [`QUOTE_CAP`] characters are stored as the quote. A
+/// selection that isn't there whole is looked for by that excerpt. If neither is there (the UI
+/// and core disagree, or the note changed under the reader), the given lines are kept with an
+/// empty fingerprint, so they are never trusted.
 pub fn make_anchor(text: &TextMap, a: &NewAnchor, fp: &str, now: &str) -> AnchorParts {
     let selection = normalize(&a.quote);
     let quote = cap_quote(&selection);
     let excerpt = needle(&quote);
     let (start, end) = (a.start_line, a.end_line.max(a.start_line));
-    let found = occurrence_near(text, &selection, start, end).or_else(|| {
+    let found = occurrence_near(text, &selection, &a.prefix, start, end).or_else(|| {
         (excerpt != selection)
-            .then(|| occurrence_near(text, &excerpt, start, end))
+            .then(|| occurrence_near(text, &excerpt, &a.prefix, start, end))
             .flatten()
     });
     let meta = |prefix, suffix, fp: &str| AnchorMeta {
@@ -149,9 +151,17 @@ pub fn make_anchor(text: &TextMap, a: &NewAnchor, fp: &str, now: &str) -> Anchor
 }
 
 /// The occurrence of `needle` to anchor on: one whose lines lie within `start..=end`, else one
-/// overlapping them, else any; of those, the one starting nearest `start`, then the earliest.
-fn occurrence_near(text: &TextMap, needle: &str, start: u32, end: u32) -> Option<(usize, usize)> {
-    occurrences(text.text(), needle)
+/// overlapping them, else any; of those, the one whose text before it agrees most with `prefix`
+/// (as [`best_by_context`] scores it), then the one starting nearest `start`, then the earliest.
+fn occurrence_near(
+    text: &TextMap,
+    needle: &str,
+    prefix: &str,
+    start: u32,
+    end: u32,
+) -> Option<(usize, usize)> {
+    let t = text.text();
+    occurrences(t, needle)
         .map(|s| {
             let span = (s, s + needle.len());
             let (first, last) = text.lines_of(span.0, span.1);
@@ -162,7 +172,8 @@ fn occurrence_near(text: &TextMap, needle: &str, start: u32, end: u32) -> Option
             } else {
                 2
             };
-            ((fit, first.abs_diff(start)), span)
+            let agreement = common_suffix(&t[..s], prefix);
+            ((fit, Reverse(agreement), first.abs_diff(start)), span)
         })
         .min_by_key(|&(key, _)| key)
         .map(|(_, span)| span)
@@ -190,6 +201,16 @@ fn occurrences<'h>(haystack: &'h str, needle: &'h str) -> impl Iterator<Item = u
         };
         Some(at)
     })
+}
+
+/// Where the quote of a comment found at its stored place (the note unchanged since it was
+/// anchored, so [`resolve_all`] didn't look for it) is in the text: its occurrence in the stored
+/// lines, told apart from others there by the stored prefix, as when it was anchored. `None` when
+/// the quote isn't in the text.
+pub fn stored_span(c: &Comment, text: &TextMap) -> Option<(usize, usize)> {
+    let prefix = c.anchor.as_ref().map_or("", |a| a.prefix.as_str());
+    let end = c.end_line.max(c.start_line);
+    occurrence_near(text, &needle(&c.quote), prefix, c.start_line, end)
 }
 
 /// Finds every comment's quote in the note: one result per comment, in file order.

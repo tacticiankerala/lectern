@@ -378,6 +378,17 @@ impl AppState {
         }
     }
 
+    /// The user's library roots holding `path`: more than one when roots nest, none for a file
+    /// outside them all. The ad-hoc root of a file opened from elsewhere isn't one.
+    pub(super) fn user_roots_holding(&self, path: &Path) -> Vec<PathBuf> {
+        lock(&self.library)
+            .roots
+            .iter()
+            .filter(|r| !r.adhoc && is_under(path, &r.path))
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
     pub(super) fn watch_user_roots(&self) {
         let roots = lock(&self.library)
             .user_roots()

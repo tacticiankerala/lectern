@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::anchor::{AnchorState, Resolved};
+use super::anchor::{stored_span, AnchorState, Resolved};
 use super::text::TextMap;
 use super::{raw_section_id, ClaudeKind, Comment, CommentStatus, Entry, EntryAuthor, Item, Review};
 
@@ -36,11 +36,17 @@ pub struct CommentView {
     pub start_line: u32,
     pub end_line: u32,
     pub heading_path: Vec<String>,
-    /// The line to go to: the quote's, or when detached the pinned heading's.
+    /// The line to go to: the quote's, or when detached the pinned heading's, or with no heading
+    /// left, the note's top: its first line with text (after any frontmatter), else line 1.
     pub jump_line: Option<u32>,
     /// When detached: the deepest heading of the comment's path still in the note.
     pub pinned_heading: Option<String>,
     pub quote: String,
+    /// Where the quote (or the passage it became, when it moved) is in the note's visible text,
+    /// the text the UI builds from the page too: from `text_start` up to `text_end`, counted in
+    /// UTF-16 code units, as the UI's strings count. `None` when it's detached, or wasn't found.
+    pub text_start: Option<u32>,
+    pub text_end: Option<u32>,
     /// The passage the quote became, when it moved.
     pub current_text: Option<String>,
     pub entries: Vec<EntryView>,
@@ -104,7 +110,7 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
         note_wsl,
         sidecar_wsl,
     } = input;
-    let comments = review
+    let (mut comments, spans): (Vec<CommentView>, Vec<Option<(usize, usize)>>) = review
         .into_iter()
         .flat_map(Review::comments)
         .enumerate()
@@ -112,9 +118,22 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
             let found = resolved.get(i).filter(|r| r.id == c.id);
             comment_view(c, found, text, render)
         })
-        .collect();
+        .unzip();
+    if let Some(text) = text {
+        let bytes: Vec<usize> = spans.iter().flatten().flat_map(|&(s, e)| [s, e]).collect();
+        let mut units = utf16_offsets(text.text(), &bytes).into_iter();
+        for (view, span) in comments.iter_mut().zip(&spans) {
+            if span.is_some() {
+                view.text_start = units.next();
+                view.text_end = units.next();
+            }
+        }
+    }
+    // A file without a sidecar's frontmatter isn't one Lectern made (store.rs shows it read-only):
+    // its `## C…` headings are the owner's own, not comments that couldn't be read.
     let unreadable = review
         .into_iter()
+        .filter(|r| !r.note.is_empty())
         .flat_map(|r| &r.items)
         .filter_map(|item| match item {
             Item::Raw(section) if raw_section_id(section).is_some() => Some(UnreadableView {
@@ -137,13 +156,15 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
 }
 
 /// A comment at the place `resolved` found for it: there when its quote was found, otherwise at
-/// its stored place, pinned to a heading when one survives.
+/// its stored place, pinned to a heading when one survives, or else to the note's top (its first
+/// block, or line 1 without the note's text or any block). With it, the byte range of its quote
+/// (or of the passage it became) in `text`, when that's known.
 fn comment_view(
     c: &Comment,
     resolved: Option<&Resolved>,
     text: Option<&TextMap>,
     render: &dyn Fn(&str) -> String,
-) -> CommentView {
+) -> (CommentView, Option<(usize, usize)>) {
     let mut view = CommentView {
         id: c.id,
         status: c.effective_status(),
@@ -151,12 +172,18 @@ fn comment_view(
         start_line: c.start_line,
         end_line: c.end_line,
         heading_path: c.heading_path.clone(),
-        jump_line: None,
+        jump_line: Some(
+            text.and_then(|t| t.blocks().iter().map(|b| b.start_line).min())
+                .unwrap_or(1),
+        ),
         pinned_heading: None,
         quote: c.quote.clone(),
+        text_start: None,
+        text_end: None,
         current_text: None,
         entries: c.entries.iter().map(|e| entry_view(e, render)).collect(),
     };
+    let mut span = None;
     match resolved {
         Some(r) if r.state == AnchorState::Detached => {
             if let Some((heading, line)) = &r.pinned_heading {
@@ -170,13 +197,38 @@ fn comment_view(
             view.end_line = r.end_line;
             if let Some(text) = text {
                 view.heading_path = text.heading_path_at(r.start_line);
+                // Left where it was, the note unchanged, it wasn't looked for: look now.
+                span = r.span.or_else(|| stored_span(c, text));
             }
             view.jump_line = Some(r.start_line);
             view.current_text = r.current_text.clone();
         }
         None => {}
     }
-    view
+    (view, span)
+}
+
+/// The UTF-16 code-unit offsets into `text` of the byte offsets `at`, each on a character
+/// boundary, in one pass over the text.
+fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
+    let unit = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    if text.is_ascii() {
+        return at.iter().map(|&b| unit(b)).collect();
+    }
+    let mut order: Vec<usize> = (0..at.len()).collect();
+    order.sort_unstable_by_key(|&i| at[i]);
+    let mut out = vec![0; at.len()];
+    let (mut byte, mut units) = (0, 0);
+    let mut chars = text.chars();
+    for i in order {
+        while byte < at[i] {
+            let Some(ch) = chars.next() else { break };
+            byte += ch.len_utf8();
+            units += ch.len_utf16();
+        }
+        out[i] = unit(units);
+    }
+    out
 }
 
 fn entry_view(e: &Entry, render: &dyn Fn(&str) -> String) -> EntryView {

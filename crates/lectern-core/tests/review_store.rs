@@ -37,6 +37,7 @@ fn add_saying(text: &str) -> ReviewOp {
             start_line: 5,
             end_line: 5,
             quote: "batches of at most 50".into(),
+            prefix: String::new(),
         },
         text: text.into(),
     }
@@ -139,6 +140,36 @@ fn oversized_non_utf8_and_foreign_sidecars_are_read_only_and_never_written() {
         assert!(fs::read(&sidecar).unwrap() == bytes, "{message}: rewritten");
         assert_eq!(fs::read(&note).unwrap(), note_before, "{message}");
         assert!(!temp_file(&sidecar).exists(), "{message}");
+    }
+}
+
+#[test]
+fn a_file_that_is_not_a_lectern_sidecar_is_read_only_and_never_written() {
+    const NOT_OURS: &str = "This file isn't a Lectern comments file, so Lectern won't change it.";
+    let checklist = "# Code review checklist\n\n## Correctness\n\n- Empty input is handled.\n\n## C2 rollout\n\n- Staged behind a flag.\n";
+    let valid = format::serialize(&format::new_review("code.md"));
+    // Cut off in the middle of its frontmatter, as an outside write caught halfway leaves it.
+    let truncated = &valid[..20];
+    for (what, bytes) in [
+        ("an ordinary note", checklist.as_bytes()),
+        ("an empty file", b"".as_slice()),
+        ("a truncated sidecar", truncated.as_bytes()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("code.md");
+        fs::write(&note, NOTE).unwrap();
+        let sidecar = sidecar_path(&note);
+        assert_eq!(sidecar.file_name().unwrap(), "code.review.md");
+        fs::write(&sidecar, bytes).unwrap();
+
+        let loaded = store::load(&sidecar, "code.md").unwrap();
+        assert_eq!(loaded.read_only.as_deref(), Some(NOT_OURS), "{what}");
+
+        let err = store::apply_op(&sidecar, "code.md", NOTE, &add_op(), NOW).unwrap_err();
+        assert!(matches!(err, StoreError::ReadOnly(_)), "{what}: {err:?}");
+        assert_eq!(err.to_string(), NOT_OURS, "{what}");
+        assert_eq!(fs::read(&sidecar).unwrap(), bytes, "{what}: rewritten");
+        assert!(!temp_file(&sidecar).exists(), "{what}");
     }
 }
 

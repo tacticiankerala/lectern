@@ -26,6 +26,8 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     jumpLine: 1,
     pinnedHeading: null,
     quote: "",
+    textStart: null,
+    textEnd: null,
     currentText: null,
     entries: [],
     ...over,

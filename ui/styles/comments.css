@@ -280,6 +280,12 @@
   overflow-wrap: anywhere;
 }
 
+/* A click on a card's quote or header goes to its text (comments.ts). */
+.comment-card[data-id] .comment-quote,
+.comment-card[data-id] .comment-head {
+  cursor: pointer;
+}
+
 .comment-moved {
   margin: 0 0 6px;
 }
@@ -489,6 +495,18 @@
 
 ::highlight(comment-focus) {
   background: var(--comment-focus);
+}
+
+/* The blocks a card went to, for a moment: the focus colour fading back to the block's own
+   background (FLASH_MS, comments.ts). */
+.doc .lx-flash {
+  animation: lx-comment-flash 600ms ease-out;
+}
+
+@keyframes lx-comment-flash {
+  from {
+    background-color: var(--comment-focus);
+  }
 }
 
 .doc .lx-has-comment {

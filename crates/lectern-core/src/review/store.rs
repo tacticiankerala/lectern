@@ -30,6 +30,7 @@ const RENAME_PAUSE: Duration = Duration::from_millis(50);
 /// Lectern runs one instance, so no other Lectern process writes the sidecar.
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
+const NOT_A_SIDECAR: &str = "This file isn't a Lectern comments file, so Lectern won't change it.";
 const OVER_READ_ONLY_CAP: &str = "The comments file is over 2 MB, so Lectern shows it read-only.";
 const NOT_UTF8: &str = "The comments file isn't valid UTF-8, so Lectern won't change it.";
 const OVER_HARD_CAP: &str = "The comments file is over 16 MB, so Lectern won't open it.";
@@ -47,9 +48,10 @@ pub struct Loaded {
 /// Reads the sidecar at `sidecar` of the note whose file name is `note_name`.
 ///
 /// No sidecar gives neither a review nor a message. One larger than [`HARD_READ_CAP`] isn't read:
-/// no review, and a message. One larger than [`MAX_SIDECAR_BYTES`], not UTF-8 (it's read
-/// lossily), or whose `note:` names another note is read, with a message saying why Lectern won't
-/// change it.
+/// no review, and a message. One without a sidecar's frontmatter (an ordinary note named like a
+/// sidecar, or an empty or truncated file), larger than [`MAX_SIDECAR_BYTES`], not UTF-8 (it's
+/// read lossily), or whose `note:` names another note is read, with a message saying why Lectern
+/// won't change it.
 pub fn load(sidecar: &Path, note_name: &str) -> io::Result<Loaded> {
     Ok(match read_capped(sidecar, HARD_READ_CAP)? {
         Contents::Missing => Loaded {
@@ -95,7 +97,8 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-/// Applies `op` to the sidecar at `sidecar` and saves it, creating the sidecar if there's none.
+/// Applies `op` to the sidecar at `sidecar` and saves it, creating the sidecar if there's none: a
+/// file that is already there is changed only when [`load`] would show it writable.
 /// `source` is the note's text and `now` the time to record on a new comment.
 ///
 /// The sidecar is read, `op` applied, and the result written to a temporary file that replaces
@@ -217,8 +220,9 @@ fn read_capped(path: &Path, cap: u64) -> io::Result<Contents> {
 }
 
 /// Parses a sidecar, lossily if it isn't UTF-8, and says why Lectern mustn't change it, if it
-/// mustn't: it's over [`MAX_SIDECAR_BYTES`], isn't UTF-8, or names a note other than `note_name`
-/// (ignoring case, as Windows file names do).
+/// mustn't: it has no sidecar frontmatter (`lectern-review:` and `note:`), so it isn't one Lectern
+/// made; it's over [`MAX_SIDECAR_BYTES`]; it isn't UTF-8; or it names a note other than
+/// `note_name` (ignoring case, as Windows file names do).
 fn read_review(bytes: &[u8], note_name: &str) -> (Review, Option<String>) {
     let (text, utf8) = match std::str::from_utf8(bytes) {
         Ok(text) => (Cow::Borrowed(text), true),
@@ -226,11 +230,13 @@ fn read_review(bytes: &[u8], note_name: &str) -> (Review, Option<String>) {
     };
     let review = parse(&text);
     let over = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SIDECAR_BYTES;
-    let reason = if over {
+    let reason = if review.note.is_empty() {
+        Some(NOT_A_SIDECAR.to_owned())
+    } else if over {
         Some(OVER_READ_ONLY_CAP.to_owned())
     } else if !utf8 {
         Some(NOT_UTF8.to_owned())
-    } else if !review.note.is_empty() && review.note.to_lowercase() != note_name.to_lowercase() {
+    } else if review.note.to_lowercase() != note_name.to_lowercase() {
         Some(format!(
             "This comments file belongs to another note ({}).",
             review.note
@@ -324,6 +330,7 @@ mod tests {
                 start_line: 5,
                 end_line: 5,
                 quote: "batches of at most 50".into(),
+                prefix: String::new(),
             },
             text: "Why 50?".into(),
         };

@@ -16,13 +16,20 @@ status: CommentStatus, state: AnchorState,
  */
 startLine: number, endLine: number, headingPath: Array<string>, 
 /**
- * The line to go to: the quote's, or when detached the pinned heading's.
+ * The line to go to: the quote's, or when detached the pinned heading's, or with no heading
+ * left, the note's top: its first line with text (after any frontmatter), else line 1.
  */
 jumpLine: number | null, 
 /**
  * When detached: the deepest heading of the comment's path still in the note.
  */
 pinnedHeading: string | null, quote: string, 
+/**
+ * Where the quote (or the passage it became, when it moved) is in the note's visible text,
+ * the text the UI builds from the page too: from `text_start` up to `text_end`, counted in
+ * UTF-16 code units, as the UI's strings count. `None` when it's detached, or wasn't found.
+ */
+textStart: number | null, textEnd: number | null, 
 /**
  * The passage the quote became, when it moved.
  */
