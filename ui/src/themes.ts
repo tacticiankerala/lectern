@@ -41,6 +41,8 @@ export const THEMES: ThemeDef[] = [
 export const FONT_SIZE = { min: 12, max: 32, default: 18 } as const;
 export const LINE_HEIGHT = { min: 1.3, max: 2, step: 0.05 } as const;
 export const MEASURE = { min: 60, max: 160, default: 100 } as const;
+/** The library's, the outline's and the breadcrumb chooser's text, in pixels. */
+export const SIDEBAR_FONT_SIZE = { min: 11, max: 20, default: 13 } as const;
 
 /** Fonts that ship with Lectern (styles/fonts.css). */
 const BUNDLED_FONTS = new Set([
@@ -161,12 +163,23 @@ function rememberFonts(s: Settings): void {
   }
 }
 
+/** `value` a step of `delta` on, within `range`; a delta of 0 goes back to its default. */
+function step(
+  value: number,
+  delta: number,
+  range: { min: number; max: number; default: number },
+): number {
+  return delta === 0 ? range.default : Math.min(range.max, Math.max(range.min, value + delta));
+}
+
 /** One size step up or down, within 12–32; a delta of 0 resets to 18. */
 export function bumpFontSize(s: Settings, delta: number): SettingsPatch {
-  if (delta === 0) {
-    return { fontSize: FONT_SIZE.default };
-  }
-  return { fontSize: Math.min(FONT_SIZE.max, Math.max(FONT_SIZE.min, s.fontSize + delta)) };
+  return { fontSize: step(s.fontSize, delta, FONT_SIZE) };
+}
+
+/** One sidebar text size step up or down, within 11–20; a delta of 0 resets to 13. */
+export function bumpSidebarFontSize(s: Settings, delta: number): SettingsPatch {
+  return { sidebarFontSize: step(s.sidebarFontSize, delta, SIDEBAR_FONT_SIZE) };
 }
 
 /** Switches to the other theme of the pair, setting the mode explicitly. */

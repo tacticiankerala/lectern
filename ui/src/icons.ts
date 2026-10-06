@@ -5,6 +5,7 @@ import { h } from "./dom";
 export const ICONS = {
   back: '<path d="M10 3.5 5.5 8l4.5 4.5"/>',
   forward: '<path d="M6 3.5 10.5 8 6 12.5"/>',
+  library: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M6 3v10"/>',
   outline: '<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><path d="M10 3v10"/>',
   more: '<circle cx="3.5" cy="8" r="0.6"/><circle cx="8" cy="8" r="0.6"/><circle cx="12.5" cy="8" r="0.6"/>',
 };

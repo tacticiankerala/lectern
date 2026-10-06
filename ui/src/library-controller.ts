@@ -21,6 +21,7 @@ export class LibraryController {
       open: (path) => void app.open(path, { push: true }),
       retry: (path) => void this.retryRoot(path),
       contextMenu: (e, path, isRoot) => void app.actions.contextMenu(e, path, isRoot),
+      addFolder: () => void app.addFolder(),
     });
     app.on("library", () => {
       this.sidebar.setLibrary(app.state.library);

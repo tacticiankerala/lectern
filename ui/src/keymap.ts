@@ -15,6 +15,10 @@ export type Action =
   | "font-up"
   | "font-down"
   | "font-reset"
+  | "sidebar-font-up"
+  | "sidebar-font-down"
+  | "sidebar-font-reset"
+  | "breadcrumbs"
   | "toggle-theme"
   | "toggle-library"
   | "toggle-outline"
@@ -67,19 +71,28 @@ export function actionFor(e: KeyboardEvent): Action | null {
       }
       return null;
   }
-  if (!e.ctrlKey || e.altKey) {
+  if (!e.ctrlKey) {
     return null;
   }
-  // Ctrl with "+" or "=" (with or without Shift, and the numpad's), "-", or "0".
+  // Ctrl with "+" or "=" (with or without Shift, and the numpad's), "-", or "0": the text size,
+  // and with Alt too, the sidebars' text size.
   switch (e.key) {
     case "=":
     case "+":
-      return "font-up";
+      return e.altKey ? "sidebar-font-up" : "font-up";
     case "-":
     case "_":
-      return "font-down";
+      return e.altKey ? "sidebar-font-down" : "font-down";
     case "0":
-      return e.shiftKey ? null : "font-reset";
+      if (e.shiftKey) return null;
+      return e.altKey ? "sidebar-font-reset" : "font-reset";
+  }
+  if (e.altKey) {
+    return null;
+  }
+  // Ctrl+Shift+. (VS Code's "focus breadcrumbs"), by the key rather than what Shift makes of it.
+  if (e.shiftKey && (e.code === "Period" || e.key === ">")) {
+    return "breadcrumbs";
   }
   const pair = CTRL[e.key.toLowerCase()];
   return pair ? pair[e.shiftKey ? 1 : 0] : null;

@@ -58,6 +58,7 @@ fn settings_defaults_match_spec() {
     assert!(matches!(s.editor, EditorPref::Auto));
     assert!(s.auto_update);
     assert!(s.show_status_badges);
+    assert_eq!(s.sidebar_font_size, 13);
 }
 
 #[test]
@@ -86,6 +87,32 @@ fn settings_clamped() {
         ..Default::default()
     });
     assert!(matches!(s.measure, Measure::Chars(160)));
+}
+
+#[test]
+fn sidebar_font_size_range_is_11_to_20() {
+    for (saved, clamped) in [
+        (0, 11),
+        (10, 11),
+        (11, 11),
+        (16, 16),
+        (20, 20),
+        (21, 20),
+        (255, 20),
+    ] {
+        let mut s = Settings {
+            sidebar_font_size: saved,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.sidebar_font_size, clamped, "{saved} clamps to {clamped}");
+    }
+    let mut s = Settings::default();
+    s.apply(SettingsPatch {
+        sidebar_font_size: Some(99),
+        ..Default::default()
+    });
+    assert_eq!(s.sidebar_font_size, 20);
 }
 
 #[test]
@@ -133,6 +160,7 @@ fn apply_sets_only_the_patched_fields() {
         }),
         library_roots: Some(vec!["S:\\Dev".to_owned()]),
         show_status_badges: Some(false),
+        sidebar_font_size: Some(17),
         path_mappings: Some(vec![PathMapping {
             from: "/home/me/shared".to_owned(),
             to: "S:\\".to_owned(),
@@ -148,6 +176,7 @@ fn apply_sets_only_the_patched_fields() {
     assert_eq!(s.library_roots, ["S:\\Dev"]);
     assert_eq!(s.path_mappings[0].to, "S:\\");
     assert!(!s.show_status_badges);
+    assert_eq!(s.sidebar_font_size, 17);
     // Untouched fields keep their values.
     assert!(matches!(s.light_theme, ThemeId::Paper));
     assert_eq!(s.font_size, 18);
@@ -165,6 +194,7 @@ fn settings_json_shape() {
     assert_eq!(j["editor"]["mode"], "auto");
     assert_eq!(j["autoUpdate"], true);
     assert_eq!(j["showStatusBadges"], true);
+    assert_eq!(j["sidebarFontSize"], 13);
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -203,14 +233,18 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     assert!(matches!(s.dark_theme, ThemeId::Graphite));
     // A file written before the setting existed shows the badges, as before.
     assert!(s.show_status_badges);
+    // And sets the sidebars in the size they always had.
+    assert_eq!(s.sidebar_font_size, 13);
 }
 
 #[test]
 fn settings_patch_accepts_a_partial_object() {
-    let p: SettingsPatch =
-        serde_json::from_str(r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null}"#)
-            .unwrap();
+    let p: SettingsPatch = serde_json::from_str(
+        r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null, "sidebarFontSize": 15}"#,
+    )
+    .unwrap();
     assert_eq!(p.font_size, Some(22));
+    assert_eq!(p.sidebar_font_size, Some(15));
     assert!(matches!(p.light_theme, Some(ThemeId::Sepia)));
     assert!(p.code_wrap.is_none());
     assert!(p.theme_mode.is_none());

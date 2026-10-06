@@ -168,3 +168,51 @@ test("only the selected bundled faces load", async ({ page }) => {
   await expect.poll(fonts).toContain("Literata-Variable.woff2");
   expect(await fonts()).not.toContain("Inter-Variable.woff2");
 });
+
+test("the sidebar text slider sizes the library and the outline, and nothing clips", async ({
+  page,
+}) => {
+  await openFixture(page, DOCS[1]?.rel ?? "");
+  const size = (selector: string) =>
+    page
+      .locator(selector)
+      .first()
+      .evaluate((el) => getComputedStyle(el).fontSize);
+  const library = "#lx-library .tree-name";
+  const outline = "#lx-outline .outline-list a";
+  expect(await size(library)).toBe("13px");
+  expect(await size(outline)).toBe("13px");
+  await page.locator("#lx-reading-btn").click();
+  const panel = page.getByRole("dialog", { name: "Reading settings" });
+  const slider = panel.getByRole("slider", { name: "Sidebar text size" });
+  await slider.fill("18");
+  await expect(slider.locator("xpath=following-sibling::output")).toHaveText("18 px");
+  expect(await size(library)).toBe("18px");
+  expect(await size(outline)).toBe("18px");
+  // The reading text keeps its own size.
+  expect(await size("#lx-doc p")).toBe("18px");
+  await slider.fill("20");
+  // Rows grow with the text: no name or badge clips.
+  const clipped = await page.evaluate(
+    () =>
+      [...document.querySelectorAll<HTMLElement>("#lx-library .tree-row")].filter((row) => {
+        const box = row.getBoundingClientRect();
+        return [...row.querySelectorAll<HTMLElement>(".tree-name, .badge")].some((el) => {
+          const r = el.getBoundingClientRect();
+          return el.scrollHeight > el.clientHeight || r.top < box.top || r.bottom > box.bottom;
+        });
+      }).length,
+  );
+  expect(clipped).toBe(0);
+  // Saved once the drag settles, so a reload keeps it.
+  await page.waitForTimeout(400);
+  await page.reload();
+  await page.locator("html[data-lx-ready]").waitFor({ state: "attached" });
+  expect(await size(library)).toBe("20px");
+  // Ctrl+Alt+- and Ctrl+Alt+0 step it down and reset it.
+  await page.keyboard.press("Control+Alt+Minus");
+  expect(await size(library)).toBe("19px");
+  await page.keyboard.press("Control+Alt+Digit0");
+  expect(await size(library)).toBe("13px");
+  expect(await size(outline)).toBe("13px");
+});

@@ -15,6 +15,8 @@
   --gutter: 40px;
   --library-width: 280px;
   --outline-width: 240px;
+  /* The library's, the outline's and the breadcrumb chooser's text, from the settings. */
+  --sidebar-font-size: 13px;
   --radius: 6px;
   --hover: color-mix(in srgb, var(--fg) 7%, transparent);
 }

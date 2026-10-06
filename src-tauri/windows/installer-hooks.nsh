@@ -16,6 +16,10 @@
 ; ours (a first install, or another app took the extension since), and after Tauri's uninstall step
 ; it is put back, or the default removed, along with everything else the installer added and the
 ; entry Explorer adds for our class once it has offered it under "Open with".
+;
+; The open command. Tauri writes the class's command with the exe path unquoted, which an install
+; folder with a space in it splits, so it is written again quoted once Tauri is done. Every install
+; and update rewrites it, and the uninstaller deletes the class with it.
 
 Var LecternDefault
 !define LECTERN_FILEEXTS "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
@@ -73,6 +77,7 @@ Var LecternDefault
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  WriteRegStr SHCTX "Software\Classes\Lectern.Markdown\shell\open\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
   WriteRegStr SHCTX "Software\Classes\Applications\${MAINBINARYNAME}.exe\shell\open\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
   !insertmacro LECTERN_OPEN_WITH "md"
   !insertmacro LECTERN_OPEN_WITH "markdown"
