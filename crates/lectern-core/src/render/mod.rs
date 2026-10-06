@@ -91,18 +91,9 @@ struct Prepared<'c> {
 
 /// Renders a note to sanitised HTML and collects its outline, frontmatter and stats.
 pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
-    let blanked = blank_empty_frontmatter(source);
-    let source = blanked.as_deref().unwrap_or(source);
-
     let options = options::comrak_options();
     let arena = Arena::new();
-    let root = parse_document(&arena, source, &options);
-
-    let frontmatter = match blanked {
-        Some(_) => Some(Frontmatter::Parsed { entries: vec![] }),
-        None => take_frontmatter(root),
-    };
-    html_policy::apply(&arena, root);
+    let (root, frontmatter) = parse(&arena, source, &options);
     let (outline, heading_ids) = collect_headings(root);
     let tasks = stats::count_tasks(root);
     let word_count = stats::word_count(&stats::visible_text(root));
@@ -136,6 +127,30 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
         word_count,
         has_unresolved_wikilinks: prepared.links.unresolved_wikilinks,
     }
+}
+
+/// The note's AST exactly as [`render`] starts from it, without the front matter, for the review
+/// text map. Sharing [`parse`] keeps its source lines the same as the rendered `data-sourcepos`.
+pub(crate) fn parse_for_text<'a>(arena: &'a Arena<'a>, source: &str) -> &'a AstNode<'a> {
+    parse(arena, source, &options::comrak_options()).0
+}
+
+/// The first steps of a render: parses the note, takes its front matter out of the AST and applies
+/// the raw-HTML policy, so disallowed tags are the text the page shows. Line numbers still count
+/// from the top of the file.
+fn parse<'a>(
+    arena: &'a Arena<'a>,
+    source: &str,
+    options: &comrak::Options,
+) -> (&'a AstNode<'a>, Option<Frontmatter>) {
+    let blanked = blank_empty_frontmatter(source);
+    let root = parse_document(arena, blanked.as_deref().unwrap_or(source), options);
+    let frontmatter = match blanked {
+        Some(_) => Some(Frontmatter::Parsed { entries: vec![] }),
+        None => take_frontmatter(root),
+    };
+    html_policy::apply(arena, root);
+    (root, frontmatter)
 }
 
 /// comrak finds no front matter when the two `---` lines are adjacent and would render them as two

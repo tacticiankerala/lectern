@@ -1,8 +1,10 @@
 //! Review comments: a sidecar file beside a note holds the reader's comments on it and Claude's
 //! replies, as a Markdown thread both can edit.
 //!
-//! The sidecar of `plan.md` is `plan.review.md`. [`format`] reads and writes it. This module holds
-//! the types, the sidecar naming rules, and the fingerprint and timestamp helpers the anchors use.
+//! The sidecar of `plan.md` is `plan.review.md`. [`format`] reads and writes it. [`text`] is the
+//! note's visible text, [`anchor`] finds each comment's quote in it again after the note changes,
+//! and [`ops`] applies the changes the UI asks for. This module holds the types, the sidecar naming
+//! rules, and the fingerprint and timestamp helpers the anchors use.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod anchor;
 pub mod format;
+pub mod ops;
+pub mod text;
 
 /// What every sidecar's file name ends with.
 pub const SIDECAR_SUFFIX: &str = ".review.md";

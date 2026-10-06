@@ -1,6 +1,6 @@
 //! Renders every Markdown file in `fixtures/vault`, with an index of the vault, for the UI's fake
-//! backend, and writes them to `ui/dev/fixtures.json` with the library tree and the quick-open
-//! candidates.
+//! backend, and writes them to `ui/dev/fixtures.json` with the library tree, the quick-open
+//! candidates and each note's review text blocks.
 //!
 //! Paths are rewritten under a fake Windows root, `C:\Fixtures\vault`, so the UI sees the paths it
 //! sees on Windows. Images point at `/__asset/<encoded path>`, which `ui/dev/serve.mjs` maps back
@@ -18,6 +18,7 @@ use lectern_core::library::scan::{read_heads, scan_root, ScanOptions};
 use lectern_core::library::tree::{build_tree, TreeNode};
 use lectern_core::library::LibraryIndex;
 use lectern_core::render::{render, RenderContext, RenderedDoc};
+use lectern_core::review::text::TextMap;
 use lectern_core::text::decode;
 use percent_encoding::percent_decode_str;
 use regex::{Captures, Regex};
@@ -37,6 +38,9 @@ struct Fixtures {
     candidates: Vec<Candidate>,
     /// By path.
     docs: BTreeMap<String, RenderedDoc>,
+    /// By path: each leaf block of the review text map as `[startLine, endLine, text]`, for the
+    /// fake backend and the check that the UI reads the same text from the rendered page.
+    text_blocks: BTreeMap<String, Vec<(u32, u32, String)>>,
 }
 
 fn main() {
@@ -53,6 +57,7 @@ fn main() {
     let mapper = PathMapper::default();
 
     let mut docs = BTreeMap::new();
+    let mut text_blocks = BTreeMap::new();
     let mut candidates = Vec::new();
     for file in root.md_files() {
         let path = root.abs(&file.rel);
@@ -74,6 +79,7 @@ fn main() {
             rel: file.rel.clone(),
             root: FAKE_ROOT.to_owned(),
         });
+        text_blocks.insert(fake_path.clone(), text_blocks_of(&text));
         docs.insert(fake_path, doc);
     }
 
@@ -84,6 +90,7 @@ fn main() {
         tree,
         candidates,
         docs,
+        text_blocks,
     };
     let json = serde_json::to_string(&fixtures).expect("fixtures serialise");
     remap.assert_gone(&json);
@@ -96,6 +103,15 @@ fn main() {
         json.len() / 1024,
         out.display()
     );
+}
+
+/// The note's review text map, block by block: lines and text.
+fn text_blocks_of(source: &str) -> Vec<(u32, u32, String)> {
+    let map = TextMap::build(source);
+    map.blocks()
+        .iter()
+        .map(|b| (b.start_line, b.end_line, map.block_text(b).to_owned()))
+        .collect()
 }
 
 /// The canonical vault path as the renderer will write it: without Windows' verbatim `\\?\`

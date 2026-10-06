@@ -9,6 +9,8 @@ use lectern_core::ipc::{
     RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
+use lectern_core::review::anchor::AnchorState;
+use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
@@ -54,6 +56,10 @@ fn ts_bindings_exported() {
         "CommentStatus",
         "ClaudeKind",
         "EntryAuthor",
+        "AnchorState",
+        "NewAnchor",
+        "ReviewOp",
+        "StatusChange",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -123,6 +129,53 @@ fn ts_unions_follow_the_serde_tags() {
     assert_eq!(
         decl::<EntryAuthor>(),
         r#"type EntryAuthor = "you" | "claude";"#
+    );
+    assert_eq!(
+        decl::<AnchorState>(),
+        r#"type AnchorState = "anchored" | "moved" | "detached";"#
+    );
+    assert_eq!(
+        decl::<StatusChange>(),
+        r#"type StatusChange = "resolve" | "reopen" | "dismiss";"#
+    );
+    assert_eq!(
+        decl::<NewAnchor>(),
+        r#"type NewAnchor = { startLine: number, endLine: number, quote: string, };"#
+    );
+    assert_eq!(
+        decl::<ReviewOp>(),
+        concat!(
+            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, } | "#,
+            r#"{ "op": "reply", id: number, text: string, } | "#,
+            r#"{ "op": "setStatus", id: number, change: StatusChange, } | "#,
+            r#"{ "op": "reattach", id: number, anchor: NewAnchor, } | "#,
+            r#"{ "op": "edit", id: number, entry: number, text: string, };"#,
+        )
+    );
+}
+
+#[test]
+fn review_ops_are_tagged_by_op() {
+    let op: ReviewOp =
+        serde_json::from_value(json!({"op": "setStatus", "id": 3, "change": "resolve"})).unwrap();
+    assert_eq!(
+        op,
+        ReviewOp::SetStatus {
+            id: 3,
+            change: StatusChange::Resolve
+        }
+    );
+    let add = ReviewOp::Add {
+        anchor: NewAnchor {
+            start_line: 4,
+            end_line: 6,
+            quote: "batches of at most 50".to_owned(),
+        },
+        text: "Why 50?".to_owned(),
+    };
+    assert_eq!(
+        serde_json::to_value(&add).unwrap(),
+        json!({"op": "add", "anchor": {"startLine": 4, "endLine": 6, "quote": "batches of at most 50"}, "text": "Why 50?"})
     );
 }
 
