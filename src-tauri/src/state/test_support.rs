@@ -142,7 +142,23 @@ pub(super) struct Fixture {
     pub(super) early: Arc<Slot<Early>>,
     pub(super) opens: Arc<OpenQueue>,
     pub(super) config: PathBuf,
+    /// The last field, so the folder goes only after the state.
     pub(super) dir: TempDir,
+}
+
+impl Drop for Fixture {
+    /// Scans and the save thread write into the temp folder from threads of their own, and a
+    /// write after it is removed makes it again. So, a failed test included, this lets a held
+    /// scan go on, waits until no other thread holds the state, and writes what is waiting to be
+    /// saved: dropping the state then ends the save thread with nothing left to write.
+    fn drop(&mut self) {
+        self.host.release();
+        let started = Instant::now();
+        while Arc::strong_count(&self.state) > 1 && started.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.state.saver.flush(Duration::from_secs(10));
+    }
 }
 
 pub(super) fn profile(roots: &[&Path]) -> Profile {
