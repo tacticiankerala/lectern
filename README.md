@@ -11,7 +11,7 @@ A fast, native Markdown reader for Windows, made for long documents and folders 
   <sub>Windows 10 (1809 or later) and Windows 11, x64. Free and open source.</sub>
 </p>
 
-Lectern opens your Markdown the way you meant it to look: tables that wrap, highlighted code, task lists, frontmatter and wikilinks that go somewhere. Point it at a folder of notes, or an Obsidian vault, and read. It never edits your files.
+Lectern opens your Markdown the way you meant it to look: tables that wrap, highlighted code, task lists, frontmatter and wikilinks that go somewhere. Point it at a folder of notes, or an Obsidian vault, and read. It never edits your notes.
 
 ## Features
 
@@ -23,6 +23,22 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 - **Keeps your place.** Lectern remembers where you were in every document. When a file changes on disk it reloads in place, and back and forward work the way they do in a browser.
 - **Quick.** A cold start straight into a 3,000-line document takes under half a second on a desktop PC.
 - **Stays current.** Lectern checks GitHub Releases once a day and updates in one click.
+
+## Reviewing with Claude
+
+<p align="center">
+  <img src="docs/screenshots/comments.png" alt="The Comments tab beside a plan in the Paper theme: Claude's question on a highlighted passage, a detached comment with Claude's reply, and a resolved comment">
+</p>
+
+You can comment on a note as you read it, then hand the comments to Claude. A comment is a passage of the note, quoted, with your remark under it. Select some text and press the **Comment** button that appears, press **+** in the margin beside a paragraph, or press Ctrl+Alt+M. Comments show as highlights in the page and as cards in the right-hand panel's **Comments** tab.
+
+Lectern saves them beside the note, in a plain Markdown file named after it: `plan.md` gets `plan.review.md`. The note itself is never changed.
+
+**Copy comments**, in that tab, copies the open ones as text ready to paste into Claude, with the note's Windows and WSL paths. Or point Claude at the `.review.md` file. Claude answers by adding, at the end of a comment, a paragraph that starts with `**Claude (reply):**`, `**Claude (question):**`, `**Claude (pushback):**` or `**Claude (resolved):**`, and the answer shows up in Lectern within a couple of seconds.
+
+When the note changes, each comment follows its text. One whose text was reworded is marked "text changed", and one whose text is gone is kept as **Detached** with its original quote, so no comment is ever lost.
+
+The comments button beside **Aa** shows how many are open. Click it, or press Ctrl+Shift+M, to hide or show them. To turn comments off altogether, untick **Review comments** under **Reading** in Preferences.
 
 ## Gallery
 

@@ -69,6 +69,8 @@ jobs:
             - **`Lectern_…_x64_portable.exe`** is the same app as a single file you can run from anywhere. It checks for updates but leaves installing them to you.
 
             Windows may warn that the installer is from an unknown publisher. See [Install](https://github.com/tacticiankerala/lectern#install) in the README for what to do, and for making Lectern your Markdown viewer.
+
+            Review comments are saved as `<note>.review.md` files beside your notes.
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
