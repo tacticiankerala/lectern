@@ -9,13 +9,25 @@
 // - Navigations are numbered, refreshes apart from them (navigation.ts).
 // - `startupNotice` shows once, as a toast.
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
-//   Preferences, the menus, find in page, full-text search, update checks, About and the breadcrumb
-//   chooser are separate modules, loaded on first use. The automatic update check runs 5 s after
-//   the first paint.
+//   Preferences, the menus, find in page, full-text search, update checks, About, the breadcrumb
+//   chooser and the workspaces' lists and prompts are separate modules, loaded on first use. The
+//   automatic update check runs 5 s after the first paint, in the process's first window only
+//   (`primary`); a manual one runs in any.
 // - The review comments module loads after the first paint while the feature is on, and goes when
 //   it's switched off. `#lx-app.no-comments` marks every comment surface hidden.
 // - The reading position is saved once scrolling stops for a moment and when the document is
 //   left; a document opened without an anchor or line goes back to its saved position.
+// - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
+//   window turns to another workspace or Lectern quits, unsaved comment text is confirmed, and the
+//   settings and the reading position are saved.
+// - Every settings snapshot Rust sends (startup's, `settings-changed`, a command's answer) carries
+//   a revision, and one not newer than the last applied is dropped, whichever way it came. The
+//   newest applies as a change made here does, under the changes made here whose saves Rust
+//   hasn't answered yet: the echo of an older save never undoes a newer change, and a save's
+//   answer retires its change, so what Rust sent meanwhile isn't left hidden under it.
+// - Rust is told whenever this window starts or stops holding comment text that isn't saved yet,
+//   so quitting from another window can ask first. Quitting from here asks about this window's
+//   own text, then about any other window's.
 import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
@@ -33,6 +45,7 @@ import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
+import type { SettingsSnapshot } from "./generated/SettingsSnapshot";
 import { installKeymap } from "./keymap";
 import { LibraryController, NARROW } from "./library-controller";
 import { Navigation } from "./navigation";
@@ -45,6 +58,7 @@ import { RightPanel } from "./right-panel";
 import { applySettings, loadFonts, loadRememberedFonts } from "./themes";
 import { Toasts } from "./toast";
 import { renderError, renderWelcome } from "./welcome";
+import { Workspaces } from "./workspaces";
 
 /** The settings defaults, as Rust has them; shown until `startup` answers. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -118,7 +132,13 @@ export interface OpenOptions {
   push?: boolean;
 }
 
-export type Change = "doc" | "settings" | "library";
+export type Change = "doc" | "settings" | "library" | "workspaces";
+
+/** A settings change sent to Rust and not yet answered. */
+interface Sending {
+  patch: SettingsPatch;
+  done: Promise<void>;
+}
 
 export class App {
   readonly state: AppState = {
@@ -148,6 +168,12 @@ export class App {
   readonly actions: Actions;
   /** The right panel: its Outline and Comments tabs. */
   readonly rightPanel: RightPanel;
+  /** This window's workspace, the chip that names it, and the others. */
+  readonly workspaces: Workspaces;
+  /** Reloads the page, once the window has turned to another workspace; tests replace it. */
+  reloadWindow = (): void => {
+    location.reload();
+  };
   private readonly toasts: Toasts;
   private readonly outline: Outline;
   /** The OS colour scheme, which `system` theme mode follows. */
@@ -156,10 +182,20 @@ export class App {
   /** Settings changes not yet saved, and the timer that saves them. */
   private unsaved: SettingsPatch = {};
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Settings changes sent to Rust and not yet answered, oldest first: laid over what Rust sent. */
+  private sending: Sending[] = [];
+  /** A `settings-changed` arrived before startup answered. */
+  private changedEarly = false;
+  /** The latest settings Rust sent, and their revision; an older snapshot is dropped. */
+  private fromRust: Settings | null = null;
+  private rev = 0;
+  /** What Rust was last told about this window's unsaved comment text. */
+  private unsavedTold = false;
   private readonly updateProgress: () => void;
   private readonly listeners = new Map<Change, Set<() => void>>();
-  /** The native window title last set. */
+  /** The native window title last set, and the document's title it names (null for none). */
   private title = "";
+  private docTitle: string | null = null;
   private started = false;
   /** The latest `open-request` that arrived before startup finished. */
   private queued: OpenRequest | null = null;
@@ -224,12 +260,24 @@ export class App {
     this.nav = new Navigation(this);
     this.library = new LibraryController(this);
     this.actions = new Actions(this);
+    this.workspaces = new Workspaces(this);
     // Whether a crumb opens the chooser, and what the chooser lists, depend on the library's tree.
     this.on("library", () => {
       this.renderCrumbs(this.state.doc?.breadcrumbs ?? []);
     });
     // Once a test replaces the page's app, the old one stops listening.
     installKeymap(root.ownerDocument, (action) => root.isConnected && this.actions.run(action));
+    // Comment text starts or stops being unsaved on typing, keys and clicks, or once a save
+    // they asked for is done.
+    for (const type of ["input", "keydown", "click"]) {
+      root.ownerDocument.addEventListener(
+        type,
+        () => {
+          if (root.isConnected) this.checkUnsaved();
+        },
+        true,
+      );
+    }
   }
 
   /** The element the document scrolls in. */
@@ -240,11 +288,19 @@ export class App {
   async start(): Promise<void> {
     this.backend.on<OpenRequest>("open-request", (request) => {
       if (this.started) {
-        void this.nav.openRequested(request);
+        void this.openRequested(request);
       } else {
         this.queued = request;
       }
     });
+    this.backend.on<SettingsSnapshot>("settings-changed", (snapshot) => {
+      if (this.started) {
+        this.settingsChanged(snapshot);
+      } else {
+        this.changedEarly = true;
+      }
+    });
+    this.backend.on("workspaces-changed", () => void this.workspaces.refresh());
     this.backend.on<DocChanged>("doc-changed", (e) => {
       this.nav.changed(e.path);
     });
@@ -258,10 +314,14 @@ export class App {
     const navigation = this.nav.beginNavigation();
     let notice: string | null;
     let initial: OpenResult | null = null;
+    let primary = false;
+    let listed: Promise<void>;
     // The fonts selected last time load while the startup payload is on its way.
     const earlyFonts = loadRememberedFonts();
     try {
       const payload = await this.backend.startup();
+      this.fromRust = payload.settings;
+      this.rev = payload.settingsRev;
       Object.assign(this.state, {
         settings: payload.settings,
         library: payload.library,
@@ -271,8 +331,12 @@ export class App {
       });
       notice = payload.startupNotice;
       initial = payload.initial;
+      primary = payload.primary;
+      // The list comes while the fonts load; the title waits for it.
+      listed = this.workspaces.begin(payload.workspace, payload.workspace === null);
     } catch (e) {
       notice = `Lectern didn't start properly: ${String(e)}`;
+      listed = this.workspaces.begin(null, false);
     }
     // The theme and fonts are in place before the first paint, so nothing flashes.
     this.applySettings();
@@ -281,7 +345,12 @@ export class App {
       this.show(initial);
       this.nav.settleDeferred();
     }
-    await Promise.race([fonts, delay(FONT_WAIT_MS)]);
+    // A workspace with no folders yet, new or emptied, offers to add one.
+    const ws = this.workspaces.current;
+    if (ws && ws.roots.length === 0 && this.state.doc === null && this.state.error === null) {
+      this.layout.doc.querySelector<HTMLElement>(".welcome-add-folder")?.focus();
+    }
+    await Promise.all([Promise.race([fonts, delay(FONT_WAIT_MS)]), listed]);
     await nextPaint();
     this.backend.perfMark("first-paint");
     this.painted = true;
@@ -292,20 +361,47 @@ export class App {
     this.backend.onDragDrop((paths) => void this.nav.dropped(paths));
     this.library.watchIndex();
     this.syncComments();
-    // Off unless the setting is on when the time comes; not for an app a test has replaced.
-    setTimeout(() => {
-      if (this.layout.app.isConnected && this.state.settings.autoUpdate) {
-        quietly(this.actions.checkForUpdates(false));
-      }
-    }, UPDATE_CHECK_DELAY_MS);
+    // Off unless the setting is on when the time comes; not for an app a test has replaced. Once
+    // per process: in its first window.
+    if (primary) {
+      setTimeout(() => {
+        if (this.layout.app.isConnected && this.state.settings.autoUpdate) {
+          quietly(this.actions.checkForUpdates(false));
+        }
+      }, UPDATE_CHECK_DELAY_MS);
+    }
     if (notice !== null) {
       this.toast(notice);
     }
     this.started = true;
+    // Whether it came before or after startup read the settings, Rust's are the latest; the
+    // answer's revision tells whether an event since has overtaken it.
+    if (this.changedEarly) {
+      this.backend.getSettings().then(
+        (snapshot) => {
+          this.settingsChanged(snapshot);
+        },
+        (e: unknown) => {
+          console.warn(e);
+        },
+      );
+    }
     const queued = this.queued;
     this.queued = null;
     if (queued) {
-      await this.nav.openRequested(queued);
+      await this.openRequested(queued);
+    }
+  }
+
+  /**
+   * A second launch's file opens; a folder launched into a blank window asks for a new
+   * workspace's name instead.
+   */
+  private async openRequested(request: OpenRequest): Promise<void> {
+    if (request.folder) {
+      await this.workspaces.createWithFolder(request.path);
+    } else {
+      await this.nav.openRequested(request);
     }
   }
 
@@ -321,7 +417,11 @@ export class App {
     }
   }
 
-  /** Asks for a folder and adds it to the library, opening its README if it has one. */
+  /**
+   * Asks for a folder and adds it to the library, opening its README if it has one. A blank
+   * window has no library: it asks for a new workspace's name, then makes one holding the folder
+   * (navigation.ts).
+   */
   async addFolder(): Promise<void> {
     const path = await this.backend.pickFolder();
     if (path !== null) {
@@ -368,12 +468,7 @@ export class App {
     const changes = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null),
     ) as Partial<Settings>;
-    const anchor = REFLOWING.some((key) => key in changes) ? this.flowAnchor() : null;
-    this.state.settings = { ...this.state.settings, ...changes };
-    this.applySettings();
-    if (anchor) {
-      keepFlow(this.scroller, anchor);
-    }
+    this.applyChanges(changes);
     Object.assign(this.unsaved, changes);
     if (this.saveTimer !== null) {
       clearTimeout(this.saveTimer);
@@ -381,21 +476,180 @@ export class App {
     }
     if (opts.debounce) {
       this.saveTimer = setTimeout(() => {
-        this.saveSettings();
+        void this.saveSettings();
       }, SAVE_DEBOUNCE_MS);
     } else {
-      this.saveSettings();
+      void this.saveSettings();
     }
   }
 
-  private saveSettings(): void {
-    this.saveTimer = null;
+  /**
+   * Settings Rust sent (`settings-changed`, or a command's answer): applied as a change made here
+   * is, without saving them, under the changes made here that Rust hasn't answered yet. A
+   * snapshot not newer than the last applied is dropped.
+   */
+  settingsChanged(snapshot: SettingsSnapshot): void {
+    if (this.accept(snapshot)) {
+      this.reconcile();
+    }
+  }
+
+  /** Keeps `snapshot` as the latest from Rust, unless one at least as new is kept already. */
+  private accept(snapshot: SettingsSnapshot): boolean {
+    if (snapshot.rev <= this.rev) {
+      return false;
+    }
+    this.rev = snapshot.rev;
+    this.fromRust = snapshot.settings;
+    return true;
+  }
+
+  /**
+   * The latest settings Rust sent, under the changes made here whose saves it hasn't answered
+   * yet, oldest first, then the ones not sent yet.
+   */
+  private reconcile(): void {
+    const from = this.fromRust;
+    if (from === null) {
+      return;
+    }
+    const next: Settings = { ...from };
+    for (const s of this.sending) {
+      Object.assign(next, s.patch);
+    }
+    Object.assign(next, this.unsaved);
+    // The roots are the library's (library-controller.ts).
+    next.libraryRoots = this.state.settings.libraryRoots;
+    const current = this.state.settings;
+    const changes = Object.fromEntries(
+      Object.entries(next).filter(
+        ([k, v]) => JSON.stringify(v) !== JSON.stringify(current[k as keyof Settings]),
+      ),
+    ) as Partial<Settings>;
+    if (Object.keys(changes).length > 0) {
+      this.applyChanges(changes);
+    }
+  }
+
+  /** Applies changed settings at once, keeping the reading position when the text moves. */
+  private applyChanges(changes: Partial<Settings>): void {
+    const anchor = REFLOWING.some((key) => key in changes) ? this.flowAnchor() : null;
+    this.state.settings = { ...this.state.settings, ...changes };
+    this.applySettings();
+    if (anchor) {
+      keepFlow(this.scroller, anchor);
+    }
+  }
+
+  /** Sends the changes waiting to be saved; resolves once every save sent has been answered. */
+  private async saveSettings(): Promise<void> {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     const patch = this.unsaved;
     this.unsaved = {};
     if (Object.keys(patch).length > 0) {
-      this.backend.setSettings(patch).catch((e: unknown) => {
-        this.toast(`Couldn't save the settings: ${String(e)}`);
+      // Listed before it is sent: Rust tells the window its settings before it answers.
+      const sent: Sending = { patch, done: Promise.resolve() };
+      this.sending.push(sent);
+      sent.done = this.backend.setSettings(patch).then(
+        (snapshot) => {
+          this.answered(sent, snapshot);
+        },
+        (e: unknown) => {
+          this.toast(`Couldn't save the settings: ${String(e)}`);
+          this.answered(sent, null);
+        },
+      );
+    }
+    await Promise.all(this.sending.map((s) => s.done));
+  }
+
+  /**
+   * A save was answered, with the window's settings or (failed) nothing: its change covers
+   * nothing any more, and whatever Rust sent while it was on its way shows through.
+   */
+  private answered(sent: Sending, snapshot: SettingsSnapshot | null): void {
+    this.sending = this.sending.filter((s) => s !== sent);
+    if (snapshot !== null) {
+      this.accept(snapshot);
+    }
+    this.reconcile();
+  }
+
+  /**
+   * Before the window turns to another workspace (`switch`) or Lectern quits: comment saves on
+   * their way finish, then unsaved comment text is confirmed; once that's agreed, the settings
+   * and the reading position are saved. False when the user chose to stay.
+   */
+  async readyToLeave(action: "switch" | "quit"): Promise<boolean> {
+    if (this.commentsLoading) {
+      await this.commentsLoading;
+    }
+    const comments = this.comments;
+    if (comments) {
+      await comments.settled();
+      if (comments.hasUnsavedText()) {
+        const { confirmLeave } = await import("./workspace-menu.js");
+        if (!(await confirmLeave(this.layout.overlayRoot, action))) {
+          return false;
+        }
+      }
+    }
+    const doc = this.state.doc;
+    if (this.positionTimer !== null) {
+      clearTimeout(this.positionTimer);
+      this.positionTimer = null;
+    }
+    await Promise.all([
+      this.saveSettings(),
+      doc ? this.backend.savePosition(doc.path, this.view.captureAnchor()).catch(warn) : null,
+    ]);
+    return true;
+  }
+
+  /**
+   * Quits Lectern with every window open (Ctrl+Q), once it may (see `readyToLeave`). When another
+   * window holds comment text that isn't saved yet, Rust names it, and this asks before quitting
+   * all the same.
+   */
+  async quit(): Promise<void> {
+    if (!(await this.readyToLeave("quit"))) {
+      return;
+    }
+    try {
+      const unsaved = await this.backend.quit(false);
+      if (unsaved.length === 0) {
+        return;
+      }
+      const { confirmQuitElsewhere } = await import("./workspace-menu.js");
+      if (await confirmQuitElsewhere(this.layout.overlayRoot, unsaved)) {
+        await this.backend.quit(true);
+      }
+    } catch (e) {
+      this.toast(String(e));
+    }
+  }
+
+  /**
+   * Tells Rust when this window starts or stops holding comment text that isn't saved yet: now,
+   * after the event that may have changed it, and again once the comments' saves are done.
+   */
+  private checkUnsaved(): void {
+    setTimeout(() => {
+      this.tellUnsaved();
+      void this.comments?.settled().then(() => {
+        this.tellUnsaved();
       });
+    }, 0);
+  }
+
+  private tellUnsaved(): void {
+    const unsaved = this.comments?.hasUnsavedText() ?? false;
+    if (unsaved !== this.unsavedTold) {
+      this.unsavedTold = unsaved;
+      quietly(this.backend.setUnsaved(unsaved));
     }
   }
 
@@ -502,22 +756,37 @@ export class App {
     this.actions.refreshChooser();
   }
 
-  /** The native window title: the document's, or just Lectern. */
+  /** The native window title for the document titled `docTitle`, or for none. */
   private setTitle(docTitle: string | null): void {
-    const title = docTitle === null ? "Lectern" : `${docTitle} — Lectern`;
+    this.docTitle = docTitle;
+    this.syncTitle();
+  }
+
+  /** Sets the native window title as workspaces.ts words it, once it knows the workspaces. */
+  syncTitle(): void {
+    if (!this.workspaces.ready) {
+      return;
+    }
+    const title = this.workspaces.title(this.docTitle);
     if (title !== this.title) {
       this.title = title;
       quietly(this.backend.setTitle(title));
     }
   }
 
+  /** The welcome screen; a blank window's lists the workspaces to choose from first. */
   private showWelcome(): void {
-    renderWelcome(this.layout.doc, this.state.recent, {
-      openFile: () => void this.openFile(),
-      addFolder: () => void this.addFolder(),
-      openRecent: (path) => void this.open(path, { push: true }),
-      removeRecent: (path) => void this.removeRecent(path),
-    });
+    renderWelcome(
+      this.layout.doc,
+      this.state.recent,
+      {
+        openFile: () => void this.openFile(),
+        addFolder: () => void this.addFolder(),
+        openRecent: (path) => void this.open(path, { push: true }),
+        removeRecent: (path) => void this.removeRecent(path),
+      },
+      this.workspaces.isBlank ? (slot) => void this.workspaces.fillChooser(slot) : undefined,
+    );
   }
 
   private showError(error: OpenError): void {
@@ -635,6 +904,7 @@ export class App {
     if (!this.state.settings.reviewComments) {
       this.comments?.dispose();
       this.comments = null;
+      this.tellUnsaved();
     } else if (this.comments) {
       this.comments.setVisible(this.commentsShown());
     } else {
@@ -718,4 +988,8 @@ function stem(path: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function warn(e: unknown): void {
+  console.warn(e);
 }

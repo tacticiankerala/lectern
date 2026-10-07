@@ -1,0 +1,359 @@
+/* Workspaces: the header's workspace chip and its dropdown (on the menu's look), the name field,
+   a blank window's list on the welcome screen, the name prompt (on quick open's), the confirm
+   (on About's), and the workspace parts of Preferences. Colours come from the theme only. */
+
+/* ---- The chip: the workspace's name, before the breadcrumbs ---- */
+
+.ws-chip {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 5px;
+  /* Cut short with an ellipsis, so the breadcrumbs keep their room in a narrow window. */
+  min-width: 3.5em;
+  max-width: min(14em, 15vw);
+  height: 26px;
+  padding: 0 6px 0 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ws-chip:hover,
+.ws-chip[aria-expanded="true"] {
+  background: var(--hover);
+}
+
+/* Inside the chip, as the header's row would clip a ring around it. */
+.ws-chip:focus-visible {
+  outline-offset: -2px;
+}
+
+.ws-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-chip-caret {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
+/* ---- The dropdown, and the rows a blank window lists too ---- */
+
+/* It hangs from the chip and never reaches below the window (workspace-menu.ts caps its height):
+   the rows scroll, and New workspace and Rename stay put below them. */
+.ws-menu {
+  display: flex;
+  flex-direction: column;
+  width: min(340px, calc(100vw - 16px));
+}
+
+.ws-rows {
+  display: grid;
+  gap: 1px;
+}
+
+.ws-menu .ws-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ws-menu .menu-sep,
+.ws-foot {
+  flex: none;
+}
+
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  border-radius: 5px;
+}
+
+.ws-row:hover {
+  background: var(--hover);
+}
+
+.ws-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 10px 6px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-open:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* The window's own workspace is checked; the others keep the room, so the names line up. */
+.ws-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 14px;
+  color: var(--accent);
+}
+
+.ws-mark svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ws-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-row.current .ws-name {
+  font-weight: 600;
+}
+
+.ws-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* In place of Open in new window, for a workspace open in another window. */
+.ws-switch {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Open in new window: an icon button at the row's right, always shown. */
+.ws-new-window {
+  flex: none;
+}
+
+.ws-foot .menu-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- The name field ---- */
+
+.ws-name-field {
+  display: grid;
+  gap: 8px;
+  padding: 4px 5px;
+}
+
+.ws-name-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px / 1.4 var(--ui-font);
+  outline: none;
+}
+
+.ws-name-input:focus {
+  border-color: var(--accent);
+}
+
+.ws-name-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ws-name-actions .btn {
+  padding: 5px 12px;
+}
+
+/* ---- A blank window's welcome screen ---- */
+
+.doc .welcome-choose {
+  margin: 0 0 0.8em;
+  padding: 0;
+  border: 0;
+  color: var(--fg-muted);
+  font: 400 1em / 1.45 var(--ui-font);
+}
+
+.welcome-workspaces {
+  margin-bottom: 1.4em;
+}
+
+/* The rows read as choices at rest: framed, the width of the column. */
+.ws-chooser .ws-rows {
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.ws-chooser .ws-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+}
+
+.ws-chooser .ws-row:hover {
+  border-color: color-mix(in srgb, var(--fg) 25%, var(--border));
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg-elev));
+}
+
+/* On the frame itself: the document column would clip a ring outside it. */
+.ws-chooser .ws-row:has(> .ws-open:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.ws-chooser .ws-open {
+  padding: 10px 12px;
+}
+
+/* A blank window shows no workspace, so no row is checked. */
+.ws-chooser .ws-mark {
+  display: none;
+}
+
+.ws-chooser .ws-open:focus-visible {
+  background: none;
+}
+
+.ws-chooser .ws-name {
+  font: 500 15px / 1.4 var(--ui-font);
+}
+
+.ws-chooser .ws-hint,
+.ws-chooser .ws-switch {
+  font-size: 13px;
+}
+
+.ws-chooser .ws-new-window {
+  margin-right: 6px;
+}
+
+.ws-chooser .ws-name-field {
+  max-width: 420px;
+  padding: 0;
+}
+
+/* ---- The name prompt (a folder in a blank window) and the confirm ---- */
+
+.ws-ask {
+  width: min(440px, calc(100vw - 32px));
+  padding: 14px 16px 16px;
+}
+
+.ws-ask-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ws-ask-folder {
+  margin: 2px 0 10px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-ask .ws-name-field {
+  padding: 0;
+}
+
+.ws-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* ---- Preferences: This workspace and All windows ---- */
+
+.prefs-group-title {
+  margin: 0;
+  padding: 14px 0 8px;
+  color: var(--fg-muted);
+  font: 600 12px / 1 var(--ui-font);
+}
+
+.prefs-theme {
+  display: grid;
+  gap: 8px;
+  max-width: 360px;
+  margin-top: 8px;
+}
+
+.prefs-theme-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.prefs select {
+  width: 100%;
+  height: 28px;
+  padding: 0 28px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: 13px / 1 var(--ui-font);
+  appearance: none;
+  cursor: pointer;
+}
+
+.prefs select:hover {
+  border-color: color-mix(in srgb, var(--fg) 25%, var(--border));
+}
+
+.prefs-workspaces {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.prefs .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-menu,
+  .ws-ask,
+  .ws-confirm {
+    animation: none;
+  }
+}

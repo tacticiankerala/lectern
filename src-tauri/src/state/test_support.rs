@@ -119,7 +119,20 @@ impl FakeHost {
         lock(&self.events)
             .iter()
             .filter_map(|(target, e)| match e {
-                UiEvent::SettingsChanged(settings) => Some((target.clone(), settings.clone())),
+                UiEvent::SettingsChanged(snapshot) => {
+                    Some((target.clone(), snapshot.settings.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The revision each `settings-changed` sent carried, in order.
+    pub(super) fn settings_revs(&self) -> Vec<u64> {
+        lock(&self.events)
+            .iter()
+            .filter_map(|(_, e)| match e {
+                UiEvent::SettingsChanged(snapshot) => Some(snapshot.rev),
                 _ => None,
             })
             .collect()

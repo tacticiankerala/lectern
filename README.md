@@ -122,6 +122,8 @@ status: active
 | Ctrl+Shift+C | Copy the document's path |
 | F5 or Ctrl+R | Reload |
 | Ctrl+, | Preferences |
+| Ctrl+N | New window, which lists the workspaces |
+| Ctrl+Q | Quit Lectern; the next launch reopens every window |
 | Esc | Close a panel, or leave focus mode |
 
 You can also drop a file on the window to open it.

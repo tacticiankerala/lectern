@@ -37,6 +37,7 @@ export class LibraryController {
 
   /** Fills in the sidebar, right after the first paint. */
   start(): void {
+    this.sidebar.setBlank(this.app.workspaces.isBlank);
     this.sidebar.setLibrary(this.app.state.library);
     this.sidebar.start();
   }

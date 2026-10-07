@@ -46,6 +46,7 @@ const lazy = [
   "about",
   "crumb-chooser",
   "comments",
+  "workspace-menu",
 ];
 await esbuild.build({
   entryPoints: [entry],

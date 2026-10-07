@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
     DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult, OpenWhere,
-    RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen, WorkspaceOutcome,
-    WorkspaceSummary,
+    RecentEntry, RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen,
+    WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
 use lectern_core::review::anchor::AnchorState;
@@ -41,6 +41,7 @@ fn ts_bindings_exported() {
     for name in [
         "Settings",
         "SettingsPatch",
+        "SettingsSnapshot",
         "Measure",
         "EditorPref",
         "OpenResult",
@@ -211,11 +212,14 @@ fn review_ops_are_tagged_by_op() {
 }
 
 #[test]
-fn user_open_may_open_nothing() {
-    assert_eq!(
-        decl::<UserOpen>(),
-        r#"type UserOpen = { doc: OpenResult | null, library: LibraryPayload, };"#
+fn user_open_may_open_nothing_or_be_a_folder_for_a_blank_window() {
+    let decl = decl::<UserOpen>();
+    assert!(
+        decl.starts_with("type UserOpen = { doc: OpenResult | null, library: LibraryPayload, "),
+        "{decl}"
     );
+    // After its doc comment.
+    assert!(decl.ends_with("\nfolder: boolean, };"), "{decl}");
 }
 
 #[test]
@@ -223,6 +227,11 @@ fn ts_numbers_are_numbers_and_patches_are_partial() {
     assert!(decl::<DocPayload>().contains("mtimeMs: number,"));
     assert!(decl::<RecentEntry>().contains("openedMs: number,"));
     assert!(decl::<SettingsPatch>().contains("fontSize?: number | null,"));
+    assert_eq!(
+        decl::<SettingsSnapshot>(),
+        "type SettingsSnapshot = { settings: Settings, rev: number, };"
+    );
+    assert!(decl::<StartupPayload>().contains("settingsRev: number,"));
 }
 
 #[test]
@@ -276,6 +285,7 @@ fn follow_result_is_tagged_by_action() {
 fn startup_payload_carries_a_notice() {
     let j = serde_json::to_value(StartupPayload {
         settings: Default::default(),
+        settings_rev: 7,
         library: lectern_core::ipc::LibraryPayload { roots: vec![] },
         recent: vec![],
         initial: None,
@@ -289,6 +299,7 @@ fn startup_payload_carries_a_notice() {
     assert_eq!(j["startupNotice"], "Settings were reset");
     assert!(j["initial"].is_null());
     assert_eq!(j["settings"]["measure"], 100);
+    assert_eq!(j["settingsRev"], 7);
     // A blank window shows no workspace.
     assert!(j["workspace"].is_null());
     assert_eq!(j["primary"], true);
@@ -298,6 +309,7 @@ fn startup_payload_carries_a_notice() {
 fn startup_payload_names_the_window_workspace() {
     let j = serde_json::to_value(StartupPayload {
         settings: Default::default(),
+        settings_rev: 0,
         library: lectern_core::ipc::LibraryPayload { roots: vec![] },
         recent: vec![],
         initial: None,
@@ -310,13 +322,14 @@ fn startup_payload_names_the_window_workspace() {
             open: true,
             current: true,
             roots: vec!["C:\\Users\\me\\projects".to_owned()],
+            own_theme: true,
         }),
         primary: false,
     })
     .unwrap();
     assert_eq!(
         j["workspace"],
-        json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"]})
+        json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true})
     );
     assert_eq!(j["primary"], false);
     assert_eq!(

@@ -307,6 +307,15 @@ export class CommentAdding {
     this.restoreSoon();
   }
 
+  /** Whether text typed for a new comment would be lost with the page: open, kept or saving. */
+  hasUnsavedText(): boolean {
+    return (
+      this.editor.hasText ||
+      this.editorSave !== null ||
+      this.kept.some((draft) => draft.text.trim() !== "")
+    );
+  }
+
   /** Takes the buttons, the editor and the listeners away. */
   dispose(): void {
     this.disposed = true;

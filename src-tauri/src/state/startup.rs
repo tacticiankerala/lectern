@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Weak};
 use std::thread;
 
-use lectern_core::ipc::{OpenRequest, OpenResult, StartupPayload, UserOpen};
+use lectern_core::ipc::{OpenRequest, OpenResult, SettingsSnapshot, StartupPayload, UserOpen};
 
 use super::doc::Early;
 use super::paths::path_string;
@@ -56,8 +56,10 @@ impl WindowState {
         }
         let recent = self.recent();
         let workspace = self.workspace_summary();
+        let SettingsSnapshot { settings, rev } = self.snapshot();
         let payload = StartupPayload {
-            settings: self.settings(),
+            settings,
+            settings_rev: rev,
             library: lock(&self.library).payload(),
             recent,
             initial,
@@ -133,12 +135,21 @@ impl WindowState {
     /// Opens a path the user chose in the running app (the file dialog, a drop, Add folder) with
     /// the same decision as a launch argument (`resolve_target`): its network host is trusted, a
     /// file opens, and a folder joins the library unless it nests with a root, opening its README
-    /// when it has one. Touches the file system.
+    /// when it has one. A blank window has no library: a folder there opens and joins nothing, and
+    /// the answer says it was one (`folder`), for the UI to make a workspace of it. Touches the
+    /// file system.
     pub fn open_user_path(self: &Arc<Self>, path: &str) -> UserOpen {
         // Numbered on arrival: an open made while the path resolves (a share can stall) is newer,
         // and stays current. It counts as an open, like a launch, even when it opens nothing, so
         // a boot render landing late never overrides it.
         let seq = self.next_seq();
+        if self.blank_window_folder(Path::new(path)) {
+            return UserOpen {
+                doc: None,
+                library: self.library_payload(),
+                folder: true,
+            };
+        }
         let target = self.resolve_target(Path::new(path));
         self.finish_user_open(seq, target)
     }
@@ -152,6 +163,7 @@ impl WindowState {
         UserOpen {
             doc: target.map(|doc| self.open_numbered(seq, &path_string(&doc))),
             library: self.library_payload(),
+            folder: false,
         }
     }
 
@@ -179,10 +191,11 @@ impl WindowState {
         }
     }
 
-    /// Whether a launch's `path` is a folder launched into a blank window. Such a window has no
-    /// workspace to add the folder to, and none is made without a name, so the UI is sent the
-    /// folder to ask for one (`OpenRequest::folder`) instead of the folder becoming a root. The
-    /// user chose the path, so its network host is trusted first. Touches the file system.
+    /// Whether a launch's or a user's `path` is a folder for a blank window. Such a window has no
+    /// workspace to add the folder to, and none is made without a name, so the UI is told it is a
+    /// folder (`OpenRequest::folder`, `UserOpen::folder`) to ask for one, instead of the folder
+    /// becoming a root. The user chose the path, so its network host is trusted first. Touches
+    /// the file system.
     fn blank_window_folder(&self, path: &Path) -> bool {
         if self.workspace_id().is_some() {
             return false;
@@ -368,6 +381,8 @@ mod tests {
         let plain = f.dir.folder("plain");
         let opened = f.state.open_user_path(&path_string(&plain));
         assert!(opened.doc.is_none());
+        // A window showing a workspace takes the folder itself.
+        assert!(!opened.folder);
         assert_eq!(
             sidebar_roots(&opened),
             [path_string(&vault), path_string(&plain)]

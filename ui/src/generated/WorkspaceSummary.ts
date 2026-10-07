@@ -11,4 +11,8 @@ open: boolean,
 /**
  * Shown in the window that asked.
  */
-current: boolean, roots: Array<string>, };
+current: boolean, roots: Array<string>, 
+/**
+ * It has a theme of its own; otherwise it shows the shared one ("Same as other windows").
+ */
+ownTheme: boolean, };

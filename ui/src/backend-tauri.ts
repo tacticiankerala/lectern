@@ -11,15 +11,18 @@ import type { FollowTarget } from "./generated/FollowTarget";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
+import type { OpenWhere } from "./generated/OpenWhere";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { SavedPosition } from "./generated/SavedPosition";
-import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
+import type { SettingsSnapshot } from "./generated/SettingsSnapshot";
 import type { StartupPayload } from "./generated/StartupPayload";
 import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
+import type { WorkspaceOutcome } from "./generated/WorkspaceOutcome";
+import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
 
 declare global {
   interface Window {
@@ -123,11 +126,11 @@ export class TauriBackend implements Backend {
     return invoke("review_op", { path, op });
   }
 
-  getSettings(): Promise<Settings> {
+  getSettings(): Promise<SettingsSnapshot> {
     return invoke("get_settings");
   }
 
-  setSettings(patch: SettingsPatch): Promise<Settings> {
+  setSettings(patch: SettingsPatch): Promise<SettingsSnapshot> {
     return invoke("set_settings", { patch });
   }
 
@@ -173,6 +176,46 @@ export class TauriBackend implements Backend {
 
   showWindow(): Promise<void> {
     return invoke("show_window");
+  }
+
+  listWorkspaces(): Promise<WorkspaceSummary[]> {
+    return invoke("list_workspaces");
+  }
+
+  suggestWorkspaceName(): Promise<string> {
+    return invoke("suggest_workspace_name");
+  }
+
+  newWindow(): Promise<void> {
+    return invoke("new_window");
+  }
+
+  openWorkspace(id: string, where: OpenWhere): Promise<WorkspaceOutcome> {
+    return invoke("open_workspace", { id, where });
+  }
+
+  createWorkspace(name: string, where: OpenWhere, root?: string): Promise<WorkspaceOutcome> {
+    return invoke("create_workspace", { name, where, root: root ?? null });
+  }
+
+  renameWorkspace(id: string, name: string): Promise<WorkspaceSummary[]> {
+    return invoke("rename_workspace", { id, name });
+  }
+
+  deleteWorkspace(id: string): Promise<WorkspaceSummary[]> {
+    return invoke("delete_workspace", { id });
+  }
+
+  setWorkspaceTheme(own: boolean): Promise<SettingsSnapshot> {
+    return invoke("set_workspace_theme", { own });
+  }
+
+  quit(force: boolean): Promise<string[]> {
+    return invoke("quit", { force });
+  }
+
+  setUnsaved(on: boolean): Promise<void> {
+    return invoke("set_unsaved", { on });
   }
 
   /**

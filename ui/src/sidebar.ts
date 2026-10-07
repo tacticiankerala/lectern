@@ -4,7 +4,7 @@
 // toggles it; README folders carry their `status:` badge when the setting asks for them, and notes
 // with review comments their count of open ones while the feature is on. The open document is
 // highlighted, its folders expanded and its row scrolled into view. With no roots it offers to add
-// a folder instead.
+// a folder instead; in a blank window, which has no workspace, to choose one or start one.
 import { h, samePath } from "./dom";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
@@ -78,6 +78,8 @@ export class Sidebar {
   private badges = true;
   /** Notes show their count of open review comments (while the feature is on). */
   private counts = true;
+  /** A blank window: no workspace, so no library to add to. */
+  private blank = false;
 
   constructor(
     private readonly host: HTMLElement,
@@ -105,6 +107,14 @@ export class Sidebar {
     requestAnimationFrame(() => {
       if (this.activeRow) this.scrollTo(this.activeRow);
     });
+  }
+
+  /** A blank window's empty library points at choosing a workspace too. */
+  setBlank(on: boolean): void {
+    this.blank = on;
+    if (this.started) {
+      this.render();
+    }
   }
 
   setLibrary(library: LibraryPayload): void {
@@ -200,7 +210,13 @@ export class Sidebar {
     return h(
       "div",
       { class: "lib-empty" },
-      h("p", { class: "lib-empty-title" }, "Add a folder to build your library"),
+      h(
+        "p",
+        { class: "lib-empty-title" },
+        this.blank
+          ? "Choose a workspace, or add a folder to start a new one."
+          : "Add a folder to build your library",
+      ),
       add,
       h("p", { class: "lib-empty-note" }, "Lectern indexes the Markdown files in folders you add."),
     );

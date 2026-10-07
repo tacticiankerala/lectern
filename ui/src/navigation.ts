@@ -72,11 +72,13 @@ export class Navigation {
   /**
    * Opens a file or folder the user chose (the pickers or a drop), as a launch would: a folder
    * joins the library unless it nests with a root, and opens its README. A folder that opens
-   * nothing and adds nothing is revealed in the sidebar instead.
+   * nothing and adds nothing is revealed in the sidebar instead. A blank window has no library:
+   * Rust says the path is a folder (`folder`), and a new workspace to hold it is asked for; true
+   * then.
    */
-  async openUserPath(path: string): Promise<void> {
+  async openUserPath(path: string): Promise<boolean> {
     const before = new Set(this.app.state.library.roots.map((r) => r.path.toLowerCase()));
-    const outcome = { added: null as string | null, opened: false };
+    const outcome = { added: null as string | null, opened: false, folder: false };
     await this.load(
       async () => {
         const result = await this.app.backend.openUserPath(path);
@@ -84,21 +86,32 @@ export class Navigation {
         outcome.added =
           result.library.roots.find((r) => !before.has(r.path.toLowerCase()))?.path ?? null;
         outcome.opened = result.doc !== null;
+        outcome.folder = result.folder;
         return result.doc;
       },
       { push: true },
     );
+    if (outcome.folder) {
+      await this.app.workspaces.createWithFolder(path);
+      return true;
+    }
     if (outcome.added !== null) {
       this.app.toast(`Added ${outcome.added} to the library`);
     } else if (!outcome.opened) {
       this.app.library.revealFolder(path);
     }
+    return false;
   }
 
-  /** Files and folders dropped on the window, opened in turn: the last document stays. */
+  /**
+   * Files and folders dropped on the window, opened in turn: the last document stays. In a blank
+   * window, a folder asks for a new workspace to hold it instead, and the rest are left.
+   */
   async dropped(paths: string[]): Promise<void> {
     for (const path of paths) {
-      await this.openUserPath(path);
+      if (await this.openUserPath(path)) {
+        return;
+      }
     }
   }
 

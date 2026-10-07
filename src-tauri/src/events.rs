@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lectern_core::ipc::{DocChanged, LibraryPayload, OpenRequest, Settings};
+use lectern_core::ipc::{DocChanged, LibraryPayload, OpenRequest, SettingsSnapshot};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget};
 
@@ -22,7 +22,7 @@ pub const INDEX_READY: &str = "index-ready";
 /// The open document's review sidecar was created, changed or deleted (`DocChanged`, holding the
 /// document's path).
 pub const REVIEW_CHANGED: &str = "review-changed";
-/// The window's settings changed (`Settings`, the window's own).
+/// The window's settings changed (`SettingsSnapshot`: the window's own, with their revision).
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 /// The workspaces changed (no payload); sent to every window.
 pub const WORKSPACES_CHANGED: &str = "workspaces-changed";
@@ -46,8 +46,8 @@ pub enum UiEvent {
     IndexReady(PathBuf),
     /// Holds the document's path, not the sidecar's.
     ReviewChanged(PathBuf),
-    /// The settings of the window it is sent to.
-    SettingsChanged(Settings),
+    /// The settings of the window it is sent to, with their revision.
+    SettingsChanged(SettingsSnapshot),
     WorkspacesChanged,
 }
 

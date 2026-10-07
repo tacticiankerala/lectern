@@ -8,7 +8,11 @@ import type { WorkspaceSummary } from "./WorkspaceSummary";
 /**
  * Everything the UI needs for its first paint.
  */
-export type StartupPayload = { settings: Settings, library: LibraryPayload, recent: Array<RecentEntry>, 
+export type StartupPayload = { settings: Settings, 
+/**
+ * The revision `settings` were taken at (`SettingsSnapshot`).
+ */
+settingsRev: number, library: LibraryPayload, recent: Array<RecentEntry>, 
 /**
  * The document given on the command line, or the last one open, rendered during startup.
  */

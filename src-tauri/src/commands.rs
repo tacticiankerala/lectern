@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, OpenWhere, RecentEntry,
-    SavedPosition, Settings, SettingsPatch, StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome,
-    WorkspaceSummary,
+    SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload, UpdateInfo, UserOpen,
+    WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::view::ReviewPayload;
@@ -189,19 +189,19 @@ pub async fn review_op(
     .await?
 }
 
-/// The calling window's settings.
+/// The calling window's settings, with their revision.
 #[tauri::command]
-pub fn get_settings(window: WebviewWindow, state: Shared<'_>) -> Result<Settings, String> {
-    Ok(window_state(&window, &state)?.settings())
+pub fn get_settings(window: WebviewWindow, state: Shared<'_>) -> Result<SettingsSnapshot, String> {
+    Ok(window_state(&window, &state)?.snapshot())
 }
 
-/// Changes settings from the calling window; returns its settings.
+/// Changes settings from the calling window; returns its settings, with their revision.
 #[tauri::command]
 pub async fn set_settings(
     patch: SettingsPatch,
     window: WebviewWindow,
     state: Shared<'_>,
-) -> Result<Settings, String> {
+) -> Result<SettingsSnapshot, String> {
     blocking(window_state(&window, &state)?, move |s| {
         s.set_settings(patch)
     })
@@ -369,20 +369,28 @@ pub async fn delete_workspace(
 }
 
 /// Quits Lectern with every window open: each window's placement is saved, and the next launch
-/// reopens them all. Closing windows one by one leaves only the last one open.
+/// reopens them all. Closing windows one by one leaves only the last one open. Unless `force`, a
+/// window other than the caller holding comment text that isn't saved yet stops it: the answer
+/// names those windows, for the UI to ask. Empty when Lectern quits.
 #[tauri::command]
-pub fn quit(app: AppHandle, state: Shared<'_>) {
-    app::remember_every_window(&app);
-    state.quit();
+pub fn quit(force: bool, window: WebviewWindow, app: AppHandle, state: Shared<'_>) -> Vec<String> {
+    state.quit_from(window.label(), force, || app::remember_every_window(&app))
+}
+
+/// Records whether the calling window's UI holds comment text that isn't saved yet.
+#[tauri::command]
+pub fn set_unsaved(on: bool, window: WebviewWindow, state: Shared<'_>) -> Result<(), String> {
+    window_state(&window, &state)?.set_unsaved(on);
+    Ok(())
 }
 
 /// Gives the calling window's workspace a theme of its own, or has it follow the shared theme
-/// again; returns the window's settings.
+/// again; returns the window's settings, with their revision.
 #[tauri::command]
 pub fn set_workspace_theme(
     own: bool,
     window: WebviewWindow,
     state: Shared<'_>,
-) -> Result<Settings, String> {
+) -> Result<SettingsSnapshot, String> {
     state.set_workspace_theme(window.label(), own)
 }

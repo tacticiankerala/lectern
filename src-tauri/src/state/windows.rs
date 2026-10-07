@@ -18,7 +18,9 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 
-use lectern_core::ipc::{OpenRequest, OpenWhere, Settings, WorkspaceOutcome, WorkspaceSummary};
+use lectern_core::ipc::{
+    OpenRequest, OpenWhere, SettingsSnapshot, WorkspaceOutcome, WorkspaceSummary,
+};
 use lectern_core::library::is_markdown;
 use lectern_core::library::scan::probe_with;
 use lectern_core::workspace::{
@@ -37,6 +39,9 @@ const CASCADE: i32 = 32;
 /// The answer to a window that has no state of its own.
 const NOT_READY: &str = "window not ready";
 const UNKNOWN_WORKSPACE: &str = "That workspace no longer exists.";
+
+/// How `App::quit_from` names a window that shows no workspace.
+const BLANK_WINDOW: &str = "a blank window";
 
 /// What opening a workspace leaves to do once the windows are settled.
 enum Step {
@@ -61,6 +66,7 @@ impl App {
                 open: shown.contains_key(&ws.id),
                 current: shown.get(&ws.id).is_some_and(|shown_in| shown_in == label),
                 roots: ws.roots.clone(),
+                own_theme: ws.theme.is_some(),
             })
             .collect()
     }
@@ -177,8 +183,9 @@ impl App {
 
     /// Gives the window `label`'s workspace a theme of its own, starting as the shared one, or
     /// (`own` false) has it follow the shared theme again. Either way the window is sent its
-    /// settings, which are also returned. A blank window has no workspace to change.
-    pub fn set_workspace_theme(&self, label: &str, own: bool) -> Result<Settings, String> {
+    /// settings, with their revision, which are also returned. A blank window has no workspace to
+    /// change.
+    pub fn set_workspace_theme(&self, label: &str, own: bool) -> Result<SettingsSnapshot, String> {
         let window = self.window(label).ok_or(NOT_READY)?;
         if let Some(id) = window.workspace_id() {
             let shared = {
@@ -194,12 +201,14 @@ impl App {
                     return false;
                 }
                 ws.theme = own.then_some(shared);
+                // The window's settings changed: under the workspaces lock, as every bump is.
+                self.settings_rev.fetch_add(1, Ordering::SeqCst);
                 true
             });
         }
-        let settings = window.settings();
-        window.emit(UiEvent::SettingsChanged(settings.clone()));
-        Ok(settings)
+        let snapshot = window.snapshot();
+        window.emit(UiEvent::SettingsChanged(snapshot.clone()));
+        Ok(snapshot)
     }
 
     /// The window `label` was focused: it is the most recently focused window, and its workspace
@@ -253,6 +262,47 @@ impl App {
             });
         }
         self.workspaces_changed();
+    }
+
+    /// Quit Lectern, asked for in the window `label`: as `quit`, once `before` has run (each
+    /// window's placement saved). Unless `force`, it doesn't while another window's UI holds
+    /// comment text that isn't saved yet, and names those windows instead, for the UI to ask: by
+    /// their workspace, or "a blank window", the most recently focused first. Empty when it quits.
+    pub fn quit_from(&self, label: &str, force: bool, before: impl FnOnce()) -> Vec<String> {
+        if !force {
+            let unsaved = self.unsaved_elsewhere(label);
+            if !unsaved.is_empty() {
+                return unsaved;
+            }
+        }
+        before();
+        self.quit();
+        Vec::new()
+    }
+
+    /// The windows other than `label` whose UI holds comment text that isn't saved yet, named as
+    /// `quit_from` names them.
+    fn unsaved_elsewhere(&self, label: &str) -> Vec<String> {
+        let focus = lock(&self.focus).clone();
+        let mut unsaved: Vec<Arc<WindowState>> = self
+            .windows()
+            .into_iter()
+            .filter(|w| w.label() != label && w.unsaved.load(Ordering::SeqCst))
+            .collect();
+        unsaved.sort_by_key(|w| {
+            focus
+                .iter()
+                .position(|l| l == w.label())
+                .unwrap_or(usize::MAX)
+        });
+        unsaved
+            .iter()
+            .map(|w| {
+                w.workspace_id()
+                    .and_then(|id| self.read_workspace(&id, |ws| ws.name.clone()))
+                    .unwrap_or_else(|| BLANK_WINDOW.to_owned())
+            })
+            .collect()
     }
 
     /// Lectern quits with every window open, each placement already in its workspace: every
@@ -571,15 +621,16 @@ impl WindowState {
     /// The workspace the window shows, as its header names it; `None` for a blank window.
     pub(super) fn workspace_summary(&self) -> Option<WorkspaceSummary> {
         let id = self.workspace_id()?;
-        let ws = self
-            .app
-            .read_workspace(&id, |ws| (ws.name.clone(), ws.roots.clone()))?;
+        let (name, roots, own_theme) = self.app.read_workspace(&id, |ws| {
+            (ws.name.clone(), ws.roots.clone(), ws.theme.is_some())
+        })?;
         Some(WorkspaceSummary {
             id,
-            name: ws.0,
+            name,
             open: true,
             current: true,
-            roots: ws.1,
+            roots,
+            own_theme,
         })
     }
 
@@ -618,6 +669,11 @@ impl WindowState {
 
     pub(super) fn is_retired(&self) -> bool {
         self.retired.load(Ordering::SeqCst)
+    }
+
+    /// Its UI holds comment text that isn't saved yet (`on`), or no longer does.
+    pub fn set_unsaved(&self, on: bool) {
+        self.unsaved.store(on, Ordering::SeqCst);
     }
 }
 
@@ -666,7 +722,7 @@ mod tests {
     use crate::state::profile::{load_profile, Profile};
     use crate::state::test_support::*;
     use crate::state::WindowShape;
-    use lectern_core::ipc::{SettingsPatch, ThemeId, ThemeMode};
+    use lectern_core::ipc::{OpenResult, SettingsPatch, ThemeId, ThemeMode};
     use lectern_core::watch::WatchEvent;
 
     const NORMAL: WindowShape = WindowShape {
@@ -890,6 +946,31 @@ mod tests {
         assert!(workspaces[0].roots.is_empty());
     }
 
+    /// A folder chosen in a blank window (a drop, Add folder) opens and joins nothing, not even its
+    /// README, and the answer says it is a folder, for the UI to ask for a workspace. A file opens
+    /// as a loose file.
+    #[test]
+    fn a_folder_chosen_in_a_blank_window_asks_for_a_workspace() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let vault = f.dir.folder("vault");
+        f.dir.file("vault/README.md", "# Vault");
+        let loose = f.dir.file("loose/tide.txt", "Tide");
+        f.app.new_window().unwrap();
+        let blank = window(&f, "win-1");
+        let opened = blank.open_user_path(&path_string(&vault));
+        assert!(opened.folder);
+        assert!(opened.doc.is_none());
+        assert!(opened.library.roots.is_empty());
+        assert_eq!(blank.workspace_id(), None);
+        let opened = blank.open_user_path(&path_string(&loose));
+        assert!(!opened.folder);
+        assert!(matches!(opened.doc, Some(OpenResult::Ok { .. })));
+        assert_eq!(current_of(&blank), loose);
+        let workspaces = f.app.list_workspaces("win-1");
+        assert_eq!(workspaces.len(), 1);
+        assert!(workspaces[0].roots.is_empty());
+    }
+
     /// A settings change already under way as its window turns to another workspace lands
     /// nowhere: not in the workspace the window left, nor in the shared settings.
     #[test]
@@ -909,7 +990,7 @@ mod tests {
         f.state.retire();
         drop(held);
         let returned = change.join().unwrap();
-        assert_ne!(returned.font_size, 19);
+        assert_ne!(returned.settings.font_size, 19);
         assert_ne!(read(&f.app.settings).font_size, 19);
         let shown = f.app.read_workspace("w1", |ws| ws.layout.library_visible);
         assert_eq!(shown, Some(true));
@@ -1167,6 +1248,48 @@ mod tests {
         assert_eq!(g.host.opened_windows(), ["win-1"]);
     }
 
+    /// Quitting from one window doesn't while another window's UI holds comment text that isn't
+    /// saved yet: those windows are named instead, by workspace (or as a blank window), the most
+    /// recently focused first, unless the quit is forced. The caller's own text is for its own UI
+    /// to ask about.
+    #[test]
+    fn quitting_names_other_windows_with_unsaved_comments_unless_forced() {
+        let (dir, profile, _) = work_and_personal();
+        let f = fixture_in(dir, profile, FakeHost::default());
+        f.state.window_shown();
+        let mut before = 0;
+        f.state.set_unsaved(true);
+        window(&f, "win-1").set_unsaved(true);
+        let refused = f.app.quit_from(MAIN_WINDOW, false, || before += 1);
+        assert_eq!(refused, ["Personal"]);
+        f.app.new_window().unwrap();
+        window(&f, "win-2").set_unsaved(true);
+        let refused = f.app.quit_from(MAIN_WINDOW, false, || before += 1);
+        assert_eq!(refused, ["a blank window", "Personal"]);
+        // Saved since, it no longer counts.
+        window(&f, "win-1").set_unsaved(false);
+        let refused = f.app.quit_from(MAIN_WINDOW, false, || before += 1);
+        assert_eq!(refused, ["a blank window"]);
+        assert_eq!(before, 0);
+        assert!(!*lock(&f.host.exited));
+        // Forced, it quits all the same, once the placements are saved.
+        let refused = f.app.quit_from(MAIN_WINDOW, true, || before += 1);
+        assert!(refused.is_empty());
+        assert_eq!(before, 1);
+        assert!(*lock(&f.host.exited));
+    }
+
+    /// With no unsaved comment elsewhere, quitting goes ahead at once.
+    #[test]
+    fn quitting_with_nothing_unsaved_elsewhere_goes_ahead() {
+        let (dir, profile, _) = work_and_personal();
+        let f = fixture_in(dir, profile, FakeHost::default());
+        f.state.window_shown();
+        f.state.set_unsaved(true);
+        assert!(f.app.quit_from(MAIN_WINDOW, false, || ()).is_empty());
+        assert!(*lock(&f.host.exited));
+    }
+
     /// A workspace open in another window is never opened twice: that window comes forward.
     #[test]
     fn opening_a_workspace_open_elsewhere_focuses_its_window() {
@@ -1400,7 +1523,8 @@ mod tests {
         });
         lock(&f.host.events).clear();
         let own = f.app.set_workspace_theme(MAIN_WINDOW, true).unwrap();
-        assert!(matches!(own.dark_theme, ThemeId::Mocha));
+        assert!(matches!(own.settings.dark_theme, ThemeId::Mocha));
+        assert!(f.app.list_workspaces(MAIN_WINDOW)[0].own_theme);
         let theme = f.app.read_workspace("w1", |ws| ws.theme.clone()).flatten();
         assert!(matches!(theme.map(|t| t.dark), Some(ThemeId::Mocha)));
         f.state.set_settings(SettingsPatch {
@@ -1410,7 +1534,7 @@ mod tests {
         assert!(matches!(read(&f.app.settings).dark_theme, ThemeId::Mocha));
         assert!(matches!(f.state.settings().dark_theme, ThemeId::Nord));
         let shared = f.app.set_workspace_theme(MAIN_WINDOW, false).unwrap();
-        assert!(matches!(shared.dark_theme, ThemeId::Mocha));
+        assert!(matches!(shared.settings.dark_theme, ThemeId::Mocha));
         assert!(f.app.read_workspace("w1", |ws| ws.theme.is_none()).unwrap());
         let told: Vec<Target> = f
             .host

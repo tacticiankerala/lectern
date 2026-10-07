@@ -127,6 +127,18 @@ pub struct SettingsPatch {
     pub comments_visible: Option<bool>,
 }
 
+/// A window's settings as a command answers or `settings-changed` carries them, with the revision
+/// they were taken at. The revision rises with every change to any window's settings, so the UI
+/// drops a snapshot older than one it has applied, whichever way it arrived. It is no part of
+/// `Settings`, which `settings.json` holds.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SettingsSnapshot {
+    pub settings: Settings,
+    pub rev: u64,
+}
+
 /// Where the reader was in a document: the nearest heading and the pixel offset below it, falling
 /// back to the top block's source line, then to the scroll fraction.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -240,6 +252,9 @@ pub struct LibraryPayload {
 pub struct UserOpen {
     pub doc: Option<OpenResult>,
     pub library: LibraryPayload,
+    /// The path is a folder chosen in a blank window, which has no library to add it to: nothing
+    /// opened or joined. The UI asks for a new workspace's name, then creates it with the folder.
+    pub folder: bool,
 }
 
 /// A file offered by quick open.
@@ -270,6 +285,8 @@ pub struct RecentEntry {
 #[ts(export)]
 pub struct StartupPayload {
     pub settings: Settings,
+    /// The revision `settings` were taken at (`SettingsSnapshot`).
+    pub settings_rev: u64,
     pub library: LibraryPayload,
     pub recent: Vec<RecentEntry>,
     /// The document given on the command line, or the last one open, rendered during startup.
@@ -296,6 +313,8 @@ pub struct WorkspaceSummary {
     /// Shown in the window that asked.
     pub current: bool,
     pub roots: Vec<String>,
+    /// It has a theme of its own; otherwise it shows the shared one ("Same as other windows").
+    pub own_theme: bool,
 }
 
 /// Where a workspace the user chose opens: in the window they chose it from, or a new one.

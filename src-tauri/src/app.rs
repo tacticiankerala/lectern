@@ -141,6 +141,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::delete_workspace,
             commands::set_workspace_theme,
             commands::quit,
+            commands::set_unsaved,
         ])
         .on_window_event(on_window_event)
         .setup(move |app| setup(app, launch, opens))

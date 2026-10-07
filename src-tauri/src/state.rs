@@ -17,7 +17,10 @@
 //! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
 //! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
 //! with nothing else held, and stays held while the grammars' release is told, which then may
-//! take `focus`, `windows` and a window's `current` to warm them again.
+//! take `focus`, `windows` and a window's `current` to warm them again. The settings revision,
+//! `settings_rev`, is bumped under the `workspaces` write lock, which every change to a window's
+//! settings holds, and read under its read lock with the settings it stamps, so a snapshot's
+//! settings and revision agree.
 
 mod assets;
 mod doc;
@@ -47,7 +50,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use lectern_core::cache::RenderCache;
-use lectern_core::ipc::{OpenRequest, Settings, SettingsPatch};
+use lectern_core::ipc::{OpenRequest, Settings, SettingsPatch, SettingsSnapshot};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::library::LibraryIndex;
 use lectern_core::perf::PerfLog;
@@ -162,6 +165,11 @@ pub struct App {
     /// its workspace's, and `settings.json` mirrors the first workspace's.
     settings: RwLock<Settings>,
     workspaces: RwLock<Workspaces>,
+    /// The settings revision, stamped on every snapshot a window gets: bumped by each change to
+    /// any window's settings (the shared ones, a workspace's libraries or layout, or its theme),
+    /// so the UI drops a snapshot older than one it has applied. Bumped under the `workspaces`
+    /// write lock and read under its read lock, with the settings it stamps.
+    settings_rev: AtomicU64,
     /// The network hosts Lectern may reach, in any window.
     trust: RwLock<Trust>,
     /// The folders the image protocol may serve from, in any window.
@@ -250,6 +258,7 @@ impl App {
             assets: RwLock::new(assets),
             settings: RwLock::new(settings),
             workspaces: RwLock::new(workspaces),
+            settings_rev: AtomicU64::new(0),
             state: Mutex::new(state),
             notice: Mutex::new(notice),
             wsl_distro,
@@ -295,23 +304,31 @@ impl App {
         read(&self.windows).values().cloned().collect()
     }
 
-    /// The settings of the window showing the workspace `id` (`None` for a blank window).
-    fn settings_for(&self, id: Option<&str>) -> Settings {
+    /// The settings of the window showing the workspace `id` (`None` for a blank window), with
+    /// their revision.
+    fn snapshot_for(&self, id: Option<&str>) -> SettingsSnapshot {
         let settings = read(&self.settings);
         let workspaces = read(&self.workspaces);
-        effective_settings(&settings, id.and_then(|id| workspaces.get(id)))
+        SettingsSnapshot {
+            settings: effective_settings(&settings, id.and_then(|id| workspaces.get(id))),
+            rev: self.settings_rev.load(Ordering::SeqCst),
+        }
     }
 
     /// Applies a change made in `window`, showing its workspace (none for a blank window): each
     /// field goes to that workspace or to the shared settings, as `apply_patch` decides, and what
     /// changed is saved. Every window whose settings changed is told. Returns the window's
-    /// settings, or `None` when the window's state is retired: then nothing is applied. That is
-    /// checked under the workspaces lock, which `retire` takes, so a change already under way
-    /// when the window turned to another workspace (or closed) never lands.
-    fn apply_settings(&self, window: &WindowState, patch: SettingsPatch) -> Option<Settings> {
+    /// settings, with their revision, or `None` when the window's state is retired: then nothing
+    /// is applied. That is checked under the workspaces lock, which `retire` takes, so a change
+    /// already under way when the window turned to another workspace (or closed) never lands.
+    fn apply_settings(
+        &self,
+        window: &WindowState,
+        patch: SettingsPatch,
+    ) -> Option<SettingsSnapshot> {
         let id = window.workspace_id();
         let id = id.as_deref();
-        let (window_settings, effect) = {
+        let (snapshot, effect) = {
             let mut settings = write(&self.settings);
             let mut workspaces = write(&self.workspaces);
             if window.is_retired() {
@@ -323,18 +340,23 @@ impl App {
                 id.and_then(|id| workspaces.get_mut(id)),
                 patch,
             );
+            if effect.shared_changed || effect.workspace_changed {
+                self.settings_rev.fetch_add(1, Ordering::SeqCst);
+            }
             if effect.workspace_changed {
                 self.saver.workspaces(&workspaces);
             }
             if effect.shared_changed || mirrored(&workspaces) != mirror {
                 self.save_settings(&settings, &workspaces);
             }
-            let window_settings =
-                effective_settings(&settings, id.and_then(|id| workspaces.get(id)));
-            (window_settings, effect)
+            let snapshot = SettingsSnapshot {
+                settings: effective_settings(&settings, id.and_then(|id| workspaces.get(id))),
+                rev: self.settings_rev.load(Ordering::SeqCst),
+            };
+            (snapshot, effect)
         };
         self.settings_changed(id, effect);
-        Some(window_settings)
+        Some(snapshot)
     }
 
     /// Sends `settings-changed` to each window whose settings a change made in the window showing
@@ -345,7 +367,7 @@ impl App {
             if effect.shared_changed
                 || (effect.workspace_changed && window.workspace_id().as_deref() == id)
             {
-                window.emit(UiEvent::SettingsChanged(window.settings()));
+                window.emit(UiEvent::SettingsChanged(window.snapshot()));
             }
         }
     }
@@ -492,6 +514,8 @@ pub struct WindowState {
     /// Restored at launch and not shown yet: when it shows, it stays behind the window that has
     /// the focus.
     quiet: AtomicBool,
+    /// Its UI holds comment text that isn't saved yet: quitting from another window asks first.
+    unsaved: AtomicBool,
 }
 
 impl WindowState {
@@ -534,6 +558,7 @@ impl WindowState {
             placement: Mutex::new(placement),
             retired: AtomicBool::new(false),
             quiet: AtomicBool::new(false),
+            unsaved: AtomicBool::new(false),
         })
     }
 
@@ -563,7 +588,12 @@ impl WindowState {
 
     /// The window's settings: the shared ones, with its workspace's libraries, layout and theme.
     pub fn settings(&self) -> Settings {
-        self.app.settings_for(self.workspace_id().as_deref())
+        self.snapshot().settings
+    }
+
+    /// The window's settings (`settings`), with their revision.
+    pub fn snapshot(&self) -> SettingsSnapshot {
+        self.app.snapshot_for(self.workspace_id().as_deref())
     }
 
     /// The library roots of the window's workspace, in order.
@@ -615,12 +645,13 @@ impl WindowState {
 
     /// Applies a settings change made in this window: the libraries, the layout and (when the
     /// workspace has its own) the theme go to its workspace, the rest to every window's settings.
-    /// Returns the window's settings. A retired state's UI is gone, and changes nothing.
-    pub fn set_settings(self: &Arc<Self>, patch: SettingsPatch) -> Settings {
+    /// Returns the window's settings, with their revision. A retired state's UI is gone, and
+    /// changes nothing.
+    pub fn set_settings(self: &Arc<Self>, patch: SettingsPatch) -> SettingsSnapshot {
         let roots_changed = patch.library_roots.is_some();
         let mappings_changed = patch.path_mappings.is_some();
-        let Some(settings) = self.app.apply_settings(self, patch) else {
-            return self.settings();
+        let Some(snapshot) = self.app.apply_settings(self, patch) else {
+            return self.snapshot();
         };
         if mappings_changed {
             self.app.remap();
@@ -631,7 +662,7 @@ impl WindowState {
             }
             self.watch_user_roots();
         }
-        settings
+        snapshot
     }
 
     /// Reports a watcher event: document and review changes go to the UI, library changes rescan
@@ -1190,7 +1221,12 @@ mod tests {
         let mut profile = profile(&[]);
         let w2 = profile.workspaces.create("Garden");
         let f = fixture(profile, FakeHost::default());
-        assert!(!f.state.set_settings(hide_library()).library_visible);
+        assert!(
+            !f.state
+                .set_settings(hide_library())
+                .settings
+                .library_visible
+        );
         f.app.flush();
         let saved: Workspaces = read_json(&f.config.join(WORKSPACES_FILE));
         assert!(!saved.get("w1").unwrap().layout.library_visible);
@@ -1207,7 +1243,12 @@ mod tests {
         profile.workspaces.get_mut(&w2).unwrap().open = true;
         profile.workspaces.touch_focus(&w2);
         let f = fixture(profile, FakeHost::default());
-        assert!(!f.state.set_settings(hide_library()).library_visible);
+        assert!(
+            !f.state
+                .set_settings(hide_library())
+                .settings
+                .library_visible
+        );
         f.app.flush();
         let saved: Workspaces = read_json(&f.config.join(WORKSPACES_FILE));
         assert!(saved.get("w1").unwrap().layout.library_visible);
@@ -1376,5 +1417,35 @@ mod tests {
         lock(&f.host.events).clear();
         second.set_settings(SettingsPatch::default());
         assert!(f.host.settings_changes().is_empty());
+    }
+
+    /// Every snapshot a window gets is stamped with the settings revision: it rises with each
+    /// change to any window's settings (shared, layout or theme) and stays put for a change that
+    /// sets nothing, and a change's answer carries the same one as the event telling it.
+    #[test]
+    fn settings_snapshots_carry_a_rising_revision() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let at_start = f.state.snapshot().rev;
+        assert_eq!(f.state.startup().settings_rev, at_start);
+        let shared = f.state.set_settings(SettingsPatch {
+            font_size: Some(19),
+            ..SettingsPatch::default()
+        });
+        assert_eq!(shared.rev, at_start + 1);
+        assert_eq!(shared.settings.font_size, 19);
+        assert_eq!(f.host.settings_revs(), [shared.rev]);
+        let same = f.state.set_settings(SettingsPatch::default());
+        assert_eq!(same.rev, shared.rev);
+        let layout = f.state.set_settings(hide_library());
+        assert_eq!(layout.rev, shared.rev + 1);
+        let own = f.app.set_workspace_theme(MAIN_WINDOW, true).unwrap();
+        assert_eq!(own.rev, layout.rev + 1);
+        assert_eq!(f.host.settings_revs(), [shared.rev, layout.rev, own.rev]);
+        // Its own already: nothing changed, and the window hears the same revision again.
+        let again = f.app.set_workspace_theme(MAIN_WINDOW, true).unwrap();
+        assert_eq!(again.rev, own.rev);
+        assert_eq!(f.host.settings_revs().last(), Some(&own.rev));
+        // What `get_settings` answers.
+        assert_eq!(f.state.snapshot().rev, own.rev);
     }
 }
