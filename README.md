@@ -24,6 +24,26 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 - **Quick.** A cold start straight into a 3,000-line document takes under half a second on a desktop PC.
 - **Stays current.** Lectern checks GitHub Releases once a day and updates in one click.
 
+## Workspaces and windows
+
+<p align="center">
+  <img src="docs/screenshots/workspaces.png" alt="Two Lectern windows side by side: the Studio workspace in the Paper theme, with its list of workspaces open over a project plan, and the Kitchen workspace on a recipe in Nord">
+</p>
+
+Each Lectern window shows one **workspace**: a name, its own library folders and theme, and the note, recent files and layout it had last. Quick open, search and wikilinks see only the window's own folders, so a work note never turns up among your recipes. A folder can belong to more than one workspace.
+
+The workspace's name sits at the left of the toolbar. Click it for the list of workspaces. Click one to **open it here**, switching this window over, or click the button beside it (or press Ctrl+Enter) to **open it in a new window**. A workspace that's already open in another window says **Switch to window** instead, and brings that window forward. The list also has **New workspace** and **Rename**.
+
+**Ctrl+N** opens a blank window that lists your workspaces, with a **New workspace** button. A new workspace asks for its name first, suggesting "Workspace 2" or the next free number, then opens ready for you to add a folder. One you leave without a folder is forgotten when its window closes.
+
+**Quit Lectern** (Ctrl+Q, or the last item in the ⋯ menu) closes every window at once, and the next launch brings them all back, each in its place with its last note. Closing windows one at a time is different: as in a browser, only the last one you close comes back next time. The others stay in the list, ready to reopen. **Delete** one in Preferences, which never touches its files.
+
+**Opening from Explorer** goes to the window whose folders hold the file. If only a closed workspace holds it, that workspace reopens in a new window; otherwise the file opens in the window you used last. A folder opened from Explorer joins the library of the window you used last.
+
+**A theme for each workspace.** Preferences (Ctrl+,) starts with **This workspace**: its name, its folders and its theme. A workspace uses the same theme as the other windows until you tick **Use its own theme** and pick its own light and dark themes. Everything under **All windows** changes every open window at once.
+
+When you upgrade from an earlier version, your folders and settings become a workspace named "Main", and everything else stays as it was.
+
 ## Reviewing with an AI agent
 
 <p align="center">
@@ -73,7 +93,7 @@ The comments button beside **Aa** shows how many are open. Click it, or press Ct
   </tr>
 </table>
 
-Every screenshot shows the invented demo library in [`fixtures/demo`](fixtures/demo). Add that folder to Lectern to try it yourself.
+Every screenshot shows the invented demo library in [`fixtures/demo`](fixtures/demo). Add that folder to Lectern to try it yourself, or make two workspaces from it, as in the screenshot above: "Studio" with its `projects` folder and "Kitchen" with its `recipes`.
 
 ## Install
 
