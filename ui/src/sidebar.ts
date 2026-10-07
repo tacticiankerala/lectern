@@ -4,7 +4,8 @@
 // toggles it; README folders carry their `status:` badge when the setting asks for them, and notes
 // with review comments their count of open ones while the feature is on. The open document is
 // highlighted, its folders expanded and its row scrolled into view. With no roots it offers to add
-// a folder instead; in a blank window, which has no workspace, to choose one or start one.
+// a folder instead; in a blank window, which has no workspace, to choose one (back on its list,
+// from a loose file too) or start one.
 import { h, samePath } from "./dom";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
@@ -19,6 +20,8 @@ export interface SidebarHost {
   contextMenu(e: MouseEvent, path: string, root: boolean): void;
   /** Asks for a folder and adds it to the library. */
   addFolder(): void;
+  /** A blank window's list of workspaces to choose from, again. */
+  chooseWorkspace(): void;
 }
 
 /** A rendered row and what it shows. */
@@ -201,11 +204,18 @@ export class Sidebar {
     }
   }
 
-  /** With no roots: what the library is for, and a button to start one. */
+  /**
+   * With no roots: what the library is for, and a button to start one; in a blank window, one to
+   * choose a workspace first.
+   */
   private emptyHint(): HTMLElement {
     const add = h("button", { type: "button", class: "btn" }, "Add folder…");
     add.addEventListener("click", () => {
       this.app.addFolder();
+    });
+    const choose = h("button", { type: "button", class: "btn" }, "Choose a workspace");
+    choose.addEventListener("click", () => {
+      this.app.chooseWorkspace();
     });
     return h(
       "div",
@@ -217,6 +227,7 @@ export class Sidebar {
           ? "Choose a workspace, or add a folder to start a new one."
           : "Add a folder to build your library",
       ),
+      ...(this.blank ? [choose] : []),
       add,
       h("p", { class: "lib-empty-note" }, "Lectern indexes the Markdown files in folders you add."),
     );

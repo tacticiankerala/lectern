@@ -305,13 +305,28 @@ fn clean_name(name: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// What a window shows besides the shared settings: its workspace, or, for a blank window, the
+/// layout it keeps for itself, which lasts as long as the window and is never saved.
+#[derive(Clone, Copy, Debug)]
+pub enum Shown<'a> {
+    Workspace(&'a Workspace),
+    Blank(&'a Layout),
+}
+
+/// `Shown`, for a change.
+#[derive(Debug)]
+pub enum ShownMut<'a> {
+    Workspace(&'a mut Workspace),
+    Blank(&'a mut Layout),
+}
+
 /// The settings a window shows: the shared ones, with its workspace's libraries and layout and,
-/// when it has one, the workspace's own theme. A blank window (no workspace) has no libraries and
-/// the default layout.
-pub fn effective_settings(shared: &Settings, ws: Option<&Workspace>) -> Settings {
+/// when it has one, the workspace's own theme. A blank window has no libraries, and its own
+/// layout.
+pub fn effective_settings(shared: &Settings, shown: Shown<'_>) -> Settings {
     let mut s = shared.clone();
-    match ws {
-        Some(ws) => {
+    match shown {
+        Shown::Workspace(ws) => {
             s.library_roots.clone_from(&ws.roots);
             ws.layout.write_into(&mut s);
             if let Some(theme) = &ws.theme {
@@ -320,9 +335,9 @@ pub fn effective_settings(shared: &Settings, ws: Option<&Workspace>) -> Settings
                 s.dark_theme = theme.dark.clone();
             }
         }
-        None => {
+        Shown::Blank(layout) => {
             s.library_roots.clear();
-            Layout::default().write_into(&mut s);
+            layout.write_into(&mut s);
         }
     }
     s
@@ -333,17 +348,19 @@ pub fn effective_settings(shared: &Settings, ws: Option<&Workspace>) -> Settings
 pub struct PatchEffect {
     pub shared_changed: bool,
     pub workspace_changed: bool,
+    /// A blank window's own layout.
+    pub blank_changed: bool,
 }
 
-/// Applies a change made in the window showing `ws` (`None` for a blank window), sending each
-/// field to exactly one place:
+/// Applies a change made in the window that shows `shown`, sending each field to exactly one
+/// place:
 /// - the theme fields to the workspace's own theme when it has one, else to the shared settings
-/// - the libraries and the layout to the workspace; a blank window has nowhere to keep them, so
-///   they are dropped
+/// - the libraries and the layout to the workspace; a blank window keeps the layout for itself and
+///   has no libraries, so those are dropped
 /// - everything else to the shared settings, which are then clamped
 pub fn apply_patch(
     shared: &mut Settings,
-    ws: Option<&mut Workspace>,
+    shown: ShownMut<'_>,
     patch: SettingsPatch,
 ) -> PatchEffect {
     // Named in full, so a new field fails to compile until it is routed.
@@ -371,21 +388,24 @@ pub fn apply_patch(
         comments_visible,
     } = patch;
     let mut effect = PatchEffect::default();
-    if let Some(ws) = ws {
-        let changed = &mut effect.workspace_changed;
-        if let Some(theme) = &mut ws.theme {
-            *changed |= set(&mut theme.mode, theme_mode.take());
-            *changed |= set(&mut theme.light, light_theme.take());
-            *changed |= set(&mut theme.dark, dark_theme.take());
+    let (layout, changed) = match shown {
+        ShownMut::Workspace(ws) => {
+            let changed = &mut effect.workspace_changed;
+            if let Some(theme) = &mut ws.theme {
+                *changed |= set(&mut theme.mode, theme_mode.take());
+                *changed |= set(&mut theme.light, light_theme.take());
+                *changed |= set(&mut theme.dark, dark_theme.take());
+            }
+            *changed |= set(&mut ws.roots, library_roots);
+            (&mut ws.layout, changed)
         }
-        *changed |= set(&mut ws.roots, library_roots);
-        let layout = &mut ws.layout;
-        *changed |= set(&mut layout.library_visible, library_visible);
-        *changed |= set(&mut layout.outline_visible, outline_visible);
-        *changed |= set(&mut layout.library_width, library_width);
-        *changed |= set(&mut layout.outline_width, outline_width);
-        *changed |= set(&mut layout.comments_visible, comments_visible);
-    }
+        ShownMut::Blank(layout) => (layout, &mut effect.blank_changed),
+    };
+    *changed |= set(&mut layout.library_visible, library_visible);
+    *changed |= set(&mut layout.outline_visible, outline_visible);
+    *changed |= set(&mut layout.library_width, library_width);
+    *changed |= set(&mut layout.outline_width, outline_width);
+    *changed |= set(&mut layout.comments_visible, comments_visible);
     let changed = &mut effect.shared_changed;
     *changed |= set(&mut shared.theme_mode, theme_mode);
     *changed |= set(&mut shared.light_theme, light_theme);
@@ -486,32 +506,62 @@ pub fn route_open(
     )
 }
 
+/// What `load_workspaces` found.
+#[derive(Debug)]
+pub struct LoadedWorkspaces {
+    pub workspaces: Workspaces,
+    /// For the user, once: the file couldn't be read.
+    pub notice: Option<String>,
+    /// `workspaces.json` is there but could be neither read nor moved aside, so the workspaces
+    /// were made from the other files instead. Saving them would replace the user's, so nothing
+    /// is saved to it this session.
+    pub read_only: bool,
+}
+
 /// Reads `workspaces.json` from `config_dir`, normalized. A missing file, or one with no
 /// workspaces, becomes the migration of the given profile. A corrupt one is kept beside it as a
-/// backup and also migrated, from the libraries and layout `settings.json` mirrors; the second
-/// value is then a notice for the user.
+/// backup and also migrated, from the libraries and layout `settings.json` mirrors, with a notice
+/// for the user. So is one that can be neither read nor moved aside, which is then left alone
+/// (`read_only`).
 pub fn load_workspaces(
     config_dir: &Path,
     settings: &Settings,
     last_doc: Option<String>,
     recent: Vec<RecentEntry>,
     placement: Option<WindowPlacement>,
-) -> (Workspaces, Option<String>) {
+) -> LoadedWorkspaces {
+    let path = config_dir.join(WORKSPACES_FILE);
     let migrate = || Workspaces::migrate(settings, last_doc, recent, placement);
-    let (mut workspaces, notice) =
-        match load_json_or_default::<Workspaces>(&config_dir.join(WORKSPACES_FILE)) {
-            Loaded::Ok(loaded) if !loaded.items.is_empty() => (loaded, None),
-            Loaded::Ok(_) | Loaded::Fresh(_) => (migrate(), None),
-            Loaded::RecoveredFromCorrupt { backup, .. } => {
-                log::warn!("workspaces were unreadable; kept as {}", backup.display());
-                let notice = format!(
-                    "Lectern couldn't read its workspaces, so they were rebuilt from your \
-                     libraries. The old file was kept as {}.",
-                    backup.display()
-                );
-                (migrate(), Some(notice))
-            }
-        };
-    workspaces.normalize();
-    (workspaces, notice)
+    let mut loaded = LoadedWorkspaces {
+        workspaces: Workspaces::default(),
+        notice: None,
+        read_only: false,
+    };
+    loaded.workspaces = match load_json_or_default::<Workspaces>(&path) {
+        Loaded::Ok(saved) if !saved.items.is_empty() => saved,
+        Loaded::Ok(_) => migrate(),
+        // There, or no telling: either way it mustn't be replaced.
+        Loaded::Fresh(_) if path.try_exists().unwrap_or(true) => {
+            log::warn!("workspaces could be neither read nor moved aside; saving none of them");
+            loaded.read_only = true;
+            loaded.notice = Some(
+                "Lectern couldn't read its workspaces file, so it opened your libraries from the \
+                 settings. Workspace changes won't be saved until you restart Lectern."
+                    .to_owned(),
+            );
+            migrate()
+        }
+        Loaded::Fresh(_) => migrate(),
+        Loaded::RecoveredFromCorrupt { backup, .. } => {
+            log::warn!("workspaces were unreadable; kept as {}", backup.display());
+            loaded.notice = Some(format!(
+                "Lectern couldn't read its workspaces, so they were rebuilt from your libraries. \
+                 The old file was kept as {}.",
+                backup.display()
+            ));
+            migrate()
+        }
+    };
+    loaded.workspaces.normalize();
+    loaded
 }

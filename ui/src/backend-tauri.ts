@@ -1,7 +1,7 @@
 // The Backend on Tauri: commands through `invoke` (arguments camelCased, as Rust expects them),
 // events through `listen`, and the file and folder pickers through the dialog plugin.
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type EventTarget as TauriTarget } from "@tauri-apps/api/event";
+import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { Candidate } from "./generated/Candidate";
@@ -42,6 +42,8 @@ function thisLabel(): string {
 export class TauriBackend implements Backend {
   /** Listener registrations still on their way to Rust; `startup` waits for them. */
   private readonly registering: Promise<unknown>[] = [];
+  /** Every listener not stopped yet, as `listen` answers it; `stopListening` stops them. */
+  private readonly listening = new Set<Promise<UnlistenFn>>();
   /** The window this UI runs in; the window commands act on it alone. */
   private readonly label = thisLabel();
   /**
@@ -147,13 +149,13 @@ export class TauriBackend implements Backend {
   }
 
   /** Asks GitHub Releases for a newer Lectern (Rust's updater). */
-  checkUpdate(): Promise<UpdateInfo | null> {
-    return invoke("check_update");
+  checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
+    return invoke("check_update", { automatic });
   }
 
   /** Installs the update found and restarts, or, for a portable copy, opens the Releases page. */
-  installUpdate(): Promise<void> {
-    return invoke("install_update");
+  installUpdate(force: boolean): Promise<string[]> {
+    return invoke("install_update", { force });
   }
 
   perfMark(name: string, ms?: number): void {
@@ -218,24 +220,25 @@ export class TauriBackend implements Backend {
     return invoke("set_unsaved", { on });
   }
 
+  closeWindow(): Promise<void> {
+    return invoke("close_window");
+  }
+
   /**
    * The window's drop event, which `getCurrentWebviewWindow().onDragDropEvent` wraps, heard
    * through `listen` on this window's target: the webview module would add to the bundle loaded
    * before first paint. Not awaited by `startup`, as nothing is dropped before the window shows.
    */
   onDragDrop(cb: (paths: string[]) => void): () => void {
-    const unlisten = listen<{ paths: string[] }>(
-      "tauri://drag-drop",
-      (e) => {
-        cb(e.payload.paths);
-      },
-      { target: this.target },
+    return this.track(
+      listen<{ paths: string[] }>(
+        "tauri://drag-drop",
+        (e) => {
+          cb(e.payload.paths);
+        },
+        { target: this.target },
+      ),
     );
-    return () => {
-      void unlisten.then((stop) => {
-        stop();
-      });
-    };
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- callers name the payload type
@@ -248,10 +251,34 @@ export class TauriBackend implements Backend {
       { target: this.target },
     );
     this.registering.push(unlisten);
+    return this.track(unlisten);
+  }
+
+  /**
+   * Tauri drops a page's listeners only when its window closes, not when the page reloads into
+   * another workspace, so each is stopped here first.
+   */
+  async stopListening(): Promise<void> {
+    const listening = [...this.listening];
+    this.listening.clear();
+    await Promise.all(
+      listening.map(async (unlisten) => {
+        // Typed as answering nothing, it answers once Rust has dropped the listener.
+        const stop = (await unlisten) as unknown as () => Promise<void>;
+        await stop();
+      }),
+    );
+  }
+
+  /** Keeps `unlisten` for `stopListening`; returns its unsubscribe, which stops it once. */
+  private track(unlisten: Promise<UnlistenFn>): () => void {
+    this.listening.add(unlisten);
     return () => {
-      void unlisten.then((stop) => {
-        stop();
-      });
+      if (this.listening.delete(unlisten)) {
+        void unlisten.then((stop) => {
+          stop();
+        });
+      }
     };
   }
 }

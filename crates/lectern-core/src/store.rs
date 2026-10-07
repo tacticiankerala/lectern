@@ -10,9 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::ipc::{
-    EditorPref, Measure, RecentEntry, SavedPosition, Settings, SettingsPatch, ThemeId, ThemeMode,
-};
+use crate::ipc::{EditorPref, Measure, RecentEntry, SavedPosition, Settings, ThemeId, ThemeMode};
 use crate::library::path_key;
 
 const FONT_SIZE: (u8, u8) = (12, 32);
@@ -54,37 +52,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Sets every field `p` holds, then clamps.
-    pub fn apply(&mut self, p: SettingsPatch) {
-        fn set<T>(field: &mut T, value: Option<T>) {
-            if let Some(value) = value {
-                *field = value;
-            }
-        }
-        set(&mut self.theme_mode, p.theme_mode);
-        set(&mut self.light_theme, p.light_theme);
-        set(&mut self.dark_theme, p.dark_theme);
-        set(&mut self.body_font, p.body_font);
-        set(&mut self.code_font, p.code_font);
-        set(&mut self.font_size, p.font_size);
-        set(&mut self.line_height, p.line_height);
-        set(&mut self.measure, p.measure);
-        set(&mut self.code_wrap, p.code_wrap);
-        set(&mut self.library_visible, p.library_visible);
-        set(&mut self.outline_visible, p.outline_visible);
-        set(&mut self.library_width, p.library_width);
-        set(&mut self.outline_width, p.outline_width);
-        set(&mut self.library_roots, p.library_roots);
-        set(&mut self.path_mappings, p.path_mappings);
-        set(&mut self.editor, p.editor);
-        set(&mut self.auto_update, p.auto_update);
-        set(&mut self.show_status_badges, p.show_status_badges);
-        set(&mut self.sidebar_font_size, p.sidebar_font_size);
-        set(&mut self.review_comments, p.review_comments);
-        set(&mut self.comments_visible, p.comments_visible);
-        self.clamp();
-    }
-
     /// Brings font size, line height, measure and the sidebars' font size into range. Call after
     /// loading `settings.json`, which may have been edited by hand.
     pub fn clamp(&mut self) {

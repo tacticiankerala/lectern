@@ -417,6 +417,7 @@ mod tests {
     use super::*;
     use crate::state::test_support::*;
     use lectern_core::library::RootIndex;
+    use std::fs;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -550,6 +551,52 @@ mod tests {
             |(_, e)| matches!(e, UiEvent::LibraryUpdated(library) if library.roots[0].truncated),
         );
         assert!(told, "the UI heard nothing");
+    }
+
+    /// Whether a scan of `root` is running in `window`.
+    fn scanning(window: &WindowState, root: &Path) -> bool {
+        lock(&window.library)
+            .find_mut(root)
+            .is_some_and(|r| r.scanning)
+    }
+
+    /// A scan running as its window's state retires (the window closed, or turned to another
+    /// workspace) stops there: the rescan asked for meanwhile doesn't probe, walk or save a
+    /// snapshot.
+    #[test]
+    fn a_retired_windows_scan_stops_without_its_rescan() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let root = f.dir.folder("vault");
+        f.dir.file("vault/a.md", "# A");
+        // The first scan saves its snapshot, then stalls telling the UI its index is ready.
+        *lock(&f.host.hold_index_ready) = Some(root.clone());
+        f.state.add_root(&path_string(&root)).unwrap();
+        wait_until("the scan stalls", || f.host.indexed(&root));
+        f.state.request_scan(&root, None);
+        fs::remove_dir_all(&f.app.snapshot_dir).unwrap();
+        f.state.retire();
+        f.host.release();
+        wait_until("the scan ends", || !scanning(&f.state, &root));
+        assert!(load_snapshot(&f.app.snapshot_dir, &root).is_none());
+    }
+
+    /// A scan asked for before its window shows waits for it; when the window's state retires
+    /// meanwhile, the scan never starts.
+    #[test]
+    fn a_scan_waiting_for_its_window_never_starts_once_retired() {
+        let f = fixture_with_scan_delay(profile(&[]), FakeHost::default(), Duration::from_secs(30));
+        let root = f.dir.folder("garden");
+        f.dir.file("garden/seeds.md", "# Seeds");
+        f.app.new_window().unwrap();
+        let blank = f.app.window("win-1").unwrap();
+        lock(&blank.library).push_root(root.clone(), false);
+        blank.request_scan(&root, None);
+        assert!(scanning(&blank, &root));
+        blank.retire();
+        blank.ui_shown.open();
+        wait_until("the scan ends", || !scanning(&blank, &root));
+        assert!(load_snapshot(&f.app.snapshot_dir, &root).is_none());
+        assert!(lock(&blank.library).find_mut(&root).unwrap().tree.is_none());
     }
 
     #[test]

@@ -3,11 +3,14 @@ import { FakeBackend, type FakeOptions, type FakeWorkspace } from "../dev/backen
 import { App } from "../src/app";
 import { CommentsController } from "../src/comments";
 import type { OpenRequest } from "../src/generated/OpenRequest";
+import type { ReviewPayload } from "../src/generated/ReviewPayload";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { SettingsSnapshot } from "../src/generated/SettingsSnapshot";
-import { folderName, rootsHint } from "../src/workspace-menu";
-import { A, ROOT, appRoot, fixtures, settle } from "./helpers";
+import type { StartupPayload } from "../src/generated/StartupPayload";
+import type { WorkspaceSummary } from "../src/generated/WorkspaceSummary";
+import { confirmLeave, folderName, rootsHint } from "../src/workspace-menu";
+import { A, B, ROOT, appRoot, fixtures, settle } from "./helpers";
 
 const PROJECTS = "C:\\Users\\me\\projects";
 
@@ -77,6 +80,52 @@ describe("the workspace chip and its dropdown", () => {
     await vi.waitFor(() => {
       expect(document.title).toBe("Aye — Work");
     });
+  });
+
+  it("words the title from the startup payload, asking for no list before the first paint", async () => {
+    const fake = new FakeBackend(fixtures(), { workspaces: [WORK, PERSONAL], initial: A });
+    const list = vi.spyOn(fake, "listWorkspaces");
+    const app = new App(fake, appRoot());
+    await app.start();
+    expect(list).not.toHaveBeenCalled();
+    expect(fake.marks.some((m) => m.name === "first-paint")).toBe(true);
+    // The right title from the start.
+    expect(fake.titles).toEqual(["Aye — Work"]);
+    expect(chip().textContent).toContain("Work");
+  });
+
+  it("fetches the list once startup is in when the workspaces changed before", async () => {
+    const fake = new FakeBackend(fixtures(), { workspaces: [WORK, PERSONAL], initial: A });
+    // The payload is made, then another window makes Garden before it reaches this one.
+    const payload = await fake.startup();
+    let answer: (p: StartupPayload) => void = () => undefined;
+    vi.spyOn(fake, "startup").mockReturnValue(
+      new Promise<StartupPayload>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const app = new App(fake, appRoot());
+    const starting = app.start();
+    await settle();
+    fake.workspacesElsewhere("w3", { name: "Garden" });
+    answer(payload);
+    await starting;
+    await vi.waitFor(() => {
+      expect(app.workspaces.list.map((ws) => ws.name)).toEqual(["Work", "Personal", "Garden"]);
+    });
+  });
+
+  it("fetches the list when startup fails", async () => {
+    const fake = new FakeBackend(fixtures(), { workspaces: [WORK, PERSONAL], initial: A });
+    vi.spyOn(fake, "startup").mockRejectedValue(new Error("window not ready"));
+    const list = vi.spyOn(fake, "listWorkspaces");
+    const app = new App(fake, appRoot());
+    await app.start();
+    await vi.waitFor(() => {
+      expect(app.workspaces.list.map((ws) => ws.name)).toEqual(["Work", "Personal"]);
+    });
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(chip().textContent).toContain("Work");
   });
 
   it("names the workspace alone without a note", async () => {
@@ -243,7 +292,7 @@ describe("a blank window", () => {
     expect(hint?.querySelector(".lib-empty-title")?.textContent).toBe(
       "Choose a workspace, or add a folder to start a new one.",
     );
-    expect(hint?.querySelector("button")?.textContent).toBe("Add folder…");
+    expect(texts(hint ?? document, "button")).toEqual(["Choose a workspace", "Add folder…"]);
   });
 
   it("asks for one open in another window in a new window, from its list too", async () => {
@@ -337,6 +386,31 @@ describe("a blank window", () => {
     // Nothing joined anything.
     expect(app.state.library.roots).toEqual([]);
     expect(fake.workspaces().map((ws) => ws.roots)).toEqual([[ROOT], [PROJECTS]]);
+  });
+
+  it("goes back to the list from a loose file, and Back returns to the file", async () => {
+    const { fake, app } = await launch(blank);
+    fake.drop([A]);
+    await vi.waitFor(() => {
+      expect(app.state.doc?.path).toBe(A);
+    });
+    const choose = await vi.waitFor(() => {
+      const found = [
+        ...document.querySelectorAll<HTMLButtonElement>("#lx-library .lib-empty button"),
+      ].find((b) => b.textContent === "Choose a workspace");
+      if (!found) throw new Error("no Choose a workspace button");
+      return found;
+    });
+    choose.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#lx-doc .ws-chooser .ws-open")).not.toBeNull();
+    });
+    expect(app.state.doc).toBeNull();
+    expect(document.querySelector("#lx-doc h2")?.textContent).toBe("Choose a workspace");
+    document.querySelector<HTMLButtonElement>("#lx-back")?.click();
+    await vi.waitFor(() => {
+      expect(app.state.doc?.path).toBe(A);
+    });
   });
 
   it("Add folder picks the folder, then asks for the workspace's name", async () => {
@@ -846,6 +920,20 @@ describe("Preferences", () => {
     ]);
   });
 
+  it("never offers to delete the only workspace", async () => {
+    for (const options of [
+      { workspaces: [WORK] },
+      { workspaces: [{ ...WORK, open: false }], current: null },
+    ] satisfies FakeOptions[]) {
+      const { dialog } = await preferences(options);
+      const remove = [
+        ...dialog.querySelectorAll<HTMLButtonElement>(".prefs-workspaces button"),
+      ].find((b) => b.textContent === "Delete");
+      expect(remove?.disabled).toBe(true);
+      expect(remove?.title).toBe("Lectern needs at least one workspace.");
+    }
+  });
+
   it("has no This workspace part in a blank window", async () => {
     const { dialog } = await preferences({ workspaces: [{ ...WORK, open: false }], current: null });
     expect(dialog.querySelector<HTMLElement>(".prefs-group")?.hidden).toBe(true);
@@ -878,5 +966,250 @@ describe("the automatic update check", () => {
     await vi.advanceTimersByTimeAsync(6000);
     await settle(20);
     expect(fake.updateCalls).toEqual([]);
+  });
+});
+
+/** The open confirm dialog, once it shows. */
+function confirmShown(): Promise<HTMLElement> {
+  return vi.waitFor(() => {
+    const found = document.querySelector<HTMLElement>(".ws-confirm");
+    if (!found) throw new Error("no confirm");
+    return found;
+  });
+}
+
+describe("one at a time", () => {
+  it("a second Quit while the first asks joins it", async () => {
+    const { fake, app } = await launch();
+    fake.unsavedElsewhere = ["Personal"];
+    const first = app.quit();
+    const second = app.quit();
+    const asked = await confirmShown();
+    await settle();
+    expect(document.querySelectorAll(".ws-confirm")).toHaveLength(1);
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[0]?.click();
+    await Promise.all([first, second]);
+    expect(fake.windowCalls).toEqual([
+      { call: "quit", force: false },
+      { call: "quit", force: true },
+    ]);
+  });
+
+  it("a second Open here while the first asks joins it", async () => {
+    const { fake, app, reload } = await launch();
+    const typed = vi.spyOn(CommentsController.prototype, "hasUnsavedText").mockReturnValue(true);
+    const first = app.workspaces.open("w2", "here");
+    const second = app.workspaces.open("w2", "here");
+    const asked = await confirmShown();
+    await settle();
+    expect(document.querySelectorAll(".ws-confirm")).toHaveLength(1);
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[1]?.click();
+    await Promise.all([first, second]);
+    expect(fake.windowCalls).toEqual([{ call: "openWorkspace", id: "w2", where: "here" }]);
+    expect(reload).toHaveBeenCalledTimes(1);
+    typed.mockRestore();
+  });
+
+  it("each confirm names its own title and text", () => {
+    const root = appRoot();
+    void confirmLeave(root, "switch");
+    void confirmLeave(root, "quit");
+    const dialogs = [...document.querySelectorAll<HTMLElement>(".ws-confirm")];
+    expect(dialogs).toHaveLength(2);
+    const ids = dialogs.map((d) => [
+      d.getAttribute("aria-labelledby"),
+      d.getAttribute("aria-describedby"),
+    ]);
+    expect(new Set(ids.flat()).size).toBe(4);
+    for (const [i, dialog] of dialogs.entries()) {
+      const [title, text] = ids[i] ?? [];
+      expect(document.getElementById(title ?? "")?.closest(".ws-confirm")).toBe(dialog);
+      expect(document.getElementById(text ?? "")?.closest(".ws-confirm")).toBe(dialog);
+    }
+  });
+});
+
+describe("the workspace list while the theme switches", () => {
+  it("a list fetched as the own theme switches on still lands", async () => {
+    const { fake, app } = await launch();
+    let answer: (list: WorkspaceSummary[]) => void = () => undefined;
+    const before = await fake.listWorkspaces();
+    vi.spyOn(fake, "listWorkspaces").mockReturnValueOnce(
+      new Promise<WorkspaceSummary[]>((resolve) => {
+        answer = resolve;
+      }),
+    );
+    // Another window made Garden; this window's fetch of the list is on its way.
+    fake.workspacesElsewhere("w3", { name: "Garden" });
+    await app.workspaces.setOwnTheme(true);
+    answer(before);
+    await vi.waitFor(() => {
+      expect(app.workspaces.list.map((ws) => ws.name)).toEqual(["Work", "Personal", "Garden"]);
+    });
+    await settle();
+    expect(app.workspaces.list.map((ws) => ws.name)).toEqual(["Work", "Personal", "Garden"]);
+    expect(app.workspaces.current?.ownTheme).toBe(true);
+  });
+});
+
+describe("closing the window", () => {
+  it("asks before an unsaved comment goes, and closes once it is let go", async () => {
+    const { fake } = await launch();
+    fake.emit("close-requested", null);
+    let asked = await confirmShown();
+    // Another press of the close button while it asks asks nothing more.
+    fake.emit("close-requested", null);
+    await settle();
+    expect(document.querySelectorAll(".ws-confirm")).toHaveLength(1);
+    expect(asked.querySelector("h2")?.textContent).toBe("Discard the unsaved comment?");
+    expect(texts(asked, ".btn")).toEqual(["Discard", "Cancel"]);
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[1]?.click();
+    await settle();
+    expect(fake.windowCalls).toEqual([]);
+    fake.emit("close-requested", null);
+    asked = await confirmShown();
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[0]?.click();
+    await vi.waitFor(() => {
+      expect(fake.windowCalls).toEqual([{ call: "closeWindow" }]);
+    });
+  });
+});
+
+describe("listeners across a reload", () => {
+  it("are stopped before the page reloads into another workspace", async () => {
+    const { fake, app, reload } = await launch();
+    const stop = vi.spyOn(fake, "stopListening");
+    await app.workspaces.open("w2", "here");
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(reload.mock.invocationCallOrder[0] ?? 0);
+  });
+});
+
+describe("review comments switched off in another window", () => {
+  const REVIEW: ReviewPayload = {
+    notePath: A,
+    sidecarPath: "C:\\V\\a.review.md",
+    noteWslPath: null,
+    sidecarWslPath: null,
+    exists: true,
+    readOnly: null,
+    comments: [
+      {
+        id: 1,
+        status: "open",
+        state: "detached",
+        startLine: 9,
+        endLine: 9,
+        headingPath: [],
+        jumpLine: null,
+        pinnedHeading: null,
+        quote: "an old paragraph",
+        textStart: null,
+        textEnd: null,
+        currentText: null,
+        entries: [
+          {
+            author: "you",
+            name: "You",
+            kind: null,
+            text: "Still true?",
+            html: "<p>Still true?</p>",
+          },
+        ],
+      },
+    ],
+    unreadable: [],
+    openCount: 1,
+  };
+
+  async function withComments() {
+    const fake = new FakeBackend(fixtures(), { workspaces: [WORK, PERSONAL], initial: A });
+    fake.setReview(A, REVIEW);
+    const app = new App(fake, appRoot());
+    app.reloadWindow = vi.fn();
+    await app.start();
+    const reply = await vi.waitFor(() => {
+      const found = document.querySelector<HTMLButtonElement>(
+        'article.comment-card[data-id="1"] [data-action="reply"]',
+      );
+      if (!found) throw new Error("no card");
+      return found;
+    });
+    return { fake, app, reply };
+  }
+
+  function replyBox(): HTMLTextAreaElement | null {
+    return document.querySelector<HTMLTextAreaElement>(
+      'article.comment-card[data-id="1"] textarea',
+    );
+  }
+
+  it("keep a half-written reply, hidden, and show it again when switched back on", async () => {
+    const { fake, app, reply } = await withComments();
+    reply.click();
+    const box = replyBox();
+    if (!box) throw new Error("no reply box");
+    box.value = "Yes, for now";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    fake.settingsElsewhere({ reviewComments: false });
+    expect(app.layout.app.classList.contains("no-comments")).toBe(true);
+    expect(replyBox()?.value).toBe("Yes, for now");
+    fake.settingsElsewhere({ reviewComments: true });
+    await settle();
+    expect(app.layout.app.classList.contains("no-comments")).toBe(false);
+    expect(replyBox()?.value).toBe("Yes, for now");
+  });
+
+  it("load the note on screen again when switched back on, its draft kept", async () => {
+    const { fake, app, reply } = await withComments();
+    fake.setReview(B, {
+      ...REVIEW,
+      notePath: B,
+      sidecarPath: "C:\\V\\notes\\b.review.md",
+      comments: REVIEW.comments.map((c) => ({ ...c, id: 7, quote: "a later paragraph" })),
+    });
+    reply.click();
+    const box = replyBox();
+    if (!box) throw new Error("no reply box");
+    box.value = "Yes, for now";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    fake.settingsElsewhere({ reviewComments: false });
+    // Off, Rust refuses the next note's comments; nothing says so, as nothing of them shows.
+    await app.open(B);
+    await settle();
+    expect(document.querySelector("article.comment-card")).toBeNull();
+    expect(texts(document, "#lx-toasts .toast")).toEqual([]);
+    fake.settingsElsewhere({ reviewComments: true });
+    await vi.waitFor(() => {
+      expect(document.querySelector('article.comment-card[data-id="7"]')).not.toBeNull();
+    });
+    // The draft waits on its own note.
+    await app.open(A);
+    await vi.waitFor(() => {
+      expect(replyBox()?.value).toBe("Yes, for now");
+    });
+  });
+
+  it("go at once without a draft, and once the draft is let go", async () => {
+    const { fake } = await withComments();
+    const dispose = vi.spyOn(CommentsController.prototype, "dispose");
+    const typed = vi.spyOn(CommentsController.prototype, "hasUnsavedText").mockReturnValue(true);
+    fake.settingsElsewhere({ reviewComments: false });
+    expect(dispose).not.toHaveBeenCalled();
+    typed.mockReturnValue(false);
+    document.dispatchEvent(new MouseEvent("click"));
+    await vi.waitFor(() => {
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+    typed.mockRestore();
+    dispose.mockRestore();
+
+    const again = await withComments();
+    const gone = vi.spyOn(CommentsController.prototype, "dispose");
+    again.fake.settingsElsewhere({ reviewComments: false });
+    expect(gone).toHaveBeenCalledTimes(1);
+    gone.mockRestore();
   });
 });

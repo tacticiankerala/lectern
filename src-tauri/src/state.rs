@@ -12,8 +12,9 @@
 //!
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
 //! `lifecycle`, `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`,
-//! `cache`, `current`. The app's `mapper`, `notice`, `windows` and `focus`, and a window's
-//! `workspace`, `placement` and `watch`, are leaves: nothing else is locked while one is held.
+//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus` and `update_check`, and a
+//! window's `workspace`, `layout`, `placement` and `watch`, are leaves: nothing else is locked
+//! while one is held.
 //! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
 //! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
 //! with nothing else held, and stays held while the grammars' release is told, which then may
@@ -59,13 +60,14 @@ use lectern_core::render::RenderedDoc;
 use lectern_core::search::ContentCache;
 use lectern_core::watch::WatchEvent;
 use lectern_core::workspace::{
-    apply_patch, effective_settings, Layout, PatchEffect, WindowPlacement, Workspace, Workspaces,
+    apply_patch, effective_settings, Layout, PatchEffect, Shown, ShownMut, WindowPlacement,
+    Workspace, Workspaces,
 };
 use tauri::Window;
 
 pub use self::assets::AssetResponse;
 pub use self::doc::{render_file, Early, EarlyDoc};
-pub use self::open_queue::OpenQueue;
+pub use self::open_queue::{HeldLaunches, OpenQueue};
 pub use self::profile::{load_profile, mapper_for, Profile};
 pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
@@ -153,6 +155,17 @@ pub struct Boot {
     pub portable: bool,
 }
 
+/// Which window's page runs the process's one automatic update check (`App::claims_update_check`).
+enum UpdateCheck {
+    /// No window has asked for its startup payload yet.
+    Unclaimed,
+    /// The window with this label asked first: each page it starts (it may turn to another
+    /// workspace before the check) runs the check, until one has.
+    Claimed(String),
+    /// The check has run.
+    Ran,
+}
+
 /// What every window shares, and each window's state.
 pub struct App {
     host: Arc<dyn Host>,
@@ -162,13 +175,20 @@ pub struct App {
     timings: Timings,
     portable: bool,
     /// The settings every window shares. Their libraries and layout aren't read: each window has
-    /// its workspace's, and `settings.json` mirrors the first workspace's.
+    /// its workspace's, and `settings.json` mirrors the first workspace's. They stay as loaded,
+    /// which is what `settings.json` keeps while the workspaces can't be saved.
     settings: RwLock<Settings>,
     workspaces: RwLock<Workspaces>,
-    /// The settings revision, stamped on every snapshot a window gets: bumped by each change to
-    /// any window's settings (the shared ones, a workspace's libraries or layout, or its theme),
-    /// so the UI drops a snapshot older than one it has applied. Bumped under the `workspaces`
-    /// write lock and read under its read lock, with the settings it stamps.
+    /// `workspaces.json` couldn't be read, and must not be replaced: no workspace is saved this
+    /// session (`Profile::workspaces_read_only`).
+    workspaces_read_only: bool,
+    /// The settings revision, stamped on every snapshot a window gets, so the UI drops a snapshot
+    /// older than one it has applied. Bumped by every settings change a window makes
+    /// (`set_settings`, whichever fields it sets and wherever they go: the shared settings, its
+    /// workspace, or a blank window's own layout), and when a workspace's own theme is switched
+    /// on or off. Libraries added or removed from the library sidebar don't bump it: the UI takes
+    /// the libraries from the library, not from the settings. Bumped under the `workspaces` write
+    /// lock and read under its read lock, with the settings it stamps.
     settings_rev: AtomicU64,
     /// The network hosts Lectern may reach, in any window.
     trust: RwLock<Trust>,
@@ -198,8 +218,8 @@ pub struct App {
     /// The windows of the other open workspaces were opened, after the first window's first
     /// paint.
     restored: AtomicBool,
-    /// No window has asked for its startup payload yet.
-    primary: AtomicBool,
+    /// Which window's page runs the process's one automatic update check.
+    update_check: Mutex<UpdateCheck>,
     /// Lectern is quitting with its windows open: a window closing now leaves its workspace open.
     quitting: AtomicBool,
     /// Second launches, routed one at a time on a thread of their own.
@@ -222,6 +242,7 @@ impl App {
             state,
             mut workspaces,
             migrated,
+            workspaces_read_only,
             notice,
             wsl_distro,
             persist,
@@ -246,7 +267,7 @@ impl App {
                 boot.timings.release_after,
                 AppGrammars(weak.clone()),
             ),
-            saver: Saver::new(boot.config_dir, persist),
+            saver: Saver::new(boot.config_dir, persist, !workspaces_read_only),
             host,
             snapshot_dir: boot.snapshot_dir,
             perf: boot.perf,
@@ -258,6 +279,7 @@ impl App {
             assets: RwLock::new(assets),
             settings: RwLock::new(settings),
             workspaces: RwLock::new(workspaces),
+            workspaces_read_only,
             settings_rev: AtomicU64::new(0),
             state: Mutex::new(state),
             notice: Mutex::new(notice),
@@ -270,7 +292,7 @@ impl App {
             lifecycle: Mutex::new(()),
             next_label: AtomicU64::new(1),
             restored: AtomicBool::new(false),
-            primary: AtomicBool::new(true),
+            update_check: Mutex::new(UpdateCheck::Unclaimed),
             quitting: AtomicBool::new(false),
             launches: spawn_launcher(weak.clone()),
         });
@@ -304,23 +326,26 @@ impl App {
         read(&self.windows).values().cloned().collect()
     }
 
-    /// The settings of the window showing the workspace `id` (`None` for a blank window), with
-    /// their revision.
-    fn snapshot_for(&self, id: Option<&str>) -> SettingsSnapshot {
+    /// The settings of `window`, with their revision.
+    fn snapshot_for(&self, window: &WindowState) -> SettingsSnapshot {
+        let id = window.workspace_id();
         let settings = read(&self.settings);
         let workspaces = read(&self.workspaces);
+        let blank = lock(&window.layout);
         SettingsSnapshot {
-            settings: effective_settings(&settings, id.and_then(|id| workspaces.get(id))),
+            settings: effective_settings(&settings, shown(&workspaces, id.as_deref(), &blank)),
             rev: self.settings_rev.load(Ordering::SeqCst),
         }
     }
 
-    /// Applies a change made in `window`, showing its workspace (none for a blank window): each
-    /// field goes to that workspace or to the shared settings, as `apply_patch` decides, and what
-    /// changed is saved. Every window whose settings changed is told. Returns the window's
-    /// settings, with their revision, or `None` when the window's state is retired: then nothing
-    /// is applied. That is checked under the workspaces lock, which `retire` takes, so a change
-    /// already under way when the window turned to another workspace (or closed) never lands.
+    /// Applies a change made in `window`, showing its workspace (none for a blank window, which
+    /// keeps its layout for itself): each field goes to that workspace, the blank window's layout
+    /// or the shared settings, as `apply_patch` decides, and what changed is saved (a blank
+    /// window's layout never is). Every window whose settings changed is told. Returns the
+    /// window's settings, with their revision, or `None` when the window's state is retired: then
+    /// nothing is applied. That is checked under the workspaces lock, which `retire` takes, so a
+    /// change already under way when the window turned to another workspace (or closed) never
+    /// lands.
     fn apply_settings(
         &self,
         window: &WindowState,
@@ -334,13 +359,14 @@ impl App {
             if window.is_retired() {
                 return None;
             }
+            let mut blank = lock(&window.layout);
             let mirror = mirrored(&workspaces);
             let effect = apply_patch(
                 &mut settings,
-                id.and_then(|id| workspaces.get_mut(id)),
+                shown_mut(&mut workspaces, id, &mut blank),
                 patch,
             );
-            if effect.shared_changed || effect.workspace_changed {
+            if effect.shared_changed || effect.workspace_changed || effect.blank_changed {
                 self.settings_rev.fetch_add(1, Ordering::SeqCst);
             }
             if effect.workspace_changed {
@@ -350,24 +376,26 @@ impl App {
                 self.save_settings(&settings, &workspaces);
             }
             let snapshot = SettingsSnapshot {
-                settings: effective_settings(&settings, id.and_then(|id| workspaces.get(id))),
+                settings: effective_settings(&settings, shown(&workspaces, id, &blank)),
                 rev: self.settings_rev.load(Ordering::SeqCst),
             };
             (snapshot, effect)
         };
-        self.settings_changed(id, effect);
+        self.settings_changed(window, effect);
         Some(snapshot)
     }
 
-    /// Sends `settings-changed` to each window whose settings a change made in the window showing
-    /// the workspace `id` altered, with that window's own: every window when the shared settings
-    /// changed, else only the windows showing that workspace.
-    fn settings_changed(&self, id: Option<&str>, effect: PatchEffect) {
-        for window in self.windows() {
+    /// Sends `settings-changed` to each window whose settings a change made in `window` altered,
+    /// with that window's own: every window when the shared settings changed, else the windows
+    /// showing its workspace, or (a blank window's own layout) `window` alone.
+    fn settings_changed(&self, window: &WindowState, effect: PatchEffect) {
+        let id = window.workspace_id();
+        for other in self.windows() {
             if effect.shared_changed
-                || (effect.workspace_changed && window.workspace_id().as_deref() == id)
+                || (effect.workspace_changed && other.workspace_id() == id)
+                || (effect.blank_changed && other.label() == window.label())
             {
-                window.emit(UiEvent::SettingsChanged(window.snapshot()));
+                other.emit(UiEvent::SettingsChanged(other.snapshot()));
             }
         }
     }
@@ -395,10 +423,13 @@ impl App {
     }
 
     /// Saves the shared settings, with the first workspace's libraries and layout, where an
-    /// older Lectern reads them.
+    /// older Lectern reads them. While the workspaces can't be saved, the mirror stays as it was
+    /// loaded, so the two files keep agreeing.
     fn save_settings(&self, settings: &Settings, workspaces: &Workspaces) {
         let mut mirrored = settings.clone();
-        workspaces.mirror_into(&mut mirrored);
+        if !self.workspaces_read_only {
+            workspaces.mirror_into(&mut mirrored);
+        }
         self.saver.settings(&mirrored);
     }
 
@@ -464,9 +495,50 @@ impl App {
         }
     }
 
+    /// Whether the page of the window `label` that asks for its startup payload now runs the
+    /// process's automatic update check: the window that asked first does, each time a page of it
+    /// starts (it may turn to another workspace before the check), until the check has run.
+    fn claims_update_check(&self, label: &str) -> bool {
+        let mut check = lock(&self.update_check);
+        match &*check {
+            UpdateCheck::Unclaimed => {
+                *check = UpdateCheck::Claimed(label.to_owned());
+                true
+            }
+            UpdateCheck::Claimed(claimed) => claimed == label,
+            UpdateCheck::Ran => false,
+        }
+    }
+
+    /// The automatic update check ran: no page runs it again this session.
+    pub fn update_check_ran(&self) {
+        *lock(&self.update_check) = UpdateCheck::Ran;
+    }
+
     /// Writes pending workspaces, settings and state now; called as the app exits.
     pub fn flush(&self) {
         self.saver.flush(Duration::from_secs(2));
+    }
+}
+
+/// What the window showing the workspace `id` shows besides the shared settings: that workspace,
+/// or, for a blank window (or a workspace that is gone), the layout it keeps, `blank`.
+fn shown<'a>(workspaces: &'a Workspaces, id: Option<&str>, blank: &'a Layout) -> Shown<'a> {
+    match id.and_then(|id| workspaces.get(id)) {
+        Some(ws) => Shown::Workspace(ws),
+        None => Shown::Blank(blank),
+    }
+}
+
+/// `shown`, for a change.
+fn shown_mut<'a>(
+    workspaces: &'a mut Workspaces,
+    id: Option<&str>,
+    blank: &'a mut Layout,
+) -> ShownMut<'a> {
+    match id.and_then(|id| workspaces.get_mut(id)) {
+        Some(ws) => ShownMut::Workspace(ws),
+        None => ShownMut::Blank(blank),
     }
 }
 
@@ -485,6 +557,9 @@ pub struct WindowState {
     label: String,
     /// The id of the workspace the window shows; `None` for a blank window.
     workspace: Mutex<Option<String>>,
+    /// A blank window's own layout (which sidebars and comments show, and how wide): kept while
+    /// the window lasts, never saved. A window showing a workspace has the workspace's.
+    layout: Mutex<Layout>,
     library: Mutex<Library>,
     /// Bumped, under the cache lock, whenever the index changes: a render begun before then
     /// isn't cached.
@@ -545,6 +620,7 @@ impl WindowState {
             app: Arc::clone(app),
             label: label.to_owned(),
             workspace: Mutex::new(workspace),
+            layout: Mutex::new(Layout::default()),
             library: Mutex::new(library),
             index_gen: AtomicU64::new(0),
             cache: Mutex::new(RenderCache::new(CACHE_CAP)),
@@ -586,14 +662,15 @@ impl WindowState {
             .change_workspace(&id, |ws| !self.is_retired() && change(ws))
     }
 
-    /// The window's settings: the shared ones, with its workspace's libraries, layout and theme.
+    /// The window's settings: the shared ones, with its workspace's libraries, layout and theme
+    /// (a blank window's own layout).
     pub fn settings(&self) -> Settings {
         self.snapshot().settings
     }
 
     /// The window's settings (`settings`), with their revision.
     pub fn snapshot(&self) -> SettingsSnapshot {
-        self.app.snapshot_for(self.workspace_id().as_deref())
+        self.app.snapshot_for(self)
     }
 
     /// The library roots of the window's workspace, in order.
@@ -644,9 +721,9 @@ impl WindowState {
     }
 
     /// Applies a settings change made in this window: the libraries, the layout and (when the
-    /// workspace has its own) the theme go to its workspace, the rest to every window's settings.
-    /// Returns the window's settings, with their revision. A retired state's UI is gone, and
-    /// changes nothing.
+    /// workspace has its own) the theme go to its workspace (a blank window keeps the layout for
+    /// itself), the rest to every window's settings. Returns the window's settings, with their
+    /// revision. A retired state's UI is gone, and changes nothing.
     pub fn set_settings(self: &Arc<Self>, patch: SettingsPatch) -> SettingsSnapshot {
         let roots_changed = patch.library_roots.is_some();
         let mappings_changed = patch.path_mappings.is_some();
@@ -779,7 +856,7 @@ mod tests {
     use crate::state::paths::path_string;
     use std::time::Duration;
 
-    use lectern_core::ipc::SavedPosition;
+    use lectern_core::ipc::{OpenWhere, SavedPosition};
     use lectern_core::workspace::WORKSPACES_FILE;
 
     use crate::state::profile::{SETTINGS_FILE, STATE_FILE, UNLOADED_NOTICE};
@@ -1099,6 +1176,65 @@ mod tests {
         assert_eq!(main.roots, [path_string(&root)]);
         assert!(main.open);
         assert_eq!(main.last_doc, Some(path_string(&doc)));
+    }
+
+    /// A v0.3 profile in `config`: "Work" over `roots`, open, and `settings.json` mirroring it,
+    /// with a font size of 20.
+    fn write_v03_profile(config: &Path, roots: &[&Path]) {
+        let settings = Settings {
+            library_roots: roots.iter().map(|r| path_string(r)).collect(),
+            font_size: 20,
+            ..Settings::default()
+        };
+        let mut workspaces = Workspaces::migrate(&settings, None, Vec::new(), None);
+        workspaces.items[0].name = "Work".to_owned();
+        let write = |name: &str, json: String| fs::write(config.join(name), json).unwrap();
+        write(WORKSPACES_FILE, serde_json::to_string(&workspaces).unwrap());
+        write(SETTINGS_FILE, serde_json::to_string(&settings).unwrap());
+    }
+
+    /// A `workspaces.json` that can be neither read nor moved aside (here, held open by another
+    /// program as Lectern starts) is never replaced this session, whatever changes, and
+    /// `settings.json` keeps the mirror it had; the user is told once.
+    #[test]
+    fn a_workspaces_file_that_could_not_be_read_is_never_replaced() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = TempDir::new();
+        let work = dir.folder("work");
+        let config = dir.folder("config");
+        write_v03_profile(&config, &[&work]);
+        let path = config.join(WORKSPACES_FILE);
+        let before = fs::read(&path).unwrap();
+        let profile = {
+            let _held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&path)
+                .unwrap();
+            load_profile(&config, None)
+        };
+        assert!(profile.workspaces_read_only);
+        let f = fixture_in(dir, profile, FakeHost::default());
+        let notice = f.state.startup().startup_notice.unwrap();
+        assert!(
+            notice.contains("couldn't read its workspaces file"),
+            "{notice}"
+        );
+        f.state.set_settings(SettingsPatch {
+            library_visible: Some(false),
+            font_size: Some(22),
+            ..SettingsPatch::default()
+        });
+        f.app.new_window().unwrap();
+        f.app
+            .create_workspace("win-1", "Garden", OpenWhere::Here, None)
+            .unwrap();
+        f.app.flush();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let settings: Settings = read_json(&f.config.join(SETTINGS_FILE));
+        assert_eq!(settings.font_size, 22);
+        assert_eq!(settings.library_roots, [path_string(&work)]);
+        assert!(settings.library_visible);
     }
 
     /// `state.json` keeps the recent files, last document and placement an older Lectern wrote,

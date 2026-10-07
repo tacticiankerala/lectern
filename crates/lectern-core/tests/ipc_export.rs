@@ -293,6 +293,7 @@ fn startup_payload_carries_a_notice() {
         portable: false,
         startup_notice: Some("Settings were reset".to_owned()),
         workspace: None,
+        workspaces: vec![],
         primary: true,
     })
     .unwrap();
@@ -302,11 +303,28 @@ fn startup_payload_carries_a_notice() {
     assert_eq!(j["settingsRev"], 7);
     // A blank window shows no workspace.
     assert!(j["workspace"].is_null());
+    assert_eq!(j["workspaces"], json!([]));
     assert_eq!(j["primary"], true);
 }
 
 #[test]
 fn startup_payload_names_the_window_workspace() {
+    let personal = WorkspaceSummary {
+        id: "w2".to_owned(),
+        name: "Personal".to_owned(),
+        open: true,
+        current: true,
+        roots: vec!["C:\\Users\\me\\projects".to_owned()],
+        own_theme: true,
+    };
+    let work = WorkspaceSummary {
+        id: "w1".to_owned(),
+        name: "Work".to_owned(),
+        open: false,
+        current: false,
+        roots: vec![],
+        own_theme: false,
+    };
     let j = serde_json::to_value(StartupPayload {
         settings: Default::default(),
         settings_rev: 0,
@@ -316,21 +334,17 @@ fn startup_payload_names_the_window_workspace() {
         version: "0.3.0".to_owned(),
         portable: false,
         startup_notice: None,
-        workspace: Some(WorkspaceSummary {
-            id: "w2".to_owned(),
-            name: "Personal".to_owned(),
-            open: true,
-            current: true,
-            roots: vec!["C:\\Users\\me\\projects".to_owned()],
-            own_theme: true,
-        }),
+        workspace: Some(personal.clone()),
+        workspaces: vec![work, personal],
         primary: false,
     })
     .unwrap();
-    assert_eq!(
-        j["workspace"],
-        json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true})
-    );
+    let personal = json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true});
+    assert_eq!(j["workspace"], personal);
+    // Every workspace, for the title before the first paint.
+    assert_eq!(j["workspaces"][1], personal);
+    assert_eq!(j["workspaces"][0]["name"], "Work");
+    assert!(decl::<StartupPayload>().contains("workspaces: Array<WorkspaceSummary>,"));
     assert_eq!(j["primary"], false);
     assert_eq!(
         serde_json::to_value(OpenWhere::NewWindow).unwrap(),

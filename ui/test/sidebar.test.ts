@@ -14,7 +14,13 @@ function root(path: string, truncated: boolean): RootView {
 }
 
 function host() {
-  return { open: vi.fn(), retry: vi.fn(), contextMenu: vi.fn(), addFolder: vi.fn() };
+  return {
+    open: vi.fn(),
+    retry: vi.fn(),
+    contextMenu: vi.fn(),
+    addFolder: vi.fn(),
+    chooseWorkspace: vi.fn(),
+  };
 }
 
 describe("Sidebar", () => {
@@ -87,7 +93,16 @@ describe("Sidebar", () => {
     expect(el.querySelector(".lib-empty-title")?.textContent).toBe(
       "Choose a workspace, or add a folder to start a new one.",
     );
-    el.querySelector<HTMLButtonElement>(".lib-empty button")?.click();
+    const buttons = [...el.querySelectorAll<HTMLButtonElement>(".lib-empty button")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Choose a workspace", "Add folder…"]);
+    buttons[0]?.click();
+    expect(app.chooseWorkspace).toHaveBeenCalledTimes(1);
+    buttons[1]?.click();
     expect(app.addFolder).toHaveBeenCalledTimes(1);
+    // A window with a workspace has only Add folder.
+    sidebar.setBlank(false);
+    expect([...el.querySelectorAll(".lib-empty button")].map((b) => b.textContent)).toEqual([
+      "Add folder…",
+    ]);
   });
 });

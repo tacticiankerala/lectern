@@ -260,6 +260,7 @@ pub(super) fn profile(roots: &[&Path]) -> Profile {
     Profile {
         workspaces: Workspaces::migrate(&settings, None, Vec::new(), None),
         migrated: false,
+        workspaces_read_only: false,
         settings,
         state: StateFile::default(),
         notice: None,
@@ -270,7 +271,13 @@ pub(super) fn profile(roots: &[&Path]) -> Profile {
 }
 
 pub(super) fn fixture_in(dir: TempDir, profile: Profile, host: FakeHost) -> Fixture {
-    fixture_full(dir, profile, host, Arc::new(StartupWarmUp::new(|| {})))
+    fixture_full(
+        dir,
+        profile,
+        host,
+        Arc::new(StartupWarmUp::new(|| {})),
+        Duration::ZERO,
+    )
 }
 
 /// A fixture whose start-up warm-up is `warm`.
@@ -279,7 +286,23 @@ pub(super) fn fixture_with_warm(
     host: FakeHost,
     warm: Arc<StartupWarmUp>,
 ) -> Fixture {
-    fixture_full(TempDir::new(), profile, host, warm)
+    fixture_full(TempDir::new(), profile, host, warm, Duration::ZERO)
+}
+
+/// A fixture whose windows' scans wait up to `scan_delay` for the window to show. Its first window
+/// has shown already.
+pub(super) fn fixture_with_scan_delay(
+    profile: Profile,
+    host: FakeHost,
+    scan_delay: Duration,
+) -> Fixture {
+    fixture_full(
+        TempDir::new(),
+        profile,
+        host,
+        Arc::new(StartupWarmUp::new(|| {})),
+        scan_delay,
+    )
 }
 
 fn fixture_full(
@@ -287,6 +310,7 @@ fn fixture_full(
     profile: Profile,
     host: FakeHost,
     warm: Arc<StartupWarmUp>,
+    scan_delay: Duration,
 ) -> Fixture {
     let host = Arc::new(host);
     let watched = Arc::new(Mutex::new(Vec::new()));
@@ -308,7 +332,7 @@ fn fixture_full(
             early: Duration::from_millis(300),
             snapshots: Duration::from_millis(300),
             root: Duration::from_secs(5),
-            scan_delay: Duration::ZERO,
+            scan_delay,
             // Never in a test: releasing would race the other tests' renders.
             release_after: Duration::from_secs(24 * 60 * 60),
         },
@@ -319,6 +343,9 @@ fn fixture_full(
         Box::new(FakeWatch(Arc::clone(&fake_watch)))
     });
     let state = app.window(MAIN_WINDOW).expect("the first window's state");
+    if !scan_delay.is_zero() {
+        state.ui_shown.open();
+    }
     state.start_library();
     // The boot thread takes the roots once and then watches them: past that, nothing it does
     // races what a test does to the roots.

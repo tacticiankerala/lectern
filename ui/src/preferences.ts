@@ -340,13 +340,17 @@ export class Preferences {
     if (typing instanceof HTMLInputElement && this.workspaceList.contains(typing)) {
       return;
     }
+    const list = this.host.workspaces();
     this.workspaceList.replaceChildren(
-      ...this.host.workspaces().map((ws) => this.workspaceRow(ws)),
+      ...list.map((ws) => this.workspaceRow(ws, list.length === 1)),
     );
   }
 
-  /** A workspace in the list: its name and where it's open, with Rename and Delete. */
-  private workspaceRow(ws: WorkspaceSummary): HTMLElement {
+  /**
+   * A workspace in the list: its name and where it's open, with Rename and Delete. Delete is off
+   * for the only workspace (`only`) and for one open in a window, saying why.
+   */
+  private workspaceRow(ws: WorkspaceSummary, only: boolean): HTMLElement {
     const where = ws.current ? "This window" : ws.open ? "Open in another window" : "";
     const text = h(
       "span",
@@ -364,9 +368,9 @@ export class Preferences {
       { type: "button", class: "btn", "aria-label": `Delete ${ws.name}` },
       "Delete",
     );
-    if (ws.open) {
+    if (only || ws.open) {
       remove.disabled = true;
-      remove.title = "Close its window first.";
+      remove.title = only ? "Lectern needs at least one workspace." : "Close its window first.";
     }
     const row = h(
       "li",

@@ -28,7 +28,7 @@ use lectern_core::workspace::{
 };
 
 use super::doc::{render_file, Early, EarlyDoc};
-use super::open_queue::OpenQueue;
+use super::open_queue::{HeldLaunches, OpenQueue};
 use super::paths::{normalize_root, path_string};
 use super::sync::{lock, read, write, Slot};
 use super::{mirrored, App, WindowState};
@@ -281,8 +281,8 @@ impl App {
     }
 
     /// The windows other than `label` whose UI holds comment text that isn't saved yet, named as
-    /// `quit_from` names them.
-    fn unsaved_elsewhere(&self, label: &str) -> Vec<String> {
+    /// `quit_from` names them. Asked before Lectern quits, or restarts for an update.
+    pub fn unsaved_elsewhere(&self, label: &str) -> Vec<String> {
         let focus = lock(&self.focus).clone();
         let mut unsaved: Vec<Arc<WindowState>> = self
             .windows()
@@ -361,6 +361,14 @@ impl App {
     /// started again without a file, which brings the most recently focused window forward.
     pub fn second_launch(&self, request: Option<OpenRequest>) {
         let _ = self.launches.send(request);
+    }
+
+    /// Routes the second launches `held` while setup made the app, in the order they came, as
+    /// any other (`second_launch`); later ones aren't held.
+    pub fn route_held(&self, held: &HeldLaunches) {
+        for request in held.release() {
+            self.second_launch(Some(request));
+        }
     }
 
     /// Routes a second launch (`route_open`): to the window whose libraries hold the file, else
@@ -675,6 +683,18 @@ impl WindowState {
     pub fn set_unsaved(&self, on: bool) {
         self.unsaved.store(on, Ordering::SeqCst);
     }
+
+    /// The window's close button was pressed: true when it may close. While its UI holds comment
+    /// text that isn't saved yet, it stays, and its UI is asked (`close-requested`); once the user
+    /// lets the text go, the UI closes it (`set_unsaved(false)` first, so it isn't asked again).
+    /// Quitting closes every window without asking.
+    pub fn close_requested(&self) -> bool {
+        if !self.unsaved.load(Ordering::SeqCst) || self.app.quitting.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.emit(UiEvent::CloseRequested);
+        false
+    }
 }
 
 /// Whether `path` is a folder, giving up (as not one) after `timeout`: a stalled share must not
@@ -719,11 +739,12 @@ mod tests {
     use super::*;
     use crate::app::{Rect, MAIN_WINDOW};
     use crate::state::paths::path_string;
-    use crate::state::profile::{load_profile, Profile};
+    use crate::state::profile::{load_profile, Profile, SETTINGS_FILE};
     use crate::state::test_support::*;
     use crate::state::WindowShape;
-    use lectern_core::ipc::{OpenResult, SettingsPatch, ThemeId, ThemeMode};
+    use lectern_core::ipc::{OpenResult, Settings, SettingsPatch, ThemeId, ThemeMode};
     use lectern_core::watch::WatchEvent;
+    use lectern_core::workspace::WORKSPACES_FILE;
 
     const NORMAL: WindowShape = WindowShape {
         visible: true,
@@ -1099,9 +1120,10 @@ mod tests {
         let sent = lock(&f.host.events).len();
         f.state.on_watch_event(WatchEvent::DocChanged(plan));
         assert_eq!(lock(&f.host.events).len(), sent);
-        // The UI reloads and asks again.
+        // The UI reloads and asks again. It is the window that asked first, and the automatic
+        // update check hasn't run: this page runs it.
         let payload = main.startup();
-        assert!(!payload.primary);
+        assert!(payload.primary);
         let summary = payload.workspace.unwrap();
         assert_eq!(
             (summary.id.as_str(), summary.current),
@@ -1544,6 +1566,153 @@ mod tests {
             .collect();
         let main = Target::Window(MAIN_WINDOW.to_owned());
         assert_eq!(told, [main.clone(), main.clone(), main]);
+    }
+
+    /// A blank window keeps its layout for itself while it lasts: a change stays (the answer
+    /// doesn't undo it), only that window hears it, and nothing is saved. Once the window takes a
+    /// workspace, the workspace's layout shows.
+    #[test]
+    fn a_blank_window_keeps_its_own_layout_until_it_takes_a_workspace() {
+        let mut profile = profile(&[]);
+        let personal = add(&mut profile, "Personal", &[], false);
+        profile
+            .workspaces
+            .get_mut(&personal)
+            .unwrap()
+            .layout
+            .library_width = 333;
+        let f = fixture(profile, FakeHost::default());
+        f.app.new_window().unwrap();
+        f.app.new_window().unwrap();
+        let blank = window(&f, "win-1");
+        let files = || {
+            f.app.flush();
+            [WORKSPACES_FILE, SETTINGS_FILE].map(|name| fs::read(f.config.join(name)).ok())
+        };
+        let saved = files();
+        lock(&f.host.events).clear();
+        let answer = blank.set_settings(SettingsPatch {
+            library_visible: Some(false),
+            library_width: Some(400),
+            comments_visible: Some(false),
+            ..SettingsPatch::default()
+        });
+        let layout = |s: &Settings| (s.library_visible, s.library_width, s.comments_visible);
+        assert_eq!(layout(&answer.settings), (false, 400, false));
+        assert_eq!(layout(&blank.settings()), (false, 400, false));
+        assert!(answer.rev > 0);
+        // The other blank window, and the workspace's, keep theirs.
+        assert_eq!(layout(&window(&f, "win-2").settings()), (true, 280, true));
+        assert_eq!(layout(&f.state.settings()), (true, 280, true));
+        let told: Vec<Target> = f
+            .host
+            .settings_changes()
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect();
+        assert_eq!(told, [Target::Window("win-1".to_owned())]);
+        assert_eq!(files(), saved, "a blank window's layout is never saved");
+        f.app
+            .open_workspace("win-1", &personal, OpenWhere::Here)
+            .unwrap();
+        assert_eq!(layout(&window(&f, "win-1").settings()), (true, 333, true));
+    }
+
+    /// The process's one automatic update check runs in the window that asked first: again after
+    /// it turns to another workspace (its page reloads before the check), never in another
+    /// window, and no more once it has run.
+    #[test]
+    fn the_first_window_runs_the_update_check_until_it_has() {
+        let (dir, mut profile, _) = work_and_personal();
+        let garden = add(&mut profile, "Garden", &[], false);
+        let f = fixture_in(dir, profile, FakeHost::default());
+        assert!(f.state.startup().primary);
+        f.state.window_shown();
+        assert!(!window(&f, "win-1").startup().primary);
+        f.app
+            .open_workspace(MAIN_WINDOW, &garden, OpenWhere::Here)
+            .unwrap();
+        assert!(window(&f, MAIN_WINDOW).startup().primary);
+        f.app.update_check_ran();
+        f.app
+            .open_workspace(MAIN_WINDOW, "w1", OpenWhere::Here)
+            .unwrap();
+        assert!(!window(&f, MAIN_WINDOW).startup().primary);
+    }
+
+    /// The startup payload lists every workspace, the window's own marked current, so the UI can
+    /// word the title before its first paint without asking.
+    #[test]
+    fn the_startup_payload_lists_every_workspace() {
+        let (dir, profile, _) = work_and_personal();
+        let f = fixture_in(dir, profile, FakeHost::default());
+        let listed = |window: &Arc<WindowState>| -> Vec<(String, bool, bool)> {
+            window
+                .startup()
+                .workspaces
+                .into_iter()
+                .map(|ws| (ws.name, ws.open, ws.current))
+                .collect()
+        };
+        let named = |name: &str, open: bool, current: bool| (name.to_owned(), open, current);
+        assert_eq!(
+            listed(&f.state),
+            [named("Main", true, true), named("Personal", false, false)]
+        );
+        f.state.window_shown();
+        assert_eq!(
+            listed(&window(&f, "win-1")),
+            [named("Main", true, false), named("Personal", true, true)]
+        );
+    }
+
+    /// Launches that came before setup made the app go where any later one would: a note in an
+    /// open workspace whose window isn't restored yet opens in a window of its own, not in the
+    /// first window, which then doesn't restore that workspace again.
+    #[test]
+    fn launches_held_before_setup_are_routed_like_any_other() {
+        let dir = TempDir::new();
+        let work = dir.folder("work");
+        let personal_root = dir.folder("personal");
+        let note = dir.file("personal/tide.md", "# Tide");
+        let mut profile = profile(&[&work]);
+        let personal = add(&mut profile, "Personal", &[&personal_root], true);
+        let f = fixture_in(dir, profile, FakeHost::default());
+        let held = HeldLaunches::default();
+        assert!(held.hold(request(&note)).is_none());
+        f.app.route_held(&held);
+        wait_until("Personal's window opens", || {
+            !f.host.opened_windows().is_empty()
+        });
+        let win1 = window(&f, "win-1");
+        assert_eq!(win1.workspace_id(), Some(personal));
+        assert!(!f.opens.has_pending(), "nothing waits for the first window");
+        assert_eq!(opened_path(win1.startup().initial.as_ref().unwrap()), note);
+        f.state.startup();
+        f.state.window_shown();
+        assert_eq!(f.host.opened_windows(), ["win-1"]);
+    }
+
+    /// Closing a window whose UI holds an unsaved comment asks it first: the window stays, and its
+    /// UI alone hears `close-requested`. Without a draft, once the UI let it go, or while Lectern
+    /// quits, it closes.
+    #[test]
+    fn closing_a_window_with_an_unsaved_comment_asks_first() {
+        let (dir, profile, _) = work_and_personal();
+        let f = fixture_in(dir, profile, FakeHost::default());
+        f.state.window_shown();
+        let personal = window(&f, "win-1");
+        let asked = || f.host.targets(|e| matches!(e, UiEvent::CloseRequested));
+        assert!(personal.close_requested());
+        personal.set_unsaved(true);
+        assert!(!personal.close_requested());
+        assert_eq!(asked(), [Target::Window("win-1".to_owned())]);
+        personal.set_unsaved(false);
+        assert!(personal.close_requested());
+        f.state.set_unsaved(true);
+        f.app.quit();
+        assert!(f.state.close_requested());
+        assert_eq!(asked().len(), 1);
     }
 
     /// Focusing a window makes its workspace the most recently focused, saved.

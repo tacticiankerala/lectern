@@ -342,8 +342,8 @@ export class Actions {
   async checkForUpdates(manual: boolean): Promise<void> {
     const { Updater } = await import("./update.js");
     this.updater ??= new Updater(this.app.layout.headerActions, {
-      checkUpdate: () => this.app.backend.checkUpdate(),
-      installUpdate: () => this.app.backend.installUpdate(),
+      checkUpdate: (automatic) => this.app.backend.checkUpdate(automatic),
+      installUpdate: (portable) => this.app.installUpdate(portable),
       toast: (message) => {
         this.app.toast(message);
       },

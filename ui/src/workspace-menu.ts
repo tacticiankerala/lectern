@@ -2,7 +2,7 @@
 // header's workspace chip, a blank window's "Choose a workspace" list, the name field a new
 // workspace (or a rename) takes, the name prompt for a folder chosen in a blank window, and the
 // confirms before unsaved comment text is left behind (here, or in another window as Lectern
-// quits) and before a workspace is deleted.
+// quits or restarts for an update, or as this window closes) and before a workspace is deleted.
 //
 // Contracts:
 // - A row names a workspace, with a hint: its first folder's name, plus "+N" for more. Its button
@@ -569,22 +569,28 @@ export async function askName(
   });
 }
 
+/** What leaving this window's unsaved comment text behind is for. */
+export type Leaving = "switch" | "quit" | "update";
+
+const LEAVING: Record<Leaving, { text: string; go: string }> = {
+  switch: {
+    text: "Switching this window to another workspace discards what you've typed.",
+    go: "Switch anyway",
+  },
+  quit: { text: "Quitting Lectern discards what you've typed.", go: "Quit anyway" },
+  update: { text: "Updating Lectern discards what you've typed.", go: "Update anyway" },
+};
+
 /**
  * Asks before comment text that isn't saved is left behind, by switching this window to another
- * workspace or by quitting. True to go on.
+ * workspace, by quitting, or by updating, which restarts Lectern. True to go on.
  */
-export function confirmLeave(root: HTMLElement, action: "switch" | "quit"): Promise<boolean> {
-  return ask(
-    root,
-    "Your comment isn't saved",
-    action === "switch"
-      ? "Switching this window to another workspace discards what you've typed."
-      : "Quitting Lectern discards what you've typed.",
-    [
-      { label: "Keep writing", go: false },
-      { label: action === "switch" ? "Switch anyway" : "Quit anyway", go: true },
-    ],
-  );
+export function confirmLeave(root: HTMLElement, action: Leaving): Promise<boolean> {
+  const { text, go } = LEAVING[action];
+  return ask(root, "Your comment isn't saved", text, [
+    { label: "Keep writing", go: false },
+    { label: go, go: true },
+  ]);
 }
 
 /**
@@ -596,6 +602,35 @@ export function confirmQuitElsewhere(root: HTMLElement, windows: string[]): Prom
     { label: "Quit", go: true },
     { label: "Cancel", go: false },
   ]);
+}
+
+/**
+ * Asks before Lectern restarts to update while other windows hold comment text that isn't saved
+ * yet, named as `confirmQuitElsewhere` names them. True to update all the same.
+ */
+export function confirmUpdateElsewhere(root: HTMLElement, windows: string[]): Promise<boolean> {
+  return ask(
+    root,
+    `Unsaved comment in ${listed(windows)}.`,
+    "Lectern restarts to update, which discards it.",
+    [
+      { label: "Update anyway", go: true },
+      { label: "Cancel", go: false },
+    ],
+  );
+}
+
+/** Asks before this window closes with comment text that isn't saved. True to close it. */
+export function confirmDiscard(root: HTMLElement): Promise<boolean> {
+  return ask(
+    root,
+    "Discard the unsaved comment?",
+    "Closing this window discards what you've typed.",
+    [
+      { label: "Discard", go: true },
+      { label: "Cancel", go: false },
+    ],
+  );
 }
 
 /** "A", "A and B", "A, B and C". */
@@ -616,6 +651,9 @@ export function confirmDelete(root: HTMLElement, name: string): Promise<boolean>
     ],
   );
 }
+
+/** Numbers the confirms, so each one's title and text have ids of their own. */
+let asked = 0;
 
 /**
  * A confirm: `title`, `text`, and a button per answer, the first styled as the main one. The
@@ -643,17 +681,18 @@ function ask(
       });
       return button;
     });
+    const id = `lx-ws-confirm-${String(++asked)}`;
     const dialog = h(
       "div",
       {
         class: "about ws-confirm",
         role: "alertdialog",
         "aria-modal": "true",
-        "aria-labelledby": "lx-ws-confirm-title",
-        "aria-describedby": "lx-ws-confirm-text",
+        "aria-labelledby": `${id}-title`,
+        "aria-describedby": `${id}-text`,
       },
-      h("h2", { id: "lx-ws-confirm-title" }, title),
-      h("p", { id: "lx-ws-confirm-text" }, text),
+      h("h2", { id: `${id}-title` }, title),
+      h("p", { id: `${id}-text` }, text),
       h("div", { class: "ws-confirm-actions" }, ...buttons),
     );
     dialog.addEventListener("keydown", (e) => {

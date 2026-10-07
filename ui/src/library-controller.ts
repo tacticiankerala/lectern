@@ -22,6 +22,9 @@ export class LibraryController {
       retry: (path) => void this.retryRoot(path),
       contextMenu: (e, path, isRoot) => void app.actions.contextMenu(e, path, isRoot),
       addFolder: () => void app.addFolder(),
+      chooseWorkspace: () => {
+        app.nav.home();
+      },
     });
     app.on("library", () => {
       this.sidebar.setLibrary(app.state.library);

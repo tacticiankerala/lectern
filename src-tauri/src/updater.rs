@@ -73,6 +73,11 @@ impl Updates {
         Ok(InstallClaim(&self.installing))
     }
 
+    /// Whether this copy is portable: its "update" opens the Releases page, and Lectern stays.
+    pub fn portable(&self) -> bool {
+        self.portable
+    }
+
     fn pending(&self) -> MutexGuard<'_, Option<Update>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }

@@ -27,7 +27,8 @@ export type BackendEvent =
   | "index-ready"
   | "review-changed"
   | "settings-changed"
-  | "workspaces-changed";
+  | "workspaces-changed"
+  | "close-requested";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
@@ -59,8 +60,17 @@ export interface Backend {
   savePosition(path: string, position: SavedPosition): Promise<void>;
   setChromeColors(bg: string, fg: string, dark: boolean): Promise<void>;
   listSystemFonts(): Promise<string[]>;
-  checkUpdate(): Promise<UpdateInfo | null>;
-  installUpdate(): Promise<void>;
+  /**
+   * Asks GitHub Releases for a newer Lectern. `automatic`: the check after startup, which then
+   * runs no more this session (`StartupPayload.primary`).
+   */
+  checkUpdate(automatic: boolean): Promise<UpdateInfo | null>;
+  /**
+   * Installs the update found (Lectern then exits and restarts), or, for a portable copy, opens the
+   * Releases page. Unless `force`, an installed copy doesn't while another window holds comment text
+   * that isn't saved yet: the answer names those windows, as `quit` does. Empty when it went ahead.
+   */
+  installUpdate(force: boolean): Promise<string[]>;
   /** Fire and forget; Rust ignores marks when no perf log is configured. */
   perfMark(name: string, ms?: number): void;
   pickFile(): Promise<string | null>;
@@ -110,6 +120,16 @@ export interface Backend {
   quit(force: boolean): Promise<string[]>;
   /** Tells Rust whether this window holds comment text that isn't saved yet. */
   setUnsaved(on: boolean): Promise<void>;
+  /**
+   * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
+   * asked again.
+   */
+  closeWindow(): Promise<void>;
+  /**
+   * Stops every listener `on` and `onDragDrop` registered, before the page reloads: Rust keeps a
+   * page's listeners until its window closes otherwise.
+   */
+  stopListening(): Promise<void>;
   /** Calls `cb` with the paths of files or folders dropped on the window; returns the unsubscribe. */
   onDragDrop(cb: (paths: string[]) => void): () => void;
   /** Subscribes to a backend event; returns the unsubscribe function. */

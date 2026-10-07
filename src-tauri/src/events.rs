@@ -26,6 +26,9 @@ pub const REVIEW_CHANGED: &str = "review-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 /// The workspaces changed (no payload); sent to every window.
 pub const WORKSPACES_CHANGED: &str = "workspaces-changed";
+/// The window's close button was pressed while its UI holds comment text that isn't saved yet,
+/// so it stayed open (no payload): the UI asks whether to let the text go.
+pub const CLOSE_REQUESTED: &str = "close-requested";
 
 /// Which windows an event is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,7 @@ pub enum UiEvent {
     /// The settings of the window it is sent to, with their revision.
     SettingsChanged(SettingsSnapshot),
     WorkspacesChanged,
+    CloseRequested,
 }
 
 /// What the app state needs from Tauri.
@@ -83,6 +87,7 @@ impl Host for TauriHost {
             UiEvent::ReviewChanged(path) => emit(app, target, REVIEW_CHANGED, doc(&path)),
             UiEvent::SettingsChanged(settings) => emit(app, target, SETTINGS_CHANGED, settings),
             UiEvent::WorkspacesChanged => emit(app, target, WORKSPACES_CHANGED, ()),
+            UiEvent::CloseRequested => emit(app, target, CLOSE_REQUESTED, ()),
         }
     }
 

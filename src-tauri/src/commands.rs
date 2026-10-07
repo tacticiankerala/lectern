@@ -253,19 +253,41 @@ pub async fn perf_mark(name: String, ms: Option<f64>, state: Shared<'_>) -> Resu
     blocking(Arc::clone(&state), move |s| s.perf_mark(&name, ms)).await
 }
 
-/// Asks GitHub Releases for a newer Lectern.
+/// Asks GitHub Releases for a newer Lectern. `automatic`: the check after startup, which then
+/// runs no more this session (`App::update_check_ran`).
 #[tauri::command]
 pub async fn check_update(
+    automatic: bool,
     app: AppHandle,
     updates: State<'_, Updates>,
+    state: Shared<'_>,
 ) -> Result<Option<UpdateInfo>, String> {
+    if automatic {
+        state.update_check_ran();
+    }
     updater::check(&app, &updates).await
 }
 
 /// Installs the update found (and restarts), or for a portable copy opens the Releases page.
+/// Unless `force`, an installed copy doesn't while a window other than the caller holds comment
+/// text that isn't saved yet: the answer names those windows, as `quit` does, for the UI to ask.
+/// Empty when it went ahead.
 #[tauri::command]
-pub async fn install_update(app: AppHandle, updates: State<'_, Updates>) -> Result<(), String> {
-    updater::install(&app, &updates).await
+pub async fn install_update(
+    force: bool,
+    window: WebviewWindow,
+    app: AppHandle,
+    updates: State<'_, Updates>,
+    state: Shared<'_>,
+) -> Result<Vec<String>, String> {
+    if !force && !updates.portable() {
+        let unsaved = state.unsaved_elsewhere(window.label());
+        if !unsaved.is_empty() {
+            return Ok(unsaved);
+        }
+    }
+    updater::install(&app, &updates).await?;
+    Ok(Vec::new())
 }
 
 /// Shows the calling window at its first paint. A window restored at launch stays behind the
@@ -382,6 +404,16 @@ pub fn quit(force: bool, window: WebviewWindow, app: AppHandle, state: Shared<'_
 pub fn set_unsaved(on: bool, window: WebviewWindow, state: Shared<'_>) -> Result<(), String> {
     window_state(&window, &state)?.set_unsaved(on);
     Ok(())
+}
+
+/// Closes the calling window once its UI has let its unsaved comment text go (`close-requested`):
+/// it isn't asked again.
+#[tauri::command]
+pub fn close_window(window: WebviewWindow, state: Shared<'_>) -> Result<(), String> {
+    if let Some(s) = state.window(window.label()) {
+        s.set_unsaved(false);
+    }
+    window.close().map_err(|e| e.to_string())
 }
 
 /// Gives the calling window's workspace a theme of its own, or has it follow the shared theme

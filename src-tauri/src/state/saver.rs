@@ -14,9 +14,11 @@ use super::profile::{StateFile, SETTINGS_FILE, STATE_FILE};
 pub(super) const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
 /// Writes the workspaces, settings and state on a thread of its own, a moment after the last
-/// change. A saver made with `persist` false writes nothing.
+/// change. A saver made with `persist` false writes nothing, and one made with `workspaces` false
+/// writes no workspaces.
 pub(super) struct Saver {
     tx: Option<Sender<Save>>,
+    workspaces: bool,
 }
 
 pub(super) enum Save {
@@ -27,9 +29,12 @@ pub(super) enum Save {
 }
 
 impl Saver {
-    pub(super) fn new(dir: PathBuf, persist: bool) -> Self {
+    pub(super) fn new(dir: PathBuf, persist: bool, workspaces: bool) -> Self {
         if !persist {
-            return Self { tx: None };
+            return Self {
+                tx: None,
+                workspaces,
+            };
         }
         let (tx, rx) = mpsc::channel();
         let spawned = thread::Builder::new()
@@ -38,7 +43,10 @@ impl Saver {
         if let Err(e) = spawned {
             log::error!("couldn't start the save thread; settings won't be saved: {e}");
         }
-        Self { tx: Some(tx) }
+        Self {
+            tx: Some(tx),
+            workspaces,
+        }
     }
 
     pub(super) fn send(&self, save: Save) {
@@ -48,7 +56,9 @@ impl Saver {
     }
 
     pub(super) fn workspaces(&self, workspaces: &Workspaces) {
-        self.send(Save::Workspaces(Box::new(workspaces.clone())));
+        if self.workspaces {
+            self.send(Save::Workspaces(Box::new(workspaces.clone())));
+        }
     }
 
     pub(super) fn settings(&self, settings: &Settings) {

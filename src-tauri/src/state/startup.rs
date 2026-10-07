@@ -18,9 +18,11 @@ use super::WindowState;
 use crate::events::UiEvent;
 
 impl WindowState {
-    /// The window's startup payload. The document rendered as the window started (during boot,
-    /// for the first window) becomes the initial document, unless a second launch asked for
-    /// another one meanwhile. Only the first payload in the process is the primary one.
+    /// The window's startup payload, with every workspace for its title. The document rendered as
+    /// the window started (during boot, for the first window) becomes the initial document, unless
+    /// a second launch asked for another one meanwhile. The payloads of the window that asked
+    /// first are the primary ones, until the automatic update check has run
+    /// (`App::claims_update_check`).
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
         self.app.perf.mark("webview-ready", None);
         if !self.snapshots_loaded.wait(self.app.timings.snapshots) {
@@ -56,6 +58,7 @@ impl WindowState {
         }
         let recent = self.recent();
         let workspace = self.workspace_summary();
+        let workspaces = self.app.list_workspaces(&self.label);
         let SettingsSnapshot { settings, rev } = self.snapshot();
         let payload = StartupPayload {
             settings,
@@ -67,7 +70,8 @@ impl WindowState {
             portable: self.app.portable,
             startup_notice: lock(&self.app.notice).take(),
             workspace,
-            primary: self.app.primary.swap(false, Ordering::SeqCst),
+            workspaces,
+            primary: self.app.claims_update_check(&self.label),
         };
         self.app.perf.mark("startup-ready", None);
         payload

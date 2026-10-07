@@ -11,23 +11,27 @@
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
 //   Preferences, the menus, find in page, full-text search, update checks, About, the breadcrumb
 //   chooser and the workspaces' lists and prompts are separate modules, loaded on first use. The
-//   automatic update check runs 5 s after the first paint, in the process's first window only
-//   (`primary`); a manual one runs in any.
+//   automatic update check runs 5 s after the first paint, once per process: in the window that
+//   started first (`primary`), again if it turned to another workspace before the check ran; a
+//   manual one runs in any.
 // - The review comments module loads after the first paint while the feature is on, and goes when
-//   it's switched off. `#lx-app.no-comments` marks every comment surface hidden.
+//   it's switched off; while it holds comment text that isn't saved (another window switched the
+//   feature off), it stays, hidden, until that text is saved or let go. `#lx-app.no-comments`
+//   marks every comment surface hidden.
 // - The reading position is saved once scrolling stops for a moment and when the document is
 //   left; a document opened without an anchor or line goes back to its saved position.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
-//   window turns to another workspace or Lectern quits, unsaved comment text is confirmed, and the
-//   settings and the reading position are saved.
+//   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
+//   text is confirmed, and the settings and the reading position are saved.
 // - Every settings snapshot Rust sends (startup's, `settings-changed`, a command's answer) carries
 //   a revision, and one not newer than the last applied is dropped, whichever way it came. The
 //   newest applies as a change made here does, under the changes made here whose saves Rust
 //   hasn't answered yet: the echo of an older save never undoes a newer change, and a save's
 //   answer retires its change, so what Rust sent meanwhile isn't left hidden under it.
 // - Rust is told whenever this window starts or stops holding comment text that isn't saved yet,
-//   so quitting from another window can ask first. Quitting from here asks about this window's
-//   own text, then about any other window's.
+//   so quitting from another window can ask first, and closing this one asks here first
+//   (`close-requested`). Quitting or updating from here asks about this window's own text, then
+//   about any other window's. A second Quit while one is asking joins it.
 import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
@@ -58,6 +62,7 @@ import { RightPanel } from "./right-panel";
 import { applySettings, loadFonts, loadRememberedFonts } from "./themes";
 import { Toasts } from "./toast";
 import { renderError, renderWelcome } from "./welcome";
+import type { Leaving } from "./workspace-menu";
 import { Workspaces } from "./workspaces";
 
 /** The settings defaults, as Rust has them; shown until `startup` answers. */
@@ -191,6 +196,10 @@ export class App {
   private rev = 0;
   /** What Rust was last told about this window's unsaved comment text. */
   private unsavedTold = false;
+  /** The Quit under way, which another joins. */
+  private quitting: Promise<void> | null = null;
+  /** The close being asked about (`close-requested`), which another joins. */
+  private closing: Promise<void> | null = null;
   private readonly updateProgress: () => void;
   private readonly listeners = new Map<Change, Set<() => void>>();
   /** The native window title last set, and the document's title it names (null for none). */
@@ -201,8 +210,13 @@ export class App {
   private queued: OpenRequest | null = null;
   /** Set once the first paint is done: modules loaded after it may load. */
   private painted = false;
-  /** The review comments, while the feature is on and their module has loaded. */
+  /**
+   * The review comments, while the feature is on and their module has loaded, or while they hold
+   * comment text that isn't saved after the feature was switched off (`commentsKept`).
+   */
   private comments: CommentsController | null = null;
+  /** The comments are kept, hidden, for their unsaved text while the feature is off. */
+  private commentsKept = false;
   private commentsLoading: Promise<void> | null = null;
   /** Saves the reading position once scrolling has stopped for a moment. */
   private positionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -301,6 +315,7 @@ export class App {
       }
     });
     this.backend.on("workspaces-changed", () => void this.workspaces.refresh());
+    this.backend.on("close-requested", () => void this.closeRequested());
     this.backend.on<DocChanged>("doc-changed", (e) => {
       this.nav.changed(e.path);
     });
@@ -315,7 +330,6 @@ export class App {
     let notice: string | null;
     let initial: OpenResult | null = null;
     let primary = false;
-    let listed: Promise<void>;
     // The fonts selected last time load while the startup payload is on its way.
     const earlyFonts = loadRememberedFonts();
     try {
@@ -332,11 +346,12 @@ export class App {
       notice = payload.startupNotice;
       initial = payload.initial;
       primary = payload.primary;
-      // The list comes while the fonts load; the title waits for it.
-      listed = this.workspaces.begin(payload.workspace, payload.workspace === null);
+      this.workspaces.begin(payload.workspace, payload.workspace === null, payload.workspaces);
     } catch (e) {
       notice = `Lectern didn't start properly: ${String(e)}`;
-      listed = this.workspaces.begin(null, false);
+      // No list came: it is asked for, as on a change.
+      this.workspaces.begin(null, false, []);
+      void this.workspaces.refresh();
     }
     // The theme and fonts are in place before the first paint, so nothing flashes.
     this.applySettings();
@@ -345,12 +360,14 @@ export class App {
       this.show(initial);
       this.nav.settleDeferred();
     }
+    // Showing something sets the title; otherwise it names the workspace alone.
+    this.syncTitle();
     // A workspace with no folders yet, new or emptied, offers to add one.
     const ws = this.workspaces.current;
     if (ws && ws.roots.length === 0 && this.state.doc === null && this.state.error === null) {
       this.layout.doc.querySelector<HTMLElement>(".welcome-add-folder")?.focus();
     }
-    await Promise.all([Promise.race([fonts, delay(FONT_WAIT_MS)]), listed]);
+    await Promise.race([fonts, delay(FONT_WAIT_MS)]);
     await nextPaint();
     this.backend.perfMark("first-paint");
     this.painted = true;
@@ -579,11 +596,11 @@ export class App {
   }
 
   /**
-   * Before the window turns to another workspace (`switch`) or Lectern quits: comment saves on
-   * their way finish, then unsaved comment text is confirmed; once that's agreed, the settings
-   * and the reading position are saved. False when the user chose to stay.
+   * Before the window turns to another workspace (`switch`), or Lectern quits or restarts for an
+   * update: comment saves on their way finish, then unsaved comment text is confirmed; once that's
+   * agreed, the settings and the reading position are saved. False when the user chose to stay.
    */
-  async readyToLeave(action: "switch" | "quit"): Promise<boolean> {
+  async readyToLeave(action: Leaving): Promise<boolean> {
     if (this.commentsLoading) {
       await this.commentsLoading;
     }
@@ -612,9 +629,16 @@ export class App {
   /**
    * Quits Lectern with every window open (Ctrl+Q), once it may (see `readyToLeave`). When another
    * window holds comment text that isn't saved yet, Rust names it, and this asks before quitting
-   * all the same.
+   * all the same. Asked again while it asks, it joins the Quit under way.
    */
-  async quit(): Promise<void> {
+  quit(): Promise<void> {
+    this.quitting ??= this.quitNow().finally(() => {
+      this.quitting = null;
+    });
+    return this.quitting;
+  }
+
+  private async quitNow(): Promise<void> {
     if (!(await this.readyToLeave("quit"))) {
       return;
     }
@@ -626,6 +650,54 @@ export class App {
       const { confirmQuitElsewhere } = await import("./workspace-menu.js");
       if (await confirmQuitElsewhere(this.layout.overlayRoot, unsaved)) {
         await this.backend.quit(true);
+      }
+    } catch (e) {
+      this.toast(String(e));
+    }
+  }
+
+  /**
+   * Installs the update found (the update pill), once Lectern may restart: this window's own
+   * unsaved comment text is confirmed and the settings and reading position saved (see
+   * `readyToLeave`), then, when another window holds comment text that isn't saved yet, Rust names
+   * it, and this asks before updating all the same. A portable copy only opens the Releases page,
+   * so nothing is asked.
+   */
+  async installUpdate(portable: boolean): Promise<void> {
+    if (portable) {
+      await this.backend.installUpdate(false);
+      return;
+    }
+    if (!(await this.readyToLeave("update"))) {
+      return;
+    }
+    const unsaved = await this.backend.installUpdate(false);
+    if (unsaved.length === 0) {
+      return;
+    }
+    const { confirmUpdateElsewhere } = await import("./workspace-menu.js");
+    if (await confirmUpdateElsewhere(this.layout.overlayRoot, unsaved)) {
+      await this.backend.installUpdate(true);
+    }
+  }
+
+  /**
+   * The window's close button was pressed while it holds comment text that isn't saved, so Rust
+   * kept it open: this asks, and closes it once the user lets the text go. Pressed again while it
+   * asks, it joins the question.
+   */
+  private closeRequested(): Promise<void> {
+    this.closing ??= this.askToClose().finally(() => {
+      this.closing = null;
+    });
+    return this.closing;
+  }
+
+  private async askToClose(): Promise<void> {
+    try {
+      const { confirmDiscard } = await import("./workspace-menu.js");
+      if (await confirmDiscard(this.layout.overlayRoot)) {
+        await this.backend.closeWindow();
       }
     } catch (e) {
       this.toast(String(e));
@@ -650,6 +722,11 @@ export class App {
     if (unsaved !== this.unsavedTold) {
       this.unsavedTold = unsaved;
       quietly(this.backend.setUnsaved(unsaved));
+    }
+    // Comments kept, hidden, for their text after the feature was switched off go once it's saved
+    // or let go.
+    if (!unsaved && this.comments && !this.state.settings.reviewComments) {
+      this.syncComments();
     }
   }
 
@@ -902,10 +979,24 @@ export class App {
       return;
     }
     if (!this.state.settings.reviewComments) {
+      // Switched off, maybe in another window: comment text that isn't saved stays, hidden, until
+      // it is saved or let go (`tellUnsaved`).
+      if (this.comments?.hasUnsavedText()) {
+        this.comments.setVisible(false);
+        this.commentsKept = true;
+        return;
+      }
       this.comments?.dispose();
       this.comments = null;
+      this.commentsKept = false;
       this.tellUnsaved();
     } else if (this.comments) {
+      // Back on after they were kept: what loaded while the feature was off was refused, so the
+      // note on screen loads again; its drafts stay.
+      if (this.commentsKept) {
+        this.commentsKept = false;
+        quietly(this.comments.load());
+      }
       this.comments.setVisible(this.commentsShown());
     } else {
       this.commentsLoading ??= this.startComments();
@@ -923,8 +1014,9 @@ export class App {
           docPath: () => this.state.doc?.path ?? null,
           panel: this.rightPanel,
           scroller: this.scroller,
+          // Kept while the feature is off, they say nothing: Rust refuses their loads then.
           toast: (message) => {
-            this.toast(message);
+            if (this.state.settings.reviewComments) this.toast(message);
           },
           setBadge: (n) => {
             this.actions.setCommentCount(n);

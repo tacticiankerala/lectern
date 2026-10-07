@@ -127,7 +127,9 @@ describe("update checks", () => {
     });
     await pastCheckDelay();
     const download = deferred();
-    const install = vi.spyOn(fake, "installUpdate").mockReturnValue(download.promise);
+    const install = vi
+      .spyOn(fake, "installUpdate")
+      .mockReturnValue(download.promise.then((): string[] => []));
     pill()?.click();
     expect(pill()?.textContent).toBe("Installing…");
     expect(pill()?.disabled).toBe(true);
@@ -170,6 +172,8 @@ describe("update checks", () => {
       expect(toasts()).toContain("You're up to date.");
     });
     expect(fake.updateCalls).toEqual(["check", "check"]);
+    // Rust hears which was the automatic one: no page runs that again this session.
+    expect(fake.updateFlags).toEqual([true, false]);
     expect(pill()).toBeNull();
   });
 
@@ -189,5 +193,70 @@ describe("update checks", () => {
     });
     // What was found before still stands.
     expect(pill()?.textContent).toBe("Update to v0.2.0");
+  });
+
+  it("asks before installing while another window holds an unsaved comment", async () => {
+    const { fake } = await launch((f) => {
+      f.update = INSTALLED;
+      f.unsavedElsewhere = ["Personal"];
+    });
+    await pastCheckDelay();
+    const confirm = (): Promise<HTMLElement> =>
+      vi.waitFor(() => {
+        const found = document.querySelector<HTMLElement>(".ws-confirm");
+        if (!found) throw new Error("no confirm");
+        return found;
+      });
+    pill()?.click();
+    let asked = await confirm();
+    expect(asked.querySelector("h2")?.textContent).toBe("Unsaved comment in Personal.");
+    expect(asked.querySelector("p")?.textContent).toBe(
+      "Lectern restarts to update, which discards it.",
+    );
+    expect([...asked.querySelectorAll(".btn")].map((b) => b.textContent)).toEqual([
+      "Update anyway",
+      "Cancel",
+    ]);
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[1]?.click();
+    await vi.waitFor(() => {
+      expect(pill()?.textContent).toBe("Update to v0.2.0");
+    });
+    expect(fake.updateCalls).toEqual(["check", "install"]);
+    pill()?.click();
+    asked = await confirm();
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[0]?.click();
+    await vi.waitFor(() => {
+      expect(fake.updateCalls).toEqual(["check", "install", "install", "install"]);
+    });
+    // Unforced, unforced, then forced.
+    expect(fake.updateFlags).toEqual([true, false, false, true]);
+  });
+
+  it("asks about this window's own unsaved comment first", async () => {
+    const { fake } = await launch((f) => {
+      f.update = INSTALLED;
+    });
+    await pastCheckDelay();
+    const { CommentsController } = await import("../src/comments");
+    const typed = vi.spyOn(CommentsController.prototype, "hasUnsavedText").mockReturnValue(true);
+    pill()?.click();
+    const asked = await vi.waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".ws-confirm");
+      if (!found) throw new Error("no confirm");
+      return found;
+    });
+    expect(asked.querySelector("h2")?.textContent).toBe("Your comment isn't saved");
+    expect(asked.querySelector("p")?.textContent).toBe(
+      "Updating Lectern discards what you've typed.",
+    );
+    expect([...asked.querySelectorAll(".btn")].map((b) => b.textContent)).toEqual([
+      "Keep writing",
+      "Update anyway",
+    ]);
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[0]?.click();
+    await settle(20);
+    expect(fake.updateCalls).toEqual(["check"]);
+    typed.mockRestore();
   });
 });

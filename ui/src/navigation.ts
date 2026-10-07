@@ -116,6 +116,25 @@ export class Navigation {
   }
 
   /**
+   * Shows the welcome screen (a blank window's list of workspaces to choose from), leaving the
+   * document on screen as an open would: its reading position saved, and on the history, so Back
+   * returns to it. A navigation still on its way is dropped.
+   */
+  home(): void {
+    this.endNavigation(this.beginNavigation());
+    const leaving = this.currentEntry();
+    if (leaving) {
+      if (leaving.position) {
+        this.app.savePosition(leaving.path, leaving.position);
+      }
+      this.history.push(leaving);
+    }
+    this.app.state.updated = null;
+    this.app.show(null);
+    this.settleDeferred();
+  }
+
+  /**
    * Fetches a document and shows it unless a newer navigation started meanwhile, then sends the
    * time from call to paint. `landed` runs once it is accepted, just before it shows. True when it
    * was shown.

@@ -47,12 +47,15 @@ impl WindowState {
             .spawn(move || {
                 // Walking competes with WebView2 for the CPU, so scans wait for first paint.
                 this.ui_shown.wait(this.app.timings.scan_delay);
-                loop {
+                // A state retired meanwhile (its window closed, or turned to another workspace)
+                // neither probes, scans nor saves a snapshot.
+                while !this.is_retired() {
                     this.scan_once(&path, gen);
                     if this.scan_finished(&path, gen) {
-                        break;
+                        return;
                     }
                 }
+                this.scan_finished(&path, gen);
             });
         if let Err(e) = spawned {
             log::error!("couldn't start a scan of {}: {e}", root.display());
@@ -128,16 +131,22 @@ impl WindowState {
         }
     }
 
-    /// Ends a scan unless another was asked for meanwhile; true when the scan thread can stop.
+    /// Ends a scan unless another was asked for meanwhile; true when the scan thread can stop. A
+    /// retired state's scan always ends, letting go of anyone waiting on it.
     pub(super) fn scan_finished(&self, root: &Path, gen: u64) -> bool {
+        let retired = self.is_retired();
         let mut lib = lock(&self.library);
         match lib.find_gen_mut(root, gen) {
-            Some(slot) if slot.rescan => {
+            Some(slot) if slot.rescan && !retired => {
                 slot.rescan = false;
                 false
             }
             Some(slot) => {
                 slot.scanning = false;
+                slot.rescan = false;
+                if retired {
+                    slot.waiters.clear();
+                }
                 true
             }
             None => true,

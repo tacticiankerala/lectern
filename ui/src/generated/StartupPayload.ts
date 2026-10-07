@@ -26,6 +26,13 @@ startupNotice: string | null,
  */
 workspace: WorkspaceSummary | null, 
 /**
- * True only for the first `startup` call in the process. The UI checks for updates only then.
+ * Every workspace, in creation order, with this window's marked current: the UI words the
+ * title from it before the first paint, with no call of its own.
+ */
+workspaces: Array<WorkspaceSummary>, 
+/**
+ * Whether this page runs the process's automatic update check: true in the window that first
+ * asked for its startup payload, each time it starts again (it turned to another workspace),
+ * until a check has run.
  */
 primary: boolean, };

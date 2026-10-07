@@ -7,14 +7,17 @@
 // - A window shows one workspace, or none: a blank window has no chip, and its welcome screen
 //   lists the workspaces to choose from.
 // - The title names the workspace only when there is more than one: "‹note› — ‹workspace›", or
-//   "‹workspace› — Lectern" with no note. With one it stays "‹note› — Lectern". The app sets no
-//   title until the first list is in, so the wrong one never shows.
-// - The list is fetched again on every `workspaces-changed`; an older answer is dropped.
+//   "‹workspace› — Lectern" with no note. With one it stays "‹note› — Lectern". The first list
+//   comes in the startup payload, so the right title shows from the first paint, with no call of
+//   its own.
+// - The list is fetched again on every `workspaces-changed` (one that came before startup
+//   answered, once it has); an older answer is dropped.
 // - Opening or creating a workspace here first asks the app whether the window may leave (unsaved
 //   comment text is confirmed; the settings and the reading position are saved), and once Rust
-//   has turned the window to it, the page reloads through the normal startup. A workspace open in
-//   another window is asked for in a new window, which brings that window forward and never turns
-//   this one, so nothing is asked.
+//   has turned the window to it, the page stops its listeners (Rust would keep them otherwise) and
+//   reloads through the normal startup. A workspace open in another window is asked for in a new
+//   window, which brings that window forward and never turns this one, so nothing is asked. While
+//   one is being opened or made, asking again joins it.
 // - In a blank window a folder (Add folder, a drop, an Explorer launch) asks for a new workspace's
 //   name, then makes one holding the folder, here or in a new window. Cancelling drops it. Rust
 //   says which paths are folders (`UserOpen.folder`, `OpenRequest.folder`); a file opens as a
@@ -27,6 +30,9 @@ import type { SettingsSnapshot } from "./generated/SettingsSnapshot";
 import type { WorkspaceOutcome } from "./generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
 import type { MenuHost, WorkspaceChooser, WorkspaceMenu } from "./workspace-menu";
+
+/** How long a page turning to another workspace waits for its listeners to stop. */
+const STOP_LISTENING_MS = 1000;
 
 export class Workspaces {
   /** This window's workspace; null for a blank window. */
@@ -41,13 +47,16 @@ export class Workspaces {
   private turning = false;
   /** Set while a folder's new workspace is being named; another folder meanwhile is dropped. */
   private naming = false;
-  /** Set at startup (`begin`): until then, `workspaces-changed` is left to its first fetch. */
+  /** Set at startup (`begin`), which brings the first list. */
   private begun = false;
+  /** A `workspaces-changed` came before startup answered: the list is fetched once it has. */
+  private changedEarly = false;
   /** Set once the first list is in. */
   private listed = false;
-  private firstList: Promise<void> = Promise.resolve();
   /** Bumped by every fetch of the list, so only the latest answer is used. */
   private fetches = 0;
+  /** The workspace being opened or made, which another ask joins. */
+  private going: Promise<void> | null = null;
   /** Loaded on first use. */
   private dropdown: WorkspaceMenu | null = null;
   private chooser: WorkspaceChooser | null = null;
@@ -88,21 +97,25 @@ export class Workspaces {
   }
 
   /**
-   * At startup: the window shows `workspace`, or nothing (`blank`). Resolves once the list is in,
-   * which never fails: without it, the window's own workspace is all that is known.
+   * At startup: the window shows `workspace`, or nothing (`blank`), and `list` is every workspace,
+   * as the startup payload has them. The title follows once the window shows something.
    */
-  begin(workspace: WorkspaceSummary | null, blank: boolean): Promise<void> {
-    this.current = workspace;
+  begin(workspace: WorkspaceSummary | null, blank: boolean, list: WorkspaceSummary[]): void {
     this.blankWindow = blank;
     this.begun = true;
+    this.list = list;
+    this.listed = true;
+    this.current = blank ? null : (list.find((ws) => ws.current) ?? workspace);
     this.syncChip();
-    this.firstList = this.refresh();
-    return this.firstList;
+    if (this.changedEarly) {
+      void this.refresh();
+    }
   }
 
   /** Fetches the list again: on `workspaces-changed`, and when the dropdown opens. */
   async refresh(): Promise<void> {
     if (!this.begun) {
+      this.changedEarly = true;
       return;
     }
     const fetch = ++this.fetches;
@@ -184,6 +197,8 @@ export class Workspaces {
     }
     this.take(this.list.map((w) => (w.id === ws.id ? { ...w, ownTheme: own } : w)));
     this.app.settingsChanged(settings);
+    // A fetch on its way was dropped for the list just taken, which may lack what it brought.
+    void this.refresh();
   }
 
   /** Opens a blank window, which lists the workspaces. */
@@ -221,7 +236,6 @@ export class Workspaces {
   /** A blank window's welcome screen: the workspaces to choose from go in `slot`. */
   async fillChooser(slot: HTMLElement): Promise<void> {
     const { WorkspaceChooser } = await import("./workspace-menu.js");
-    await this.firstList;
     if (slot.isConnected) {
       this.chooser ??= new WorkspaceChooser(this.host());
       this.chooser.mount(slot);
@@ -259,9 +273,17 @@ export class Workspaces {
 
   /**
    * Opens a workspace by `call`; when it turns this window to it (`turns`), once the window may
-   * leave. An answer of `reload` reloads the page.
+   * leave. An answer of `reload` reloads the page, its listeners stopped first. While one is on
+   * its way, another joins it.
    */
-  private async go(turns: boolean, call: () => Promise<WorkspaceOutcome>): Promise<void> {
+  private go(turns: boolean, call: () => Promise<WorkspaceOutcome>): Promise<void> {
+    this.going ??= this.goNow(turns, call).finally(() => {
+      this.going = null;
+    });
+    return this.going;
+  }
+
+  private async goNow(turns: boolean, call: () => Promise<WorkspaceOutcome>): Promise<void> {
     if (turns && !(await this.app.readyToLeave("switch"))) {
       return;
     }
@@ -269,6 +291,13 @@ export class Workspaces {
     this.turning = turns;
     try {
       if ((await call()) === "reload") {
+        // Bounded: the reload must happen even if Rust is slow to answer.
+        await Promise.race([
+          this.app.backend.stopListening().catch((e: unknown) => {
+            console.warn(e);
+          }),
+          new Promise((resolve) => setTimeout(resolve, STOP_LISTENING_MS)),
+        ]);
         this.app.reloadWindow();
         return;
       }

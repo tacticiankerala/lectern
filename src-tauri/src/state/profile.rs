@@ -10,8 +10,8 @@ use lectern_core::library::path_key;
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::store::{load_json_or_default, Loaded, State};
 use lectern_core::workspace::{
-    load_workspaces, route_open, OpenWindow, Route, WindowPlacement, Workspace, Workspaces,
-    WORKSPACES_FILE,
+    load_workspaces, route_open, LoadedWorkspaces, OpenWindow, Route, WindowPlacement, Workspace,
+    Workspaces, WORKSPACES_FILE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,9 @@ pub struct Profile {
     /// The workspaces were made from the other two files, so `workspaces.json` doesn't hold them
     /// yet: it was missing, or unreadable and kept aside.
     pub migrated: bool,
+    /// `workspaces.json` could be neither read nor moved aside: no workspace is saved this
+    /// session, so the user's are never replaced.
+    pub workspaces_read_only: bool,
     /// Shown once in the UI, when a file had to be reset.
     pub notice: Option<String>,
     pub wsl_distro: Option<String>,
@@ -62,6 +65,7 @@ impl Profile {
         Self {
             workspaces: Workspaces::migrate(&settings, None, Vec::new(), None),
             migrated: true,
+            workspaces_read_only: false,
             settings,
             state: StateFile::default(),
             notice: Some(UNLOADED_NOTICE.to_owned()),
@@ -122,7 +126,8 @@ impl Profile {
 
 /// Reads `settings.json`, `state.json` and `workspaces.json` from `config_dir`. A corrupt file is
 /// backed up and replaced with defaults, and a notice says so. Missing or corrupt workspaces are
-/// made from the other two files.
+/// made from the other two files; one that can be neither read nor moved aside is left alone, and
+/// no workspace is saved this session (`workspaces_read_only`).
 pub fn load_profile(config_dir: &Path, wsl_distro: Option<String>) -> Profile {
     let mut notices = Vec::new();
     let mut settings: Settings = loaded(
@@ -136,7 +141,11 @@ pub fn load_profile(config_dir: &Path, wsl_distro: Option<String>) -> Profile {
         "reading positions and recent files",
         &mut notices,
     );
-    let (workspaces, notice) = load_workspaces(
+    let LoadedWorkspaces {
+        workspaces,
+        notice,
+        read_only,
+    } = load_workspaces(
         config_dir,
         &settings,
         state.reading.last_doc.clone(),
@@ -149,6 +158,7 @@ pub fn load_profile(config_dir: &Path, wsl_distro: Option<String>) -> Profile {
         state,
         workspaces,
         migrated: !config_dir.join(WORKSPACES_FILE).is_file(),
+        workspaces_read_only: read_only,
         notice: (!notices.is_empty()).then(|| notices.join(" ")),
         wsl_distro,
         persist: true,

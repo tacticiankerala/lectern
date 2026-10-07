@@ -108,12 +108,13 @@ interface WorkspaceModel {
   current: string | null;
 }
 
-/** A call that opens or quits windows, as `windowCalls` records it. */
+/** A call that opens, closes or quits windows, as `windowCalls` records it. */
 export type WindowCall =
   | { call: "newWindow" }
   | { call: "openWorkspace"; id: string; where: OpenWhere }
   | { call: "createWorkspace"; name: string; where: OpenWhere; root: string | null }
-  | { call: "quit"; force: boolean };
+  | { call: "quit"; force: boolean }
+  | { call: "closeWindow" };
 
 /** The default workspace: the fixture library and the offline share, open in this window. */
 export function studio(fixtures: Fixtures): FakeWorkspace {
@@ -140,6 +141,8 @@ export const OFFLINE_ROOT = "\\\\offline-nas\\share\\notes";
 const SETTINGS_KEY = "lx-fake-settings";
 const POSITIONS_KEY = "lx-fake-positions";
 const WORKSPACES_KEY = "lx-fake-workspaces";
+/** As Rust, a review asked for while review comments are off. */
+const FEATURE_OFF = "Review comments are turned off in Preferences.";
 /** As core: a workspace's name is at most 60 characters. */
 const MAX_NAME_CHARS = 60;
 /**
@@ -197,6 +200,8 @@ export interface FakeControl {
   updateError: string | null;
   /** Every `checkUpdate` and `installUpdate` call, in order. */
   readonly updateCalls: ("check" | "install")[];
+  /** Each of those calls' flag, in the same order: a check's `automatic`, an install's `force`. */
+  readonly updateFlags: boolean[];
   /**
    * Gives a note a sidecar holding `payload`'s comments (each with its status as its header's and
    * every entry already seen), or (with null) none.
@@ -220,11 +225,11 @@ export interface FakeControl {
   reviewCalls(): number;
   /** Makes the next `reviewOp` fail with `message`, as Rust's command would. */
   failNextReviewOp(message: string): void;
-  /** Every `newWindow`, `openWorkspace`, `createWorkspace` and `quit` call, in order. */
+  /** Every `newWindow`, `openWorkspace`, `createWorkspace`, `quit` and `closeWindow` call, in order. */
   readonly windowCalls: WindowCall[];
   /**
    * The other windows holding comment text that isn't saved yet, as Rust names them: an unforced
-   * `quit` answers with them instead of quitting.
+   * `quit`, or an unforced install of an update that isn't portable, answers with them instead.
    */
   unsavedElsewhere: string[];
   /** Every `setUnsaved` this window sent, in order. */
@@ -502,6 +507,7 @@ export class FakeBackend implements Backend, FakeControl {
   update: UpdateInfo | null = null;
   updateError: string | null = null;
   readonly updateCalls: ("check" | "install")[] = [];
+  readonly updateFlags: boolean[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
@@ -585,6 +591,7 @@ export class FakeBackend implements Backend, FakeControl {
       portable: false,
       startupNotice: null,
       workspace: current ? this.summary(current) : null,
+      workspaces: this.summaries(),
       primary: this.options.primary ?? true,
     });
   }
@@ -776,8 +783,14 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  /** As Rust: refused while review comments are off. */
   loadReview(path: string): Promise<ReviewPayload> {
     this.reviewCount++;
+    if (!this.settings.reviewComments) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(FEATURE_OFF);
+    }
     return Promise.resolve(this.reviewPayload(path));
   }
 
@@ -1237,6 +1250,11 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  closeWindow(): Promise<void> {
+    this.windowCalls.push({ call: "closeWindow" });
+    return Promise.resolve();
+  }
+
   savePosition(path: string, position: SavedPosition): Promise<void> {
     this.positions.set(key(path), position);
     if (this.options.persist) {
@@ -1258,8 +1276,9 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.systemFonts);
   }
 
-  checkUpdate(): Promise<UpdateInfo | null> {
+  checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
     this.updateCalls.push("check");
+    this.updateFlags.push(automatic);
     if (this.updateError !== null) {
       // Rust's commands fail with a message.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -1268,9 +1287,11 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.update);
   }
 
-  installUpdate(): Promise<void> {
+  /** As Rust: a portable copy only opens the Releases page, so nothing unsaved stops it. */
+  installUpdate(force: boolean): Promise<string[]> {
     this.updateCalls.push("install");
-    return Promise.resolve();
+    this.updateFlags.push(force);
+    return Promise.resolve(force || this.update?.portable ? [] : [...this.unsavedElsewhere]);
   }
 
   perfMark(name: string, ms?: number): void {
@@ -1306,6 +1327,12 @@ export class FakeBackend implements Backend, FakeControl {
     return () => {
       this.drops.delete(cb);
     };
+  }
+
+  stopListening(): Promise<void> {
+    this.listeners.clear();
+    this.drops.clear();
+    return Promise.resolve();
   }
 
   drop(paths: string[]): void {

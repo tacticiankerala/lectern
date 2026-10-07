@@ -18,7 +18,7 @@ mod state;
 mod updater;
 mod win;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -96,11 +96,11 @@ pub(crate) fn start_boot(
 }
 
 /// Starts logging, loads the settings and workspaces for setup, picking the workspace the first
-/// window shows (the one the command-line argument goes to, if any), then reads and renders the
-/// document to open with the user's path mappings and no index yet: the one given on the command
-/// line (a folder's README for a folder), else the last one open in the workspace the first window
-/// shows, unless that is on a network host the user no longer trusts. True when it had a document
-/// to render, whether or not reading it worked.
+/// window shows (the one the command-line argument goes to, if any; `routed_profile`), then reads
+/// and renders the document to open with the user's path mappings and no index yet: the one given
+/// on the command line (a folder's README for a folder), else the last one open in the workspace
+/// the first window shows, unless that is on a network host the user no longer trusts. True when
+/// it had a document to render, whether or not reading it worked.
 fn boot(
     dirs: &Dirs,
     arg: Option<PathBuf>,
@@ -109,12 +109,11 @@ fn boot(
     early_slot: &Slot<Early>,
 ) -> bool {
     logging::init_logging(&dirs.logs);
-    let mut profile = state::load_profile(&dirs.config, win::wsl_default_distro());
-    if let Some(path) = &arg {
-        let text = path.to_string_lossy();
-        let is_dir = !is_markdown(&text) && state::is_folder(path, LAUNCH_PROBE);
-        profile.route_launch(path, is_dir);
-    }
+    let profile = routed_profile(
+        arg.as_deref(),
+        || state::load_profile(&dirs.config, win::wsl_default_distro()),
+        |path| state::is_folder(&path, LAUNCH_PROBE),
+    );
     let mapper = state::mapper_for(&profile.settings, profile.wsl_distro.clone());
     let mut trust = profile.trust();
     let last_doc = profile
@@ -155,10 +154,87 @@ fn boot(
     rendered
 }
 
+/// The profile `load` reads, with the workspace the launch argument `arg` goes to picked
+/// (`Profile::route_launch`). Whether `arg` is a folder is probed (`probe`) on a thread of its own
+/// while the profile loads, so a slow share delays neither; a Markdown name is a file, unprobed.
+fn routed_profile(
+    arg: Option<&Path>,
+    load: impl FnOnce() -> Profile,
+    probe: impl FnOnce(PathBuf) -> bool + Send + 'static,
+) -> Profile {
+    let Some(arg) = arg else {
+        return load();
+    };
+    let probing = (!is_markdown(&arg.to_string_lossy())).then(|| {
+        let path = arg.to_path_buf();
+        thread::Builder::new()
+            .name("lectern-launch-probe".to_owned())
+            .spawn(move || probe(path))
+    });
+    let mut profile = load();
+    let is_dir = match probing {
+        Some(Ok(probe)) => probe.join().unwrap_or(false),
+        Some(Err(e)) => {
+            log::warn!("couldn't probe the launch argument: {e}");
+            false
+        }
+        None => false,
+    };
+    profile.route_launch(arg, is_dir);
+    profile
+}
+
 fn unix_now_ms() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
         * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lectern_core::ipc::Settings;
+    use lectern_core::workspace::Workspaces;
+    use std::sync::mpsc;
+
+    /// The launch argument is probed while the profile loads, not after: here the probe can tell
+    /// only once loading has begun.
+    #[test]
+    fn the_launch_probe_runs_while_the_profile_loads() {
+        // Main is open; Garden, closed, holds the argument.
+        let mut workspaces = Workspaces::migrate(&Settings::default(), None, Vec::new(), None);
+        let garden = workspaces.create("Garden");
+        workspaces.get_mut(&garden).unwrap().roots = vec![r"\\nas\share\garden".to_owned()];
+        let profile = Profile {
+            workspaces,
+            ..Profile::unloaded()
+        };
+        let (loading, loads) = mpsc::channel();
+        let routed = routed_profile(
+            Some(Path::new(r"\\nas\share\garden\seeds")),
+            move || {
+                // Unheard when the probe already gave up.
+                let _ = loading.send(());
+                profile
+            },
+            move |_| loads.recv_timeout(Duration::from_secs(5)).is_ok(),
+        );
+        // A folder goes to the open workspace; taken for a file, it would have reopened Garden.
+        assert_eq!(routed.launch.as_deref(), Some("w1"));
+    }
+
+    /// A Markdown name is a file, unprobed, and no argument routes nothing.
+    #[test]
+    fn a_markdown_launch_argument_is_not_probed() {
+        let routed = routed_profile(
+            Some(Path::new(r"S:\Notes\My Vault\plan.md")),
+            Profile::unloaded,
+            |_| panic!("probed a Markdown file"),
+        );
+        assert_eq!(routed.launch.as_deref(), Some("w1"));
+        let unrouted = routed_profile(None, Profile::unloaded, |_| panic!("probed nothing"));
+        assert_eq!(unrouted.launch, None);
+    }
 }

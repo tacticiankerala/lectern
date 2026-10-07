@@ -21,7 +21,8 @@ use tauri::{
 
 use crate::events::TauriHost;
 use crate::state::{
-    App, AssetResponse, Boot, Early, OpenQueue, Profile, Slot, Timings, WatchControl, WindowState,
+    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, Profile, Slot, Timings, WatchControl,
+    WindowState,
 };
 use crate::updater::{self, Updates};
 use crate::{commands, win};
@@ -83,13 +84,13 @@ pub struct Launch {
 }
 
 pub fn run(context: tauri::Context, launch: Launch) {
-    let opens = Arc::new(OpenQueue::default());
-    let forwarded = Arc::clone(&opens);
+    let held = Arc::new(HeldLaunches::default());
+    let early = Arc::clone(&held);
     let perf = Arc::clone(&launch.perf);
     let app = tauri::Builder::default()
         // First, so a second instance hands over its arguments and exits before doing anything.
         .plugin(tauri_plugin_single_instance::init(move |app, argv, cwd| {
-            on_second_launch(app, &forwarded, argv, &cwd);
+            on_second_launch(app, &early, argv, &cwd);
         }))
         .plugin(tauri_plugin_dialog::init())
         // Endpoint, public key and install mode come from `plugins.updater` in tauri.conf.json.
@@ -142,20 +143,17 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::set_workspace_theme,
             commands::quit,
             commands::set_unsaved,
+            commands::close_window,
         ])
         .on_window_event(on_window_event)
-        .setup(move |app| setup(app, launch, opens))
+        .setup(move |app| setup(app, launch, &held))
         .build(context)
         .expect("error while building Lectern");
     perf.mark("built", None);
     app.run(on_run_event);
 }
 
-fn setup(
-    app: &mut tauri::App,
-    launch: Launch,
-    opens: Arc<OpenQueue>,
-) -> Result<(), Box<dyn Error>> {
+fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<(), Box<dyn Error>> {
     launch.perf.mark("setup", None);
     if !launch.booted {
         // The Lectern this launch found has quit, so this one is first after all: start the
@@ -193,7 +191,7 @@ fn setup(
             profile,
             early: launch.early,
             warm: launch.warm,
-            opens,
+            opens: Arc::new(OpenQueue::default()),
             timings: Timings::default(),
             portable,
         },
@@ -207,6 +205,8 @@ fn setup(
         },
     );
     app.manage(Arc::clone(&state));
+    // Launches that came before there was an app to route them go where any other would.
+    state.route_held(held);
     let main = state.window(MAIN_WINDOW);
     match (app.get_webview_window(MAIN_WINDOW), &main) {
         (Some(window), Some(main)) => prepare_window(&window, main),
@@ -353,9 +353,10 @@ pub fn apply_chrome(window: &WebviewWindow, bg: &str, fg: &str, dark: bool) -> R
 }
 
 /// A second launch: its file goes to the window `App::second_launch` routes it to, off the main
-/// thread, since that may depend on whether it is a folder. Before setup has made the app, it
-/// waits for the first window's startup.
-fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: &str) {
+/// thread, since that may depend on whether it is a folder. Before setup has made the app, it is
+/// held, and setup routes it the same way (`App::route_held`); a launch without a file then has
+/// nothing to bring forward that isn't coming forward already.
+fn on_second_launch(app: &AppHandle, held: &HeldLaunches, argv: Vec<String>, cwd: &str) {
     let args = Args::parse(argv);
     let t0_ms = args.perf_t0_ms;
     let request = args.path.map(|path| {
@@ -371,13 +372,14 @@ fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: 
             folder: false,
         }
     });
-    match app.try_state::<Arc<App>>() {
-        Some(state) => state.second_launch(request),
-        None => {
-            if let Some(request) = request {
-                let _ = opens.offer(request);
-            }
-        }
+    if let Some(state) = app.try_state::<Arc<App>>() {
+        state.second_launch(request);
+        return;
+    }
+    // Setup may release the held launches between the two checks; one handed back is routed now.
+    let request = request.and_then(|request| held.hold(request));
+    if let (Some(request), Some(state)) = (request, app.try_state::<Arc<App>>()) {
+        state.second_launch(Some(request));
     }
 }
 
@@ -404,8 +406,13 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
             }
             app.set_background(window.label(), in_background(window, Some(*focused)));
         }
-        WindowEvent::CloseRequested { .. } => {
+        WindowEvent::CloseRequested { api, .. } => {
             if let Some(state) = &state {
+                // Its UI asks first about comment text that isn't saved yet.
+                if !state.close_requested() {
+                    api.prevent_close();
+                    return;
+                }
                 state.remember_window(window);
             }
             app.window_closing(window.label());

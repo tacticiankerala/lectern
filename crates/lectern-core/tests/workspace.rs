@@ -9,8 +9,9 @@ use lectern_core::ipc::{
 };
 use lectern_core::store::State;
 use lectern_core::workspace::{
-    apply_patch, effective_settings, load_workspaces, route_open, Layout, OpenWindow, PatchEffect,
-    Route, WindowPlacement, Workspace, WorkspaceTheme, Workspaces, WORKSPACES_FILE,
+    apply_patch, effective_settings, load_workspaces, route_open, Layout, LoadedWorkspaces,
+    OpenWindow, PatchEffect, Route, Shown, ShownMut, WindowPlacement, Workspace, WorkspaceTheme,
+    Workspaces, WORKSPACES_FILE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -75,14 +76,18 @@ fn to(label: &str) -> Route {
 fn a_v021_profile_becomes_one_workspace_named_main() {
     let (mut settings, state) = v021();
     let config = tempfile::tempdir().unwrap();
-    let (ws, notice) = load_workspaces(
+    let LoadedWorkspaces {
+        workspaces: ws,
+        notice,
+        read_only,
+    } = load_workspaces(
         config.path(),
         &settings,
         state.reading.last_doc.clone(),
         state.reading.recent.clone(),
         state.window,
     );
-    assert!(notice.is_none());
+    assert!(notice.is_none() && !read_only);
     assert_eq!(ws.version, 1);
     assert_eq!(ws.next_id, 2);
     assert_eq!(ws.focus, ["w1"]);
@@ -165,7 +170,11 @@ fn a_workspaces_file_with_no_items_migrates_quietly() {
     let (settings, state) = v021();
     let config = tempfile::tempdir().unwrap();
     fs::write(config.path().join(WORKSPACES_FILE), r#"{"items": []}"#).unwrap();
-    let (ws, notice) = load_workspaces(
+    let LoadedWorkspaces {
+        workspaces: ws,
+        notice,
+        ..
+    } = load_workspaces(
         config.path(),
         &settings,
         state.reading.last_doc,
@@ -185,7 +194,11 @@ fn a_corrupt_workspaces_file_is_kept_and_rebuilt_from_the_libraries() {
     let config = tempfile::tempdir().unwrap();
     let path = config.path().join(WORKSPACES_FILE);
     fs::write(&path, "{not json").unwrap();
-    let (ws, notice) = load_workspaces(
+    let LoadedWorkspaces {
+        workspaces: ws,
+        notice,
+        ..
+    } = load_workspaces(
         config.path(),
         &settings,
         state.reading.last_doc,
@@ -237,7 +250,11 @@ fn a_saved_file_loads_normalized() {
         library_roots: strings(&[r"\\nas\share"]),
         ..Settings::default()
     };
-    let (ws, notice) = load_workspaces(config.path(), &mirror, None, Vec::new(), None);
+    let LoadedWorkspaces {
+        workspaces: ws,
+        notice,
+        ..
+    } = load_workspaces(config.path(), &mirror, None, Vec::new(), None);
     assert!(notice.is_none());
     assert_eq!(ids(&ws), ["w1", "w2"]);
     assert_eq!(ws.items[0].name, "Work");
@@ -245,6 +262,72 @@ fn a_saved_file_loads_normalized() {
     assert_eq!(ws.items[1].name, "Personal");
     assert_eq!(ws.focus, ["w2", "w1"]);
     assert_eq!(ws.next_id, 3);
+}
+
+/// Work (w1, the first, mirrored into `settings.json`) and Garden, as saved.
+fn work_and_garden_saved(config: &Path) {
+    let saved = json!({
+        "version": 1,
+        "nextId": 3,
+        "items": [
+            {"id": "w1", "name": "Work", "roots": [r"S:\Notes\My Vault"], "open": true,
+             "layout": {"libraryVisible": true, "outlineVisible": true, "libraryWidth": 280,
+                        "outlineWidth": 240, "commentsVisible": true}},
+            {"id": "w2", "name": "Garden", "roots": [r"\\nas\share\garden"]}
+        ],
+        "focus": ["w1", "w2"]
+    });
+    fs::write(config.join(WORKSPACES_FILE), saved.to_string()).unwrap();
+}
+
+/// `workspaces.json` is there, but could be neither read nor moved aside (here, a read-only
+/// folder): the user hears so, and the file is left as it was.
+#[cfg(unix)]
+#[test]
+fn a_workspaces_file_that_cannot_be_read_or_moved_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let config = tempfile::tempdir().unwrap();
+    work_and_garden_saved(config.path());
+    let path = config.path().join(WORKSPACES_FILE);
+    let saved = fs::read_to_string(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(config.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = || {
+        fs::set_permissions(config.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    };
+    // Root, or anyone else who can read an unreadable file, can't run this test.
+    if fs::read(&path).is_ok() {
+        restore();
+        eprintln!("skipped: the unreadable file is readable here (running as root?)");
+        return;
+    }
+    let (settings, state) = v021();
+    let LoadedWorkspaces {
+        workspaces: ws,
+        notice,
+        read_only,
+    } = load_workspaces(
+        config.path(),
+        &settings,
+        state.reading.last_doc,
+        state.reading.recent,
+        state.window,
+    );
+    restore();
+    // Nothing may be saved over it this session.
+    assert!(read_only);
+    assert_eq!(ids(&ws), ["w1"]);
+    assert_eq!(ws.items[0].name, "Main");
+    assert_eq!(ws.items[0].roots, settings.library_roots);
+    assert_eq!(
+        notice.as_deref(),
+        Some(
+            "Lectern couldn't read its workspaces file, so it opened your libraries from the \
+             settings. Workspace changes won't be saved until you restart Lectern."
+        )
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
 }
 
 // The file.
@@ -516,7 +599,7 @@ fn a_window_sees_its_workspace_libraries_layout_and_theme() {
         library_roots: strings(&[r"S:\Notes\My Vault"]),
         ..Settings::default()
     };
-    let s = effective_settings(&shared, Some(&personal()));
+    let s = effective_settings(&shared, Shown::Workspace(&personal()));
     assert_eq!(s.library_roots, [r"C:\Users\me\projects"]);
     assert!(!s.library_visible && s.outline_visible && !s.comments_visible);
     assert_eq!((s.library_width, s.outline_width), (300, 200));
@@ -530,14 +613,14 @@ fn a_window_sees_its_workspace_libraries_layout_and_theme() {
         theme: None,
         ..personal()
     };
-    let s = effective_settings(&shared, Some(&follows));
+    let s = effective_settings(&shared, Shown::Workspace(&follows));
     assert!(matches!(s.theme_mode, ThemeMode::Dark));
     assert!(matches!(s.light_theme, ThemeId::Paper));
     assert_eq!(s.library_roots, [r"C:\Users\me\projects"]);
 }
 
 #[test]
-fn a_blank_window_sees_no_libraries_and_the_default_layout() {
+fn a_blank_window_sees_no_libraries_and_its_own_layout() {
     let shared = Settings {
         font_size: 21,
         theme_mode: ThemeMode::Dark,
@@ -547,24 +630,24 @@ fn a_blank_window_sees_no_libraries_and_the_default_layout() {
         comments_visible: false,
         ..Settings::default()
     };
-    let s = effective_settings(&shared, None);
+    let own = Layout {
+        library_visible: true,
+        outline_visible: false,
+        library_width: 320,
+        outline_width: 260,
+        comments_visible: true,
+    };
+    let s = effective_settings(&shared, Shown::Blank(&own));
     assert!(s.library_roots.is_empty());
-    let d = Settings::default();
     assert_eq!(
-        (
-            s.library_visible,
-            s.outline_visible,
-            s.library_width,
-            s.outline_width,
-            s.comments_visible
-        ),
-        (
-            d.library_visible,
-            d.outline_visible,
-            d.library_width,
-            d.outline_width,
-            d.comments_visible
-        )
+        Layout {
+            library_visible: s.library_visible,
+            outline_visible: s.outline_visible,
+            library_width: s.library_width,
+            outline_width: s.outline_width,
+            comments_visible: s.comments_visible,
+        },
+        own
     );
     assert!(matches!(s.theme_mode, ThemeMode::Dark));
     assert_eq!(s.font_size, 21);
@@ -576,7 +659,7 @@ fn a_theme_change_goes_to_a_workspace_with_its_own_theme() {
     let mut w2 = personal();
     let effect = apply_patch(
         &mut shared,
-        Some(&mut w2),
+        ShownMut::Workspace(&mut w2),
         SettingsPatch {
             light_theme: Some(ThemeId::Latte),
             font_size: Some(22),
@@ -587,7 +670,8 @@ fn a_theme_change_goes_to_a_workspace_with_its_own_theme() {
         effect,
         PatchEffect {
             shared_changed: true,
-            workspace_changed: true
+            workspace_changed: true,
+            blank_changed: false,
         }
     );
     let theme = w2.theme.as_ref().unwrap();
@@ -610,7 +694,7 @@ fn a_theme_change_goes_to_shared_when_the_workspace_follows_it() {
     let before = json_of(&w2);
     let effect = apply_patch(
         &mut shared,
-        Some(&mut w2),
+        ShownMut::Workspace(&mut w2),
         SettingsPatch {
             theme_mode: Some(ThemeMode::Dark),
             dark_theme: Some(ThemeId::Nord),
@@ -621,7 +705,7 @@ fn a_theme_change_goes_to_shared_when_the_workspace_follows_it() {
         effect,
         PatchEffect {
             shared_changed: true,
-            workspace_changed: false
+            ..PatchEffect::default()
         }
     );
     assert!(matches!(shared.theme_mode, ThemeMode::Dark));
@@ -636,7 +720,7 @@ fn libraries_and_layout_go_to_the_workspace() {
     let mut w2 = personal();
     let effect = apply_patch(
         &mut shared,
-        Some(&mut w2),
+        ShownMut::Workspace(&mut w2),
         SettingsPatch {
             library_roots: Some(strings(&[r"C:\Users\me\projects", r"\\nas\share"])),
             library_visible: Some(true),
@@ -650,8 +734,8 @@ fn libraries_and_layout_go_to_the_workspace() {
     assert_eq!(
         effect,
         PatchEffect {
-            shared_changed: false,
-            workspace_changed: true
+            workspace_changed: true,
+            ..PatchEffect::default()
         }
     );
     assert_eq!(w2.roots, [r"C:\Users\me\projects", r"\\nas\share"]);
@@ -668,27 +752,19 @@ fn libraries_and_layout_go_to_the_workspace() {
     assert_eq!(json_of(&shared), before);
 }
 
+/// A blank window keeps its layout for itself; it has no libraries, so those are dropped.
 #[test]
-fn a_layout_change_from_a_blank_window_changes_nothing() {
+fn a_layout_change_from_a_blank_window_goes_to_its_own_layout() {
     let mut shared = Settings::default();
     let before = json_of(&shared);
+    let mut own = Layout::default();
     let effect = apply_patch(
         &mut shared,
-        None,
+        ShownMut::Blank(&mut own),
         SettingsPatch {
+            library_visible: Some(false),
             library_width: Some(400),
-            ..SettingsPatch::default()
-        },
-    );
-    assert_eq!(effect, PatchEffect::default());
-    assert_eq!(json_of(&shared), before);
-
-    // A theme change from a blank window goes to shared.
-    let effect = apply_patch(
-        &mut shared,
-        None,
-        SettingsPatch {
-            theme_mode: Some(ThemeMode::Dark),
+            comments_visible: Some(false),
             library_roots: Some(strings(&[r"S:\Notes\My Vault"])),
             ..SettingsPatch::default()
         },
@@ -696,8 +772,35 @@ fn a_layout_change_from_a_blank_window_changes_nothing() {
     assert_eq!(
         effect,
         PatchEffect {
+            blank_changed: true,
+            ..PatchEffect::default()
+        }
+    );
+    assert_eq!(
+        own,
+        Layout {
+            library_visible: false,
+            library_width: 400,
+            comments_visible: false,
+            ..Layout::default()
+        }
+    );
+    assert_eq!(json_of(&shared), before);
+
+    // A theme change from a blank window goes to shared.
+    let effect = apply_patch(
+        &mut shared,
+        ShownMut::Blank(&mut own),
+        SettingsPatch {
+            theme_mode: Some(ThemeMode::Dark),
+            ..SettingsPatch::default()
+        },
+    );
+    assert_eq!(
+        effect,
+        PatchEffect {
             shared_changed: true,
-            workspace_changed: false
+            ..PatchEffect::default()
         }
     );
     assert!(matches!(shared.theme_mode, ThemeMode::Dark));
@@ -711,7 +814,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
     let before = json_of(&w2);
     let effect = apply_patch(
         &mut shared,
-        Some(&mut w2),
+        ShownMut::Workspace(&mut w2),
         SettingsPatch {
             body_font: Some("Georgia".to_owned()),
             code_font: Some("Cascadia Code".to_owned()),
@@ -737,7 +840,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
         effect,
         PatchEffect {
             shared_changed: true,
-            workspace_changed: false
+            ..PatchEffect::default()
         }
     );
     assert_eq!(json_of(&w2), before);
