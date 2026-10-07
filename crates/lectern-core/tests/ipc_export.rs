@@ -68,6 +68,7 @@ fn ts_bindings_exported() {
         "WorkspaceSummary",
         "OpenWhere",
         "WorkspaceOutcome",
+        "OpenRequest",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),

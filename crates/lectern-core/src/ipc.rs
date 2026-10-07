@@ -382,4 +382,7 @@ pub struct OpenRequest {
     pub path: String,
     /// When the request started, for perf marks.
     pub t0_ms: Option<f64>,
+    /// `path` is a folder launched into a blank window, which has no workspace to add it to: the
+    /// UI asks for a new workspace's name, then creates it with the folder.
+    pub folder: bool,
 }

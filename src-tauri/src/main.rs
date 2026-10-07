@@ -21,14 +21,19 @@ mod win;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lectern_core::cli::Args;
+use lectern_core::library::is_markdown;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
 
 use crate::app::{Dirs, Launch};
 use crate::state::{Early, EarlyDoc, Profile, Slot};
+
+/// How long boot waits to learn whether the launch argument is a folder before taking it for a
+/// file: a stalled share must not hold up the settings.
+const LAUNCH_PROBE: Duration = Duration::from_millis(500);
 
 fn main() {
     let args = Args::parse(std::env::args());
@@ -90,7 +95,8 @@ pub(crate) fn start_boot(
         .expect("couldn't start the boot thread");
 }
 
-/// Starts logging, loads the settings and workspaces for setup, then reads and renders the
+/// Starts logging, loads the settings and workspaces for setup, picking the workspace the first
+/// window shows (the one the command-line argument goes to, if any), then reads and renders the
 /// document to open with the user's path mappings and no index yet: the one given on the command
 /// line (a folder's README for a folder), else the last one open in the workspace the first window
 /// shows, unless that is on a network host the user no longer trusts. True when it had a document
@@ -103,7 +109,12 @@ fn boot(
     early_slot: &Slot<Early>,
 ) -> bool {
     logging::init_logging(&dirs.logs);
-    let profile = state::load_profile(&dirs.config, win::wsl_default_distro());
+    let mut profile = state::load_profile(&dirs.config, win::wsl_default_distro());
+    if let Some(path) = &arg {
+        let text = path.to_string_lossy();
+        let is_dir = !is_markdown(&text) && state::is_folder(path, LAUNCH_PROBE);
+        profile.route_launch(path, is_dir);
+    }
     let mapper = state::mapper_for(&profile.settings, profile.wsl_distro.clone());
     let mut trust = profile.trust();
     let last_doc = profile

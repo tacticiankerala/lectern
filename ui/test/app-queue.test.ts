@@ -22,7 +22,7 @@ describe("App startup and opening", () => {
     const { fake, app, opened } = setup(A);
     const started = app.start();
     // Rust holds second launches until startup, then sends them as events.
-    fake.emit("open-request", { path: B, t0Ms: null } satisfies OpenRequest);
+    fake.emit("open-request", { path: B, t0Ms: null, folder: false } satisfies OpenRequest);
     fake.startupGate.resolve();
     await started;
     expect(opened).toEqual([A, B]);
@@ -33,8 +33,8 @@ describe("App startup and opening", () => {
   it("applies only the last of several queued requests", async () => {
     const { fake, app, opened } = setup(A);
     const started = app.start();
-    fake.emit("open-request", { path: B, t0Ms: null } satisfies OpenRequest);
-    fake.emit("open-request", { path: C, t0Ms: null } satisfies OpenRequest);
+    fake.emit("open-request", { path: B, t0Ms: null, folder: false } satisfies OpenRequest);
+    fake.emit("open-request", { path: C, t0Ms: null, folder: false } satisfies OpenRequest);
     fake.startupGate.resolve();
     await started;
     expect(opened).toEqual([A, C]);
@@ -105,7 +105,11 @@ describe("App startup and opening", () => {
     await app.open(B);
     expect(fake.marks[1]?.name).toBe("doc-switch");
     expect(typeof fake.marks[1]?.ms).toBe("number");
-    fake.emit("open-request", { path: C, t0Ms: Date.now() - 5 } satisfies OpenRequest);
+    fake.emit("open-request", {
+      path: C,
+      t0Ms: Date.now() - 5,
+      folder: false,
+    } satisfies OpenRequest);
     await vi.waitFor(() => {
       expect(fake.marks.map((m) => m.name)).toContain("warm-open");
     });

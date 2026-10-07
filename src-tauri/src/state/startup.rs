@@ -18,8 +18,9 @@ use super::WindowState;
 use crate::events::UiEvent;
 
 impl WindowState {
-    /// The window's startup payload. For the first window, the document rendered during boot
-    /// becomes the initial document, unless a second launch asked for another one meanwhile.
+    /// The window's startup payload. The document rendered as the window started (during boot,
+    /// for the first window) becomes the initial document, unless a second launch asked for
+    /// another one meanwhile. Only the first payload in the process is the primary one.
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
         self.app.perf.mark("webview-ready", None);
         if !self.snapshots_loaded.wait(self.app.timings.snapshots) {
@@ -42,11 +43,19 @@ impl WindowState {
         // stays quiet.
         if let Some(request) = self.opens.ready() {
             self.next_seq();
-            if let Some(doc) = self.resolve_target(Path::new(&request.path)) {
+            let path = PathBuf::from(&request.path);
+            if self.blank_window_folder(&path) {
+                // The UI's listeners are in place before it asks for this payload.
+                self.emit(UiEvent::OpenRequest(OpenRequest {
+                    folder: true,
+                    ..request
+                }));
+            } else if let Some(doc) = self.resolve_target(&path) {
                 initial = Some(self.open_document(&path_string(&doc)));
             }
         }
         let recent = self.recent();
+        let workspace = self.workspace_summary();
         let payload = StartupPayload {
             settings: self.settings(),
             library: lock(&self.library).payload(),
@@ -55,8 +64,8 @@ impl WindowState {
             version: lectern_core::version().to_owned(),
             portable: self.app.portable,
             startup_notice: lock(&self.app.notice).take(),
-            workspace: None,
-            primary: true,
+            workspace,
+            primary: self.app.primary.swap(false, Ordering::SeqCst),
         };
         self.app.perf.mark("startup-ready", None);
         payload
@@ -102,6 +111,7 @@ impl WindowState {
         self.emit(UiEvent::OpenRequest(OpenRequest {
             path: path_string(&doc.path),
             t0_ms: None,
+            folder: false,
         }));
     }
 
@@ -154,12 +164,31 @@ impl WindowState {
     pub(super) fn forward_now(self: &Arc<Self>, request: OpenRequest) {
         // Counts as an open, so a boot render landing late never overrides it.
         self.next_seq();
-        if let Some(doc) = self.resolve_target(Path::new(&request.path)) {
+        let path = PathBuf::from(&request.path);
+        if self.blank_window_folder(&path) {
+            self.emit(UiEvent::OpenRequest(OpenRequest {
+                folder: true,
+                ..request
+            }));
+        } else if let Some(doc) = self.resolve_target(&path) {
             self.emit(UiEvent::OpenRequest(OpenRequest {
                 path: path_string(&doc),
                 t0_ms: request.t0_ms,
+                folder: false,
             }));
         }
+    }
+
+    /// Whether a launch's `path` is a folder launched into a blank window. Such a window has no
+    /// workspace to add the folder to, and none is made without a name, so the UI is sent the
+    /// folder to ask for one (`OpenRequest::folder`) instead of the folder becoming a root. The
+    /// user chose the path, so its network host is trusted first. Touches the file system.
+    fn blank_window_folder(&self, path: &Path) -> bool {
+        if self.workspace_id().is_some() {
+            return false;
+        }
+        write(&self.app.trust).opened_by_user(path);
+        fs::metadata(path).is_ok_and(|meta| meta.is_dir())
     }
 }
 
@@ -202,6 +231,7 @@ mod tests {
             let queued = opens.offer(OpenRequest {
                 path: path_string(&b2),
                 t0_ms: None,
+                folder: false,
             });
             assert!(queued.is_none(), "the UI isn't ready yet");
             thread::sleep(Duration::from_millis(40));
@@ -268,6 +298,7 @@ mod tests {
         f.state.forward(OpenRequest {
             path: path_string(&folder),
             t0_ms: Some(5.0),
+            folder: false,
         });
         wait_until("the README is requested", || {
             f.host.open_requests() == [readme.clone()]
@@ -412,6 +443,7 @@ mod tests {
         f.state.forward(OpenRequest {
             path: path_string(&b),
             t0_ms: None,
+            folder: false,
         });
         wait_until("B is requested", || f.host.open_requests() == [b.clone()]);
         f.early.fill(early_doc(&a));
@@ -428,6 +460,7 @@ mod tests {
             .offer(OpenRequest {
                 path: path_string(&folder),
                 t0_ms: None,
+                folder: false,
             })
             .is_none());
         // The boot render is still running when startup gives up waiting for it.
@@ -451,6 +484,7 @@ mod tests {
             .offer(OpenRequest {
                 path: path_string(&b),
                 t0_ms: None,
+                folder: false,
             })
             .is_none());
         f.early.fill(early_doc(&a));

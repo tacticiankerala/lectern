@@ -47,6 +47,7 @@ mod tests {
         let request = |path: &str| OpenRequest {
             path: path.to_owned(),
             t0_ms: None,
+            folder: false,
         };
         assert!(queue.offer(request(r"C:\a.md")).is_none());
         assert!(queue.offer(request(r"C:\b.md")).is_none());

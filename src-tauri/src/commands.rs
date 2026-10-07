@@ -6,13 +6,14 @@
 use std::sync::Arc;
 
 use lectern_core::ipc::{
-    Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, RecentEntry, SavedPosition,
-    Settings, SettingsPatch, StartupPayload, UpdateInfo, UserOpen,
+    Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, OpenWhere, RecentEntry,
+    SavedPosition, Settings, SettingsPatch, StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome,
+    WorkspaceSummary,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::view::ReviewPayload;
 use lectern_core::search::FileHits;
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use crate::state::{App, WindowState};
 use crate::updater::{self, Updates};
@@ -267,8 +268,121 @@ pub async fn install_update(app: AppHandle, updates: State<'_, Updates>) -> Resu
     updater::install(&app, &updates).await
 }
 
+/// Shows the calling window at its first paint. A window restored at launch stays behind the
+/// window that has the focus.
 #[tauri::command]
 pub async fn show_window(window: WebviewWindow, state: Shared<'_>) -> Result<(), String> {
+    let restored = state.window(window.label()).and_then(|s| {
+        let front = s.keeps_focus()?;
+        Some((window.app_handle().get_webview_window(&front)?, s))
+    });
     window.show().map_err(|e| e.to_string())?;
+    if let Some((front, restored)) = restored {
+        app::keep_behind(&window, front, restored);
+    }
     blocking(window_state(&window, &state)?, |s| s.window_shown()).await
+}
+
+/// Every workspace, in creation order, with the calling window's marked current.
+#[tauri::command]
+pub fn list_workspaces(window: WebviewWindow, state: Shared<'_>) -> Vec<WorkspaceSummary> {
+    state.list_workspaces(window.label())
+}
+
+/// The name a new workspace is offered.
+#[tauri::command]
+pub fn suggest_workspace_name(state: Shared<'_>) -> String {
+    state.suggest_workspace_name()
+}
+
+/// Opens a blank window, which lists the workspaces.
+#[tauri::command]
+pub async fn new_window(state: Shared<'_>) -> Result<(), String> {
+    blocking(Arc::clone(&state), |s| s.new_window()).await?
+}
+
+/// Opens the workspace `id` in the calling window (`here`), which then reloads, or in a new one;
+/// a workspace another window shows brings that window forward instead.
+#[tauri::command]
+pub async fn open_workspace(
+    id: String,
+    r#where: OpenWhere,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<WorkspaceOutcome, String> {
+    let caller = window_state(&window, &state)?;
+    blocking(Arc::clone(&state), move |s| {
+        leaving(&caller, &window, r#where);
+        s.open_workspace(window.label(), &id, r#where)
+    })
+    .await?
+}
+
+/// Adds a workspace named `name` (a blank one is named for it), holding the folder `root` when
+/// given, and opens it as `open_workspace` does.
+#[tauri::command]
+pub async fn create_workspace(
+    name: String,
+    r#where: OpenWhere,
+    root: Option<String>,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<WorkspaceOutcome, String> {
+    let caller = window_state(&window, &state)?;
+    blocking(Arc::clone(&state), move |s| {
+        leaving(&caller, &window, r#where);
+        s.create_workspace(window.label(), &name, r#where, root.as_deref())
+    })
+    .await?
+}
+
+/// Before the calling window may turn to another workspace: its placement goes into the
+/// workspace it shows.
+fn leaving(caller: &WindowState, window: &WebviewWindow, place: OpenWhere) {
+    if place == OpenWhere::Here {
+        caller.remember_window(&window.as_ref().window());
+    }
+}
+
+/// Renames the workspace `id`; returns the workspaces.
+#[tauri::command]
+pub fn rename_workspace(
+    id: String,
+    name: String,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<Vec<WorkspaceSummary>, String> {
+    state.rename_workspace(window.label(), &id, &name)
+}
+
+/// Forgets the workspace `id`, never its files; returns the workspaces left.
+#[tauri::command]
+pub async fn delete_workspace(
+    id: String,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<Vec<WorkspaceSummary>, String> {
+    blocking(Arc::clone(&state), move |s| {
+        s.delete_workspace(window.label(), &id)
+    })
+    .await?
+}
+
+/// Quits Lectern with every window open: each window's placement is saved, and the next launch
+/// reopens them all. Closing windows one by one leaves only the last one open.
+#[tauri::command]
+pub fn quit(app: AppHandle, state: Shared<'_>) {
+    app::remember_every_window(&app);
+    state.quit();
+}
+
+/// Gives the calling window's workspace a theme of its own, or has it follow the shared theme
+/// again; returns the window's settings.
+#[tauri::command]
+pub fn set_workspace_theme(
+    own: bool,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<Settings, String> {
+    state.set_workspace_theme(window.label(), own)
 }

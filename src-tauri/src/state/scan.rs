@@ -24,6 +24,9 @@ impl WindowState {
     /// already running, it runs once more after. `done` hears when the root next has a tree or
     /// turns out unavailable, whichever scan gets there.
     pub fn request_scan(self: &Arc<Self>, root: &Path, done: Option<Sender<()>>) {
+        if self.is_retired() {
+            return;
+        }
         let gen = {
             let mut lib = lock(&self.library);
             let Some(slot) = lib.find_mut(root) else {

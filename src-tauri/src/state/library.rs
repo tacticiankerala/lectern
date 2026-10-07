@@ -161,6 +161,9 @@ impl WindowState {
         self.snapshots_loaded.open();
         // Like the scans, the watcher starts once the first document is on screen.
         self.ui_shown.wait(self.app.timings.scan_delay);
+        if self.is_retired() {
+            return;
+        }
         self.watch_user_roots();
         for (root, _) in &roots {
             self.request_scan(root, None);
@@ -224,14 +227,12 @@ impl WindowState {
     /// window has no workspace to keep it in.
     pub(super) fn insert_root(self: &Arc<Self>, path: &str, wait: bool) -> Result<(), String> {
         let root = normalize_root(path)?;
-        let added = self.workspace_id().is_some_and(|id| {
-            self.app.change_workspace(&id, |ws| {
-                let known = ws.roots.iter().any(|r| same_path(Path::new(r), &root));
-                if !known {
-                    ws.roots.push(path_string(&root));
-                }
-                !known
-            })
+        let added = self.change_own_workspace(|ws| {
+            let known = ws.roots.iter().any(|r| same_path(Path::new(r), &root));
+            if !known {
+                ws.roots.push(path_string(&root));
+            }
+            !known
         });
         if added {
             for (root, gen) in self.sync_roots() {
@@ -243,14 +244,12 @@ impl WindowState {
     }
 
     pub fn remove_root(&self, path: &str) -> LibraryPayload {
-        if let Some(id) = self.workspace_id() {
-            self.app.change_workspace(&id, |ws| {
-                let before = ws.roots.len();
-                ws.roots
-                    .retain(|r| !same_path(Path::new(r), Path::new(path)));
-                ws.roots.len() != before
-            });
-        }
+        self.change_own_workspace(|ws| {
+            let before = ws.roots.len();
+            ws.roots
+                .retain(|r| !same_path(Path::new(r), Path::new(path)));
+            ws.roots.len() != before
+        });
         self.sync_roots();
         self.watch_user_roots();
         self.library_payload()
@@ -392,7 +391,9 @@ impl WindowState {
             .into_iter()
             .map(|(root, _)| root)
             .collect();
-        self.watch.roots(roots);
+        if let Some(watch) = &*lock(&self.watch) {
+            watch.roots(roots);
+        }
     }
 
     /// Takes the root's "needs watching" mark; true when it had one.

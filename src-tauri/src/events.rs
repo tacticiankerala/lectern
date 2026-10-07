@@ -1,5 +1,6 @@
 //! Events sent to the UI, each to one window or to every window, and the `Host` through which the
-//! app state reaches Tauri: emitting events and quitting. Tests swap in a fake host.
+//! app state reaches Tauri: emitting events, opening and focusing windows, and quitting. Tests swap
+//! in a fake host.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,6 @@ pub enum Target {
     /// The window with this label.
     Window(String),
     /// Every window.
-    #[expect(dead_code, reason = "nothing changes the workspaces yet")]
     All,
 }
 
@@ -48,7 +48,6 @@ pub enum UiEvent {
     ReviewChanged(PathBuf),
     /// The settings of the window it is sent to.
     SettingsChanged(Settings),
-    #[expect(dead_code, reason = "nothing changes the workspaces yet")]
     WorkspacesChanged,
 }
 
@@ -56,6 +55,11 @@ pub enum UiEvent {
 pub trait Host: Send + Sync {
     fn emit(&self, target: Target, event: UiEvent);
     fn exit(&self);
+    /// Builds the window `label`, whose state the app already holds: hidden until its first
+    /// paint, placed and coloured from that state. `focus` is whether it takes the focus.
+    fn open_window(&self, label: &str, focus: bool) -> Result<(), String>;
+    /// Brings the window `label` forward, unminimised, if it is showing yet.
+    fn focus_window(&self, label: &str);
 }
 
 /// The real host.
@@ -84,6 +88,14 @@ impl Host for TauriHost {
 
     fn exit(&self) {
         self.0.exit(0);
+    }
+
+    fn open_window(&self, label: &str, focus: bool) -> Result<(), String> {
+        crate::app::build_window(&self.0, label, focus)
+    }
+
+    fn focus_window(&self, label: &str) {
+        crate::app::focus_window(&self.0, label);
     }
 }
 

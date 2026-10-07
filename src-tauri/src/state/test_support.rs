@@ -12,7 +12,7 @@ use lectern_core::ipc::{OpenResult, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
-use lectern_core::workspace::Workspaces;
+use lectern_core::workspace::{Workspaces, WORKSPACES_FILE};
 
 use super::doc::{now_ms, render_file, Early, EarlyDoc};
 use super::open_queue::OpenQueue;
@@ -33,6 +33,12 @@ pub(super) struct FakeHost {
     pub(super) hold_index_ready: Mutex<Option<PathBuf>>,
     pub(super) released: Mutex<bool>,
     pub(super) release_cv: Condvar,
+    /// The windows built, in order, and whether each took the focus.
+    pub(super) opened: Mutex<Vec<(String, bool)>>,
+    /// The windows brought forward, in order.
+    pub(super) focused: Mutex<Vec<String>>,
+    /// The app asked to exit.
+    pub(super) exited: Mutex<bool>,
 }
 
 impl Host for FakeHost {
@@ -50,7 +56,18 @@ impl Host for FakeHost {
         }
     }
 
-    fn exit(&self) {}
+    fn exit(&self) {
+        *lock(&self.exited) = true;
+    }
+
+    fn open_window(&self, label: &str, focus: bool) -> Result<(), String> {
+        lock(&self.opened).push((label.to_owned(), focus));
+        Ok(())
+    }
+
+    fn focus_window(&self, label: &str) {
+        lock(&self.focused).push(label.to_owned());
+    }
 }
 
 impl FakeHost {
@@ -105,6 +122,19 @@ impl FakeHost {
                 UiEvent::SettingsChanged(settings) => Some((target.clone(), settings.clone())),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// Where each `workspaces-changed` was sent, in order.
+    pub(super) fn workspace_changes(&self) -> Vec<Target> {
+        self.targets(|e| matches!(e, UiEvent::WorkspacesChanged))
+    }
+
+    /// The windows built, in order.
+    pub(super) fn opened_windows(&self) -> Vec<String> {
+        lock(&self.opened)
+            .iter()
+            .map(|(label, _)| label.clone())
             .collect()
     }
 
@@ -185,18 +215,25 @@ pub(super) struct Fixture {
 impl Drop for Fixture {
     /// Scans and the save thread write into the temp folder from threads of their own, and a
     /// write after it is removed makes it again. So, a failed test included, this lets a held
-    /// scan go on, waits until no other thread holds the window's state (the app and the fixture
-    /// do), and writes what is waiting to be saved. The windows' states hold the app, so they are
-    /// let go of here: dropping the fixture then drops the app and ends the save thread with
-    /// nothing left to write.
+    /// scan go on, lets go of every window's state (they hold the app), waits until no other
+    /// thread holds one, and writes what is waiting to be saved. Dropping the fixture then drops
+    /// the app and ends the save thread with nothing left to write.
     fn drop(&mut self) {
         self.host.release();
+        let mut states: Vec<Arc<WindowState>> =
+            write(&self.app.windows).drain().map(|(_, s)| s).collect();
+        if !states.iter().any(|s| Arc::ptr_eq(s, &self.state)) {
+            states.push(Arc::clone(&self.state));
+        }
+        // Held here only by `states`, and by the fixture for its first window.
+        let ours = |s: &Arc<WindowState>| 1 + usize::from(Arc::ptr_eq(s, &self.state));
         let started = Instant::now();
-        while Arc::strong_count(&self.state) > 2 && started.elapsed() < Duration::from_secs(10) {
+        while states.iter().any(|s| Arc::strong_count(s) > ours(s))
+            && started.elapsed() < Duration::from_secs(10)
+        {
             thread::sleep(Duration::from_millis(5));
         }
         self.app.saver.flush(Duration::from_secs(10));
-        write(&self.app.windows).clear();
     }
 }
 
@@ -215,6 +252,7 @@ pub(super) fn profile(roots: &[&Path]) -> Profile {
         notice: None,
         wsl_distro: None,
         persist: true,
+        launch: None,
     }
 }
 
@@ -308,10 +346,22 @@ pub(super) fn indexed(f: &Fixture, path: &Path) -> bool {
 }
 
 pub(super) fn settled(f: &Fixture, root: &Path) -> bool {
-    lock(&f.state.library)
+    settled_in(&f.state, root)
+}
+
+/// Whether `window` has indexed `root`, with no scan of it running.
+pub(super) fn settled_in(window: &WindowState, root: &Path) -> bool {
+    lock(&window.library)
         .roots
         .iter()
         .any(|r| same_path(&r.path, root) && matches!(r.state, RootState::Ready) && !r.scanning)
+}
+
+/// What `workspaces.json` holds once everything waiting to be saved is written.
+pub(super) fn saved_workspaces(f: &Fixture) -> Workspaces {
+    f.app.flush();
+    let text = fs::read_to_string(f.config.join(WORKSPACES_FILE)).unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 pub(super) fn opened_path(result: &OpenResult) -> PathBuf {

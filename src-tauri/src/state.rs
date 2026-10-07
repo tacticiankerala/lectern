@@ -11,11 +11,13 @@
 //! too.
 //!
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
-//! `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`, `cache`,
-//! `current`. The app's `mapper`, `notice`, `windows` and `focused`, and a window's `workspace`
-//! and `placement`, are leaves: nothing else is locked while one is held. The app's `backgrounds`
-//! is taken with nothing else held, and stays held while the grammars' release is told, which
-//! then may take `focused`, `windows` and a window's `current` to warm them again.
+//! `lifecycle`, `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`,
+//! `cache`, `current`. The app's `mapper`, `notice`, `windows` and `focus`, and a window's
+//! `workspace`, `placement` and `watch`, are leaves: nothing else is locked while one is held.
+//! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
+//! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
+//! with nothing else held, and stays held while the grammars' release is told, which then may
+//! take `focus`, `windows` and a window's `current` to warm them again.
 
 mod assets;
 mod doc;
@@ -35,10 +37,11 @@ mod sync;
 mod test_support;
 mod trust;
 mod watch_control;
+mod windows;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
@@ -63,16 +66,18 @@ pub use self::open_queue::OpenQueue;
 pub use self::profile::{load_profile, mapper_for, Profile};
 pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
+pub use self::windows::is_folder;
 
 use self::assets::AssetScope;
 use self::grammars::AppGrammars;
 use self::library::Library;
 use self::paths::same_path;
-use self::profile::{all_roots, first_workspace, StateFile};
+use self::profile::{all_roots, StateFile};
 use self::saver::Saver;
 use self::startup::spawn_forwarder;
 use self::sync::{lock, read, write, Gate};
 use self::trust::Trust;
+use self::windows::spawn_launcher;
 use crate::app::{Rect, MAIN_WINDOW};
 use crate::events::{Host, Target, UiEvent};
 
@@ -85,7 +90,7 @@ pub struct Timings {
     pub probe: Duration,
     /// How long `follow` waits to learn whether a mapped path exists.
     pub exists: Duration,
-    /// How long `startup` waits for the document rendered during boot.
+    /// How long `startup` waits for the window's last document, rendered as it starts.
     pub early: Duration,
     /// How long `startup` waits for the library snapshots.
     pub snapshots: Duration,
@@ -176,20 +181,34 @@ pub struct App {
     new_watch: Box<dyn Fn(Weak<WindowState>) -> Box<dyn Watch> + Send + Sync>,
     /// Each window's state, by label.
     windows: RwLock<HashMap<String, Arc<WindowState>>>,
-    /// The label of the window focused last.
-    focused: Mutex<Option<String>>,
+    /// Every window's label, the most recently focused first.
+    focus: Mutex<Vec<String>>,
+    /// Held while windows are bound to workspaces or let go of, so each decision sees the last.
+    lifecycle: Mutex<()>,
+    /// The number in the next window's label, `win-<n>`.
+    next_label: AtomicU64,
+    /// The windows of the other open workspaces were opened, after the first window's first
+    /// paint.
+    restored: AtomicBool,
+    /// No window has asked for its startup payload yet.
+    primary: AtomicBool,
+    /// Lectern is quitting with its windows open: a window closing now leaves its workspace open.
+    quitting: AtomicBool,
+    /// Second launches, routed one at a time on a thread of their own.
+    launches: Sender<Option<OpenRequest>>,
 }
 
 impl App {
-    /// The app, with the state of its first window, "main", which shows the most recently
-    /// focused open workspace. `watch` builds each window's watch worker, which reports back
-    /// through the window's state.
+    /// The app, with the state of its first window, "main", which shows the workspace the launch
+    /// file goes to, else the most recently focused open workspace. `watch` builds each window's
+    /// watch worker, which reports back through the window's state.
     pub fn new(
         boot: Boot,
         host: Arc<dyn Host>,
         watch: impl Fn(Weak<WindowState>) -> Box<dyn Watch> + Send + Sync + 'static,
     ) -> Arc<Self> {
         let trust = boot.profile.trust();
+        let first = boot.profile.first().map(|ws| ws.id.clone());
         let Profile {
             settings,
             state,
@@ -198,11 +217,11 @@ impl App {
             notice,
             wsl_distro,
             persist,
+            launch: _,
         } = boot.profile;
         if !persist {
             log::error!("the settings didn't load in time; nothing will be saved this session");
         }
-        let first = first_workspace(&workspaces).map(|ws| ws.id.clone());
         // The first window shows it, so it's open now if it wasn't.
         let opened = match first.as_deref().and_then(|id| workspaces.get_mut(id)) {
             Some(ws) if !ws.open => {
@@ -237,8 +256,14 @@ impl App {
             warm: boot.warm,
             new_watch: Box::new(watch),
             windows: RwLock::new(HashMap::new()),
-            focused: Mutex::new(None),
+            focus: Mutex::new(vec![MAIN_WINDOW.to_owned()]),
             backgrounds: Mutex::new(HashMap::new()),
+            lifecycle: Mutex::new(()),
+            next_label: AtomicU64::new(1),
+            restored: AtomicBool::new(false),
+            primary: AtomicBool::new(true),
+            quitting: AtomicBool::new(false),
+            launches: spawn_launcher(weak.clone()),
         });
         if migrated || opened {
             app.saver.workspaces(&read(&app.workspaces));
@@ -248,7 +273,7 @@ impl App {
     }
 
     /// Gives the window `label` a state of its own, showing the workspace `workspace` (`None` for
-    /// a blank window). Only the first window has a document rendered during boot, `early`.
+    /// a blank window), with the document rendered for it as it starts, `early`.
     fn add_window(
         self: &Arc<Self>,
         label: &str,
@@ -266,7 +291,7 @@ impl App {
     }
 
     /// Every window's state.
-    fn windows(&self) -> Vec<Arc<WindowState>> {
+    pub fn windows(&self) -> Vec<Arc<WindowState>> {
         read(&self.windows).values().cloned().collect()
     }
 
@@ -277,14 +302,21 @@ impl App {
         effective_settings(&settings, id.and_then(|id| workspaces.get(id)))
     }
 
-    /// Applies a change made in the window showing the workspace `id` (`None` for a blank
-    /// window): each field goes to that workspace or to the shared settings, as `apply_patch`
-    /// decides, and what changed is saved. Every window whose settings changed is told. Returns
-    /// the window's settings.
-    fn apply_settings(&self, id: Option<&str>, patch: SettingsPatch) -> Settings {
+    /// Applies a change made in `window`, showing its workspace (none for a blank window): each
+    /// field goes to that workspace or to the shared settings, as `apply_patch` decides, and what
+    /// changed is saved. Every window whose settings changed is told. Returns the window's
+    /// settings, or `None` when the window's state is retired: then nothing is applied. That is
+    /// checked under the workspaces lock, which `retire` takes, so a change already under way
+    /// when the window turned to another workspace (or closed) never lands.
+    fn apply_settings(&self, window: &WindowState, patch: SettingsPatch) -> Option<Settings> {
+        let id = window.workspace_id();
+        let id = id.as_deref();
         let (window_settings, effect) = {
             let mut settings = write(&self.settings);
             let mut workspaces = write(&self.workspaces);
+            if window.is_retired() {
+                return None;
+            }
             let mirror = mirrored(&workspaces);
             let effect = apply_patch(
                 &mut settings,
@@ -302,7 +334,7 @@ impl App {
             (window_settings, effect)
         };
         self.settings_changed(id, effect);
-        window_settings
+        Some(window_settings)
     }
 
     /// Sends `settings-changed` to each window whose settings a change made in the window showing
@@ -443,15 +475,23 @@ pub struct WindowState {
     snapshots_loaded: Gate,
     /// The window's ready gate: it is showing its first document, so scans may start.
     ui_shown: Gate,
-    /// The document rendered during boot; only the first window has one.
+    /// The workspace's last document, rendered while the window starts (during boot, for the
+    /// first window): its startup payload opens it. A blank window has none.
     early: Option<Arc<Slot<Early>>>,
     /// Second launches held until the window's UI asks for its startup payload.
     opens: Arc<OpenQueue>,
     /// Second launches after startup, resolved one at a time on a thread of their own.
     forwards: Sender<OpenRequest>,
-    watch: Box<dyn Watch>,
+    /// Gone once the window closes or shows another workspace, which stops the watcher.
+    watch: Mutex<Option<Box<dyn Watch>>>,
     /// The window's last normal (not maximised, minimised or full screen) placement.
     placement: Mutex<Option<WindowPlacement>>,
+    /// The window closed, or shows another workspace through a state of its own: nothing this
+    /// state still does reaches the UI, and no scan starts.
+    retired: AtomicBool,
+    /// Restored at launch and not shown yet: when it shows, it stays behind the window that has
+    /// the focus.
+    quiet: AtomicBool,
 }
 
 impl WindowState {
@@ -477,7 +517,7 @@ impl WindowState {
         }
         Arc::new_cyclic(|weak: &Weak<WindowState>| Self {
             forwards: spawn_forwarder(weak.clone()),
-            watch: (app.new_watch)(weak.clone()),
+            watch: Mutex::new(Some((app.new_watch)(weak.clone()))),
             app: Arc::clone(app),
             label: label.to_owned(),
             workspace: Mutex::new(workspace),
@@ -492,12 +532,33 @@ impl WindowState {
             early,
             opens,
             placement: Mutex::new(placement),
+            retired: AtomicBool::new(false),
+            quiet: AtomicBool::new(false),
         })
+    }
+
+    /// The window's label: "main", or `win-<n>`.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     /// The id of the workspace the window shows; `None` for a blank window.
     fn workspace_id(&self) -> Option<String> {
         lock(&self.workspace).clone()
+    }
+
+    /// Changes the window's workspace with `change`, which says whether it changed anything, and
+    /// saves it, as `App::change_workspace` does. Nothing changes for a blank window, or once this
+    /// state is retired: an open that finishes after the window turned to another workspace or
+    /// closed must not overwrite what the workspace's new window has saved since. The check runs
+    /// under the workspaces lock, which `retire` also takes, so a change lands before the
+    /// retirement or not at all.
+    fn change_own_workspace(&self, change: impl FnOnce(&mut Workspace) -> bool) -> bool {
+        let Some(id) = self.workspace_id() else {
+            return false;
+        };
+        self.app
+            .change_workspace(&id, |ws| !self.is_retired() && change(ws))
     }
 
     /// The window's settings: the shared ones, with its workspace's libraries, layout and theme.
@@ -529,30 +590,38 @@ impl WindowState {
         self.app.trusts(path)
     }
 
-    /// Sends `event` to this window's UI alone.
+    /// Sends `event` to this window's UI alone, unless this state is retired: the label may
+    /// belong to a state showing another workspace now.
     fn emit(&self, event: UiEvent) {
+        if self.retired.load(Ordering::SeqCst) {
+            return;
+        }
         self.app
             .host
             .emit(Target::Window(self.label.clone()), event);
     }
 
     /// The window is showing the first document: scans may start, and that document is
-    /// re-rendered if the index can now do better.
+    /// re-rendered if the index can now do better. Once the first window shows, the windows of
+    /// the other open workspaces open.
     pub fn window_shown(&self) {
         self.app.perf.mark("window-shown", None);
         self.ui_shown.open();
         self.refresh_if_stale(None);
+        if self.label == MAIN_WINDOW {
+            self.app.restore_windows();
+        }
     }
 
     /// Applies a settings change made in this window: the libraries, the layout and (when the
     /// workspace has its own) the theme go to its workspace, the rest to every window's settings.
-    /// Returns the window's settings.
+    /// Returns the window's settings. A retired state's UI is gone, and changes nothing.
     pub fn set_settings(self: &Arc<Self>, patch: SettingsPatch) -> Settings {
         let roots_changed = patch.library_roots.is_some();
         let mappings_changed = patch.path_mappings.is_some();
-        let settings = self
-            .app
-            .apply_settings(self.workspace_id().as_deref(), patch);
+        let Some(settings) = self.app.apply_settings(self, patch) else {
+            return self.settings();
+        };
         if mappings_changed {
             self.app.remap();
         }
@@ -627,10 +696,7 @@ impl WindowState {
         let Some(placement) = *lock(&self.placement) else {
             return;
         };
-        let Some(id) = self.workspace_id() else {
-            return;
-        };
-        self.app.change_workspace(&id, |ws| {
+        self.change_own_workspace(|ws| {
             ws.placement = Some(WindowPlacement {
                 maximized,
                 ..placement

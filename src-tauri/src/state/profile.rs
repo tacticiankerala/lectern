@@ -1,6 +1,6 @@
 //! Settings, workspaces and reading state as loaded at boot (`settings.json`, `workspaces.json`,
-//! `state.json`), the workspace the first window shows, and the path mapper and trusted hosts
-//! built from them.
+//! `state.json`), the workspace the first window shows (the one a launch file goes to, else the
+//! most recently focused open one), and the path mapper and trusted hosts built from them.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,8 @@ use lectern_core::library::path_key;
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::store::{load_json_or_default, Loaded, State};
 use lectern_core::workspace::{
-    load_workspaces, WindowPlacement, Workspace, Workspaces, WORKSPACES_FILE,
+    load_workspaces, route_open, OpenWindow, Route, WindowPlacement, Workspace, Workspaces,
+    WORKSPACES_FILE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,8 @@ pub struct Profile {
     /// False when the files couldn't be loaded in time: nothing is saved this session, so the
     /// defaults never replace the user's real settings.
     pub persist: bool,
+    /// The workspace the launch file goes to (`route_launch`), which the first window shows.
+    pub launch: Option<String>,
 }
 
 impl Profile {
@@ -64,12 +67,50 @@ impl Profile {
             notice: Some(UNLOADED_NOTICE.to_owned()),
             wsl_distro: None,
             persist: false,
+            launch: None,
         }
+    }
+
+    /// The workspace the first window shows: the one the launch file goes to, else the most
+    /// recently focused open one, else the most recently focused one.
+    pub fn first(&self) -> Option<&Workspace> {
+        self.launch
+            .as_deref()
+            .and_then(|id| self.workspaces.get(id))
+            .or_else(|| first_workspace(&self.workspaces))
+    }
+
+    /// Picks the workspace the launch file `path` goes to, as a second launch's would be picked
+    /// with each open workspace in a window of its own: the first window shows it, and it is
+    /// opened if it was closed.
+    pub fn route_launch(&mut self, path: &Path, is_dir: bool) {
+        let workspaces = &self.workspaces;
+        let windows: Vec<OpenWindow> = workspaces
+            .items
+            .iter()
+            .filter(|ws| ws.open)
+            .map(|ws| OpenWindow {
+                label: ws.id.clone(),
+                workspace: Some(ws.id.clone()),
+                roots: ws.roots.clone(),
+            })
+            .collect();
+        let closed: Vec<(String, Vec<String>)> = workspaces
+            .focus
+            .iter()
+            .filter_map(|id| workspaces.get(id))
+            .filter(|ws| !ws.open)
+            .map(|ws| (ws.id.clone(), ws.roots.clone()))
+            .collect();
+        self.launch = match route_open(path, is_dir, &windows, &closed, &workspaces.focus) {
+            Route::Window(id) | Route::Reopen(id) if !id.is_empty() => Some(id),
+            _ => None,
+        };
     }
 
     /// The document the first window reopens: the last one open in its workspace.
     pub fn last_doc(&self) -> Option<String> {
-        first_workspace(&self.workspaces).and_then(|ws| ws.last_doc.clone())
+        self.first().and_then(|ws| ws.last_doc.clone())
     }
 
     /// The network hosts Lectern may reach: those of every workspace's roots and of the path
@@ -111,6 +152,7 @@ pub fn load_profile(config_dir: &Path, wsl_distro: Option<String>) -> Profile {
         notice: (!notices.is_empty()).then(|| notices.join(" ")),
         wsl_distro,
         persist: true,
+        launch: None,
     }
 }
 
@@ -196,6 +238,53 @@ mod tests {
         }
         assert_eq!(first(&workspaces), Some(garden.as_str()));
         assert_eq!(first(&Workspaces::default()), None);
+    }
+
+    /// A launch file goes to the open workspace whose libraries hold it, else to the closed one
+    /// that does, else to the most recently focused open one; a folder goes to the most recently
+    /// focused open one. The first window shows it, and reopens its last document.
+    #[test]
+    fn the_first_window_shows_the_workspace_the_launch_file_goes_to() {
+        let mut workspaces = Workspaces::migrate(
+            &Settings {
+                library_roots: vec![r"S:\Notes\My Vault".to_owned()],
+                ..Settings::default()
+            },
+            Some(r"S:\Notes\My Vault\plan.md".to_owned()),
+            Vec::new(),
+            None,
+        );
+        let garden = workspaces.create("Garden");
+        let ws = workspaces.get_mut(&garden).unwrap();
+        ws.roots = vec![r"\\nas\share\garden".to_owned()];
+        ws.open = true;
+        ws.last_doc = Some(r"\\nas\share\garden\seeds.md".to_owned());
+        let archive = workspaces.create("Archive");
+        workspaces.get_mut(&archive).unwrap().roots = vec![r"C:\Users\me\archive".to_owned()];
+        let mut profile = Profile {
+            workspaces,
+            ..Profile::unloaded()
+        };
+        let mut first = |path: &str, is_dir: bool| {
+            profile.route_launch(Path::new(path), is_dir);
+            (profile.first().map(|ws| ws.id.clone()), profile.last_doc())
+        };
+        assert_eq!(
+            first(r"s:\notes\my vault\plan.md", false).0.as_deref(),
+            Some("w1")
+        );
+        let (id, last) = first(r"\\NAS\share\garden\notes\a.md", false);
+        assert_eq!(id, Some(garden.clone()));
+        assert_eq!(last.as_deref(), Some(r"\\nas\share\garden\seeds.md"));
+        assert_eq!(first(r"C:\Users\me\archive\old.md", false).0, Some(archive));
+        assert_eq!(
+            first(r"C:\Users\me\elsewhere.md", false).0.as_deref(),
+            Some("w1")
+        );
+        assert_eq!(
+            first(r"\\nas\share\garden\notes", true).0.as_deref(),
+            Some("w1")
+        );
     }
 
     #[test]

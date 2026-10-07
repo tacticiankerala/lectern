@@ -52,15 +52,10 @@ impl App {
         }
     }
 
-    /// The window `label` was focused: its document's languages are the first to warm again.
-    pub fn window_focused(&self, label: &str) {
-        *lock(&self.focused) = Some(label.to_owned());
-    }
-
     /// The languages of the code blocks in the document on screen in the focused window, else
     /// in any window.
     fn current_languages(&self) -> Vec<String> {
-        let focused = lock(&self.focused).clone();
+        let focused = lock(&self.focus).first().cloned();
         let windows = self.windows();
         windows
             .iter()

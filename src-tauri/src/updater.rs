@@ -23,7 +23,7 @@ use lectern_core::library::path_key;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Error, Update, UpdaterExt};
 
-use crate::app::MAIN_WINDOW;
+use crate::app::{self, MAIN_WINDOW};
 use crate::state::App;
 use crate::{shell, win};
 
@@ -163,17 +163,13 @@ async fn find(app: &AppHandle) -> Result<Option<Update>, String> {
 }
 
 /// Runs just before the updater starts the installer, after which it exits Lectern without Tauri's
-/// exit events: the window placement and reading state are saved, as on a normal exit. Only saved:
-/// unlike the updater's default (`cleanup_before_exit`, which hides the window), nothing here
+/// exit events: every window's placement and the reading state are saved, as on a normal exit,
+/// and every open workspace stays open, so the restart brings back every window. Only saved:
+/// unlike the updater's default (`cleanup_before_exit`, which hides the windows), nothing here
 /// needs undoing if the installer then fails to start.
 fn save_before_exit(app: &AppHandle) {
+    app::remember_every_window(app);
     if let Some(state) = app.try_state::<Arc<App>>() {
-        if let (Some(window), Some(main)) = (
-            app.get_webview_window(MAIN_WINDOW),
-            state.window(MAIN_WINDOW),
-        ) {
-            main.remember_window(&window.as_ref().window());
-        }
         state.flush();
     }
 }

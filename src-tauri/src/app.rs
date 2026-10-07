@@ -1,5 +1,6 @@
-//! Building and running the Tauri app: plugins, commands, setup, the main window (placement,
-//! background and title-bar colours) and single-instance forwarding.
+//! Building and running the Tauri app: plugins, commands, setup, the windows (building the later
+//! ones, placement, background and title-bar colours, closing), single-instance forwarding and
+//! exit.
 
 use std::env;
 use std::error::Error;
@@ -14,8 +15,8 @@ use lectern_core::render::highlight::StartupWarmUp;
 use lectern_core::workspace::WindowPlacement;
 use tauri::window::Color;
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow, Window,
-    WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow,
+    WebviewWindowBuilder, Window, WindowEvent,
 };
 
 use crate::events::TauriHost;
@@ -131,6 +132,15 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::show_window,
             commands::check_update,
             commands::install_update,
+            commands::list_workspaces,
+            commands::suggest_workspace_name,
+            commands::new_window,
+            commands::open_workspace,
+            commands::create_workspace,
+            commands::rename_workspace,
+            commands::delete_workspace,
+            commands::set_workspace_theme,
+            commands::quit,
         ])
         .on_window_event(on_window_event)
         .setup(move |app| setup(app, launch, opens))
@@ -207,6 +217,80 @@ fn setup(
     Ok(())
 }
 
+/// Builds the window `label` for the state the app holds for it, as "main" is built (hidden, its
+/// size), then places and colours it with `prepare_window`, so its workspace's theme shows from
+/// the first frame. It shows itself at its first paint. `focus`: whether it takes the focus.
+pub fn build_window(handle: &AppHandle, label: &str, focus: bool) -> Result<(), String> {
+    let app = handle
+        .try_state::<Arc<App>>()
+        .ok_or("Lectern isn't ready")?;
+    let state = app
+        .window(label)
+        .ok_or_else(|| format!("{label} has no state"))?;
+    let mut config = handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == MAIN_WINDOW)
+        .cloned()
+        .ok_or("the main window's settings are missing")?;
+    config.label = label.to_owned();
+    config.focus = focus;
+    let window = WebviewWindowBuilder::from_config(handle, &config)
+        .and_then(WebviewWindowBuilder::build)
+        .map_err(|e| e.to_string())?;
+    prepare_window(&window, &state);
+    Ok(())
+}
+
+/// Brings the window `label` forward, unminimised. A window still waiting for its first paint
+/// shows itself.
+pub fn focus_window(handle: &AppHandle, label: &str) {
+    if let Some(window) = handle.get_webview_window(label) {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// Keeps `window`, restored at launch and just shown, behind `front`, the window the user is in,
+/// which keeps the focus. Runs on the main thread after the show, unless something asked to
+/// bring `window` forward meanwhile (`state`).
+pub fn keep_behind(window: &WebviewWindow, front: WebviewWindow, state: Arc<WindowState>) {
+    let shown = window.clone();
+    let queued = window.run_on_main_thread(move || {
+        if !state.stays_behind() {
+            return;
+        }
+        let placed = shown
+            .hwnd()
+            .and_then(|hwnd| Ok((hwnd, front.hwnd()?)))
+            .map_err(|e| e.to_string())
+            .and_then(|(hwnd, front)| win::put_behind(hwnd, front));
+        if let Err(e) = placed {
+            log::warn!("couldn't keep {} behind: {e}", shown.label());
+        }
+    });
+    if let Err(e) = queued {
+        log::warn!("couldn't keep {} behind: {e}", window.label());
+    }
+}
+
+/// Puts every window's placement into its workspace, which stays open for the next launch: as
+/// Lectern exits, and before an update's installer runs.
+pub fn remember_every_window(handle: &AppHandle) {
+    let Some(app) = handle.try_state::<Arc<App>>() else {
+        return;
+    };
+    for state in app.windows() {
+        if let Some(window) = handle.get_webview_window(state.label()) {
+            state.remember_window(&window.as_ref().window());
+        }
+    }
+}
+
 /// Places the hidden window where its workspace's window was last time, if that is still on a
 /// monitor, and gives it the theme's background and title-bar colours before it is shown.
 fn prepare_window(window: &WebviewWindow, state: &WindowState) {
@@ -267,34 +351,31 @@ pub fn apply_chrome(window: &WebviewWindow, bg: &str, fg: &str, dark: bool) -> R
     win::set_title_bar_colors(hwnd, caption, text, dark)
 }
 
+/// A second launch: its file goes to the window `App::second_launch` routes it to, off the main
+/// thread, since that may depend on whether it is a folder. Before setup has made the app, it
+/// waits for the first window's startup.
 fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: &str) {
     let args = Args::parse(argv);
-    if let Some(path) = args.path {
+    let t0_ms = args.perf_t0_ms;
+    let request = args.path.map(|path| {
         // A relative path is relative to where the second launch ran.
         let path = if path.is_absolute() {
             path
         } else {
             Path::new(cwd).join(path)
         };
-        let request = OpenRequest {
+        OpenRequest {
             path: path.to_string_lossy().into_owned(),
-            t0_ms: args.perf_t0_ms,
-        };
-        // Held for startup, or resolved (a folder becomes a library root) off the main thread.
-        if let Some(request) = opens.offer(request) {
-            if let Some(main) = app
-                .try_state::<Arc<App>>()
-                .and_then(|state| state.window(MAIN_WINDOW))
-            {
-                main.forward(request);
-            }
+            t0_ms,
+            folder: false,
         }
-    }
-    // A window still waiting for its first paint shows itself.
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        if window.is_visible().unwrap_or(false) {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
+    });
+    match app.try_state::<Arc<App>>() {
+        Some(state) => state.second_launch(request),
+        None => {
+            if let Some(request) = request {
+                let _ = opens.offer(request);
+            }
         }
     }
 }
@@ -326,8 +407,9 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
             if let Some(state) = &state {
                 state.remember_window(window);
             }
+            app.window_closing(window.label());
         }
-        WindowEvent::Destroyed => app.window_closed(window.label()),
+        WindowEvent::Destroyed => app.window_destroyed(window.label()),
         _ => {}
     }
 }
@@ -345,14 +427,7 @@ fn on_run_event(app: &AppHandle, event: RunEvent) {
     };
     match event {
         // `exit` (as after `--exit-after-paint`) skips CloseRequested.
-        RunEvent::ExitRequested { .. } => {
-            if let (Some(window), Some(main)) = (
-                app.get_webview_window(MAIN_WINDOW),
-                state.window(MAIN_WINDOW),
-            ) {
-                main.remember_window(&window.as_ref().window());
-            }
-        }
+        RunEvent::ExitRequested { .. } => remember_every_window(app),
         RunEvent::Exit => state.flush(),
         _ => {}
     }

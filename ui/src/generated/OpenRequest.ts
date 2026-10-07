@@ -7,4 +7,9 @@ export type OpenRequest = { path: string,
 /**
  * When the request started, for perf marks.
  */
-t0Ms: number | null, };
+t0Ms: number | null, 
+/**
+ * `path` is a folder launched into a blank window, which has no workspace to add it to: the
+ * UI asks for a new workspace's name, then creates it with the folder.
+ */
+folder: boolean, };

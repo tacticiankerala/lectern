@@ -106,20 +106,18 @@ impl WindowState {
             // found the previous one; this one gets its look now.
             self.refresh_if_stale(None);
         }
-        if let Some(id) = self.workspace_id() {
-            let entry = RecentEntry {
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                opened_ms: now_ms(),
-            };
-            self.app.change_workspace(&id, |ws| {
-                as_reading(&mut ws.recent, |reading| reading.push_recent(entry));
-                if current {
-                    ws.last_doc = Some(doc.path.clone());
-                }
-                true
-            });
-        }
+        let entry = RecentEntry {
+            path: doc.path.clone(),
+            title: doc.title.clone(),
+            opened_ms: now_ms(),
+        };
+        self.change_own_workspace(|ws| {
+            as_reading(&mut ws.recent, |reading| reading.push_recent(entry));
+            if current {
+                ws.last_doc = Some(doc.path.clone());
+            }
+            true
+        });
         // The open succeeded, so the image protocol may serve from the document's folder.
         if let Some(dir) = path.parent() {
             write(&self.app.assets).add_folder(dir);
@@ -190,7 +188,9 @@ impl WindowState {
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
         });
-        self.watch.doc(Some(path.to_path_buf()));
+        if let Some(watch) = &*lock(&self.watch) {
+            watch.doc(Some(path.to_path_buf()));
+        }
         true
     }
 
@@ -262,11 +262,9 @@ impl WindowState {
 
     /// Drops `path` from the workspace's recent files, for good; returns the recent files left.
     pub fn remove_recent(&self, path: &str) -> Vec<RecentEntry> {
-        if let Some(id) = self.workspace_id() {
-            self.app.change_workspace(&id, |ws| {
-                as_reading(&mut ws.recent, |reading| reading.remove_recent(path))
-            });
-        }
+        self.change_own_workspace(|ws| {
+            as_reading(&mut ws.recent, |reading| reading.remove_recent(path))
+        });
         self.recent()
     }
 
