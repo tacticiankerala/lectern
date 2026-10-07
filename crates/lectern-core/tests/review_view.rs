@@ -88,7 +88,8 @@ fn payload_orders_and_counts() {
         panic!("C3 is the third item")
     };
     c3.entries.push(Entry {
-        author: EntryAuthor::Claude,
+        author: EntryAuthor::Agent,
+        name: "Claude".into(),
         kind: Some(ClaudeKind::Question),
         text: "The **station** or the server?".into(),
     });
@@ -148,11 +149,13 @@ fn payload_orders_and_counts() {
     assert_eq!(c1.current_text, None);
     assert_eq!(c1.entries.len(), 1);
     assert_eq!(c1.entries[0].author, EntryAuthor::You);
+    assert_eq!(c1.entries[0].name, "You");
     assert_eq!(c1.entries[0].kind, None);
     assert_eq!(c1.entries[0].text, "Why 50?");
     assert_eq!(c1.entries[0].html, "<p>Why 50?</p>");
     let claude = &p.comments[2].entries[1];
-    assert_eq!(claude.author, EntryAuthor::Claude);
+    assert_eq!(claude.author, EntryAuthor::Agent);
+    assert_eq!(claude.name, "Claude");
     assert_eq!(claude.kind, Some(ClaudeKind::Question));
     assert_eq!(claude.html, "<p>The **station** or the server?</p>");
 

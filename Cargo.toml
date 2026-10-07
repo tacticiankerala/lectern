@@ -4,7 +4,7 @@ members = ["crates/lectern-core", "src-tauri"]
 default-members = ["crates/lectern-core"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/tacticiankerala/lectern"

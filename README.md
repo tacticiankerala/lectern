@@ -24,17 +24,30 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 - **Quick.** A cold start straight into a 3,000-line document takes under half a second on a desktop PC.
 - **Stays current.** Lectern checks GitHub Releases once a day and updates in one click.
 
-## Reviewing with Claude
+## Reviewing with an AI agent
 
 <p align="center">
   <img src="docs/screenshots/comments.png" alt="The Comments tab beside a plan in the Paper theme: Claude's question on a highlighted passage, a detached comment with Claude's reply, and a resolved comment">
 </p>
 
-You can comment on a note as you read it, then hand the comments to Claude. A comment is a passage of the note, quoted, with your remark under it. Select some text and press the **Comment** button that appears, press **+** in the margin beside a paragraph, or press Ctrl+Alt+M. Comments show as highlights in the page and as cards in the right-hand panel's **Comments** tab.
+You can comment on a note as you read it, then hand the comments to Claude, Codex or any other AI agent. A comment is a passage of the note, quoted, with your remark under it. Select some text and press the **Comment** button that appears, press **+** in the margin beside a paragraph, or press Ctrl+Alt+M. Comments show as highlights in the page and as cards in the right-hand panel's **Comments** tab.
 
 Lectern saves them beside the note, in a plain Markdown file named after it: `plan.md` gets `plan.review.md`. The note itself is never changed.
 
-**Copy comments**, in that tab, copies the open ones as text ready to paste into Claude, with the note's Windows and WSL paths. Or point Claude at the `.review.md` file. Claude answers by adding, at the end of a comment, a paragraph that starts with `**Claude (reply):**`, `**Claude (question):**`, `**Claude (pushback):**` or `**Claude (resolved):**`, and the answer shows up in Lectern within a couple of seconds.
+**Copy comments**, in that tab, copies the open ones as text ready to paste into an agent, with the note's Windows and WSL paths. Or point the agent at the `.review.md` file. The agent answers by adding, at the end of a comment, a paragraph that starts with its own name and `reply`, `question`, `pushback` or `resolved`, such as `**Codex (question):**`, and the answer shows up in Lectern within a couple of seconds.
+
+An agent can start a comment too, by adding one at the end of the file, and you reply in the same thread. An agent that creates the file from scratch must begin it with the frontmatter, or Lectern won't touch it:
+
+```markdown
+---
+lectern-review: 1
+note: plan.md
+---
+## C1 · open · L12 · Heading
+> exact words from the note
+
+**Codex (question):** …
+```
 
 When the note changes, each comment follows its text. One whose text was reworded is marked "text changed", and one whose text is gone is kept as **Detached** with its original quote, so no comment is ever lost.
 

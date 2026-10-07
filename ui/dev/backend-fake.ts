@@ -20,6 +20,7 @@ import type { ClaudeKind } from "../src/generated/ClaudeKind";
 import type { CommentStatus } from "../src/generated/CommentStatus";
 import type { Crumb } from "../src/generated/Crumb";
 import type { DocPayload } from "../src/generated/DocPayload";
+import type { EntryAuthor } from "../src/generated/EntryAuthor";
 import type { EntryView } from "../src/generated/EntryView";
 import type { FileHits } from "../src/generated/FileHits";
 import type { FollowResult } from "../src/generated/FollowResult";
@@ -79,7 +80,7 @@ const MAX_HITS = 500;
 const CONTEXT_CHARS = 60;
 /** As core: the longest comment text accepted, in characters. */
 const MAX_COMMENT_CHARS = 20_000;
-/** As core: the status a Claude entry's kind gives its comment. */
+/** As core: the status an agent entry's kind gives its comment. */
 const KIND_STATUS: Record<ClaudeKind, CommentStatus> = {
   reply: "replied",
   question: "question",
@@ -130,8 +131,14 @@ export interface FakeControl {
    * every entry already seen), or (with null) none.
    */
   setReview(path: string, payload: ReviewPayload | null): void;
-  /** Appends a Claude entry to comment `id`, as Claude editing the sidecar would. */
-  claudeReply(path: string, id: number, kind: ClaudeKind | null, text: string): void;
+  /** Appends an entry by the agent `name` to comment `id`, as the agent editing the sidecar would. */
+  agentReply(path: string, id: number, name: string, kind: ClaudeKind | null, text: string): void;
+  /**
+   * Appends a comment the agent `name` started, as it would write one into the sidecar: the next
+   * id, status open, no anchor line (nothing seen yet), and the agent's entry first. Gives the note
+   * a sidecar if it has none.
+   */
+  agentComment(path: string, comment: AgentComment): void;
   /** Replaces core's text for a note, as if the note were edited. */
   setText(path: string, blocks: [number, number, string][]): void;
   /** Core's text blocks for a note, as `setText` takes them. */
@@ -144,10 +151,21 @@ export interface FakeControl {
   failNextReviewOp(message: string): void;
 }
 
+/** What an agent writes when it starts a comment (see `agentComment`). */
+export interface AgentComment {
+  startLine: number;
+  endLine: number;
+  quote: string;
+  headingPath: string[];
+  name: string;
+  kind: ClaudeKind | null;
+  text: string;
+}
+
 /** A comment in the fake's review store. */
 interface StoredComment {
   id: number;
-  /** The status in its header, which a newer Claude entry overrides. */
+  /** The status in its header, which a newer agent entry overrides. */
   status: CommentStatus;
   /** How many entries it had when last saved: the sidecar's `n=`. */
   seen: number;
@@ -233,10 +251,10 @@ function segments(line: string, hits: RegExpExecArray[]): Segment[] {
   return out;
 }
 
-/** As core: a newer Claude entry's kind gives the status, else the header's stands. */
+/** As core: a newer agent entry's kind gives the status, whatever its name; else the header's. */
 function effectiveStatus(c: StoredComment): CommentStatus {
   const last = c.entries[c.entries.length - 1];
-  if (last && c.entries.length > c.seen && last.author === "claude") {
+  if (last && c.entries.length > c.seen && last.author === "agent") {
     return KIND_STATUS[last.kind ?? "reply"];
   }
   return c.status;
@@ -336,9 +354,28 @@ function cleanText(text: string): string {
 }
 
 /** A thread entry, its Markdown shown as escaped text: the fake has no renderer. */
-function entry(author: "you" | "claude", kind: ClaudeKind | null, text: string): EntryView {
+function entry(
+  author: EntryAuthor,
+  name: string,
+  kind: ClaudeKind | null,
+  text: string,
+): EntryView {
   const escaped = text.replace(/[&<>"]/g, (ch) => `&#${String(ch.charCodeAt(0))};`);
-  return { author, kind, text, html: `<p>${escaped}</p>` };
+  return { author, name, kind, text, html: `<p>${escaped}</p>` };
+}
+
+/** One of your entries. */
+function yours(text: string): EntryView {
+  return entry("you", "You", null, text);
+}
+
+/** As core: the id for a new comment, one more than any in the sidecar, unreadable ones too. */
+function nextId(review: StoredReview): number {
+  const ids = [
+    ...review.comments.map((c) => c.id),
+    ...review.unreadable.map((u) => Number(/^## C(\d+)/.exec(u.raw)?.[1] ?? 0)),
+  ];
+  return Math.max(0, ...ids) + 1;
 }
 
 /** As core names a sidecar: `plan.md` → `plan.review.md`, `x.markdown` → `x.markdown.review.md`. */
@@ -642,12 +679,34 @@ export class FakeBackend implements Backend, FakeControl {
     });
   }
 
-  claudeReply(path: string, id: number, kind: ClaudeKind | null, text: string): void {
+  agentReply(path: string, id: number, name: string, kind: ClaudeKind | null, text: string): void {
     const c = this.reviews.get(key(path))?.comments.find((x) => x.id === id);
     if (!c) {
       throw new Error(`no comment C${String(id)} on ${path}`);
     }
-    c.entries.push(entry("claude", kind, text));
+    c.entries.push(entry("agent", name, kind, text));
+  }
+
+  agentComment(path: string, comment: AgentComment): void {
+    const review = this.reviews.get(key(path)) ?? this.newReview(path);
+    review.comments.push({
+      id: nextId(review),
+      status: "open",
+      seen: 0,
+      startLine: comment.startLine,
+      endLine: comment.endLine,
+      headingPath: [...comment.headingPath],
+      quote: comment.quote,
+      prefix: "",
+      textStart: null,
+      textEnd: null,
+      entries: [entry("agent", comment.name, comment.kind, comment.text)],
+      state: "anchored",
+      movedTo: null,
+      jumpLine: comment.startLine,
+      pinnedHeading: null,
+    });
+    this.reviews.set(key(path), review);
   }
 
   setText(path: string, blocks: [number, number, string][]): void {
@@ -680,21 +739,11 @@ export class FakeBackend implements Backend, FakeControl {
     if (existing?.readOnly) {
       throw new Error(existing.readOnly);
     }
-    const review = existing ?? {
-      noteWslPath: wslPath(path),
-      sidecarWslPath: wslPath(sidecarOf(path)),
-      readOnly: null,
-      comments: [],
-      unreadable: [],
-    };
+    const review = existing ?? this.newReview(path);
     if (op.op === "add") {
       const text = cleanText(op.text);
-      const ids = [
-        ...review.comments.map((c) => c.id),
-        ...review.unreadable.map((u) => Number(/^## C(\d+)/.exec(u.raw)?.[1] ?? 0)),
-      ];
       review.comments.push({
-        id: Math.max(0, ...ids) + 1,
+        id: nextId(review),
         status: "open",
         seen: 1,
         startLine: op.anchor.startLine,
@@ -704,7 +753,7 @@ export class FakeBackend implements Backend, FakeControl {
         prefix: op.anchor.prefix,
         textStart: null,
         textEnd: null,
-        entries: [entry("you", null, text)],
+        entries: [yours(text)],
         state: "anchored",
         movedTo: null,
         jumpLine: op.anchor.startLine,
@@ -717,11 +766,11 @@ export class FakeBackend implements Backend, FakeControl {
     if (!c) {
       throw new Error("That comment no longer exists.");
     }
-    // Newer Claude entries are folded into the header first, as core settles a comment.
+    // Newer agent entries are folded into the header first, as core settles a comment.
     c.status = effectiveStatus(c);
     switch (op.op) {
       case "reply":
-        c.entries.push(entry("you", null, cleanText(op.text)));
+        c.entries.push(yours(cleanText(op.text)));
         c.status = "open";
         break;
       case "setStatus":
@@ -745,11 +794,22 @@ export class FakeBackend implements Backend, FakeControl {
         if (target.author !== "you") {
           throw new Error("Only your own replies can be edited.");
         }
-        c.entries[op.entry] = entry("you", null, cleanText(op.text));
+        c.entries[op.entry] = yours(cleanText(op.text));
         break;
       }
     }
     c.seen = c.entries.length;
+  }
+
+  /** A sidecar with no comments yet, as the first comment on `path` creates. */
+  private newReview(path: string): StoredReview {
+    return {
+      noteWslPath: wslPath(path),
+      sidecarWslPath: wslPath(sidecarOf(path)),
+      readOnly: null,
+      comments: [],
+      unreadable: [],
+    };
   }
 
   /** The review of `path` as `load_review` answers: each comment anchored against core's text. */

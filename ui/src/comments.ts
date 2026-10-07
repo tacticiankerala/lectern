@@ -19,7 +19,7 @@
 // - Hidden comments (the header toggle) keep their cards and badge but mark nothing, and nothing
 //   offers to add one.
 // - Loads and operations go to the backend one at a time, in the order they were asked for, so
-//   their answers apply in that order: an older answer never hides a newer Claude reply. An
+//   their answers apply in that order: an older answer never hides a newer agent reply. An
 //   operation is for the note it was asked on: one whose note is no longer on screen by its turn
 //   isn't sent.
 // - Reply drafts belong to their note and comment. They survive a reload of the comments (the box
@@ -34,7 +34,7 @@
 import type { Backend } from "./backend";
 import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
 import {
-  claudeEntryCount,
+  agentEntryCount,
   copyCount,
   formatCopy,
   isOpen,
@@ -280,14 +280,14 @@ export class CommentsController {
     }
   }
 
-  /** Shows `payload`: the cards, the badge, the marks. Claude writing flashes the tab. */
+  /** Shows `payload`: the cards, the badge, the marks. An agent writing flashes the tab. */
   apply(payload: ReviewPayload): void {
     const before = this.review;
     this.review = payload;
     if (
       before !== null &&
       samePath(before.notePath, payload.notePath) &&
-      claudeEntryCount(payload) > claudeEntryCount(before)
+      agentEntryCount(payload) > agentEntryCount(before)
     ) {
       this.host.panel.flash();
       if (!this.host.panelOpen() || !this.shown) this.host.pulseBadge();
@@ -607,12 +607,13 @@ export class CommentsController {
   }
 
   /**
-   * One entry of a thread: who wrote it, Claude's kind, and its Markdown as core rendered it. Your
-   * own entries can be edited (`edit` action); the one being edited shows its box instead.
+   * One entry of a thread: who wrote it (you, or an agent by name, with its kind), and its Markdown
+   * as core rendered it. Your own entries can be edited (`edit` action); the one being edited shows
+   * its box instead.
    */
   private entryEl(id: number, e: EntryView, index: number, readOnly: boolean): HTMLElement {
-    const author = h("div", { class: "comment-author" }, e.author === "you" ? "You" : "Claude");
-    if (e.author === "claude" && e.kind !== null) {
+    const author = h("div", { class: "comment-author" }, e.name);
+    if (e.author === "agent" && e.kind !== null) {
       author.append(" ", h("span", { class: `comment-kind kind-${e.kind}` }, e.kind));
     }
     const edit = this.edit;

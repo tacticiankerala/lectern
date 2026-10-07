@@ -4,12 +4,10 @@ note: 2026-09-14-offline-sync.md
 ---
 # Review: 2026-09-14-offline-sync.md
 
-<!-- lectern: How this file works, for Claude and for people.
-Each comment is a "## C<n> · <status> · L<a>–L<b> · <heading path>" section, then the quoted text,
-then a thread of entries. Reply by adding a paragraph that starts with
-**Claude (reply):**, **Claude (question):**, **Claude (pushback):** or **Claude (resolved):**.
-Statuses: open, replied, question, pushback, resolved, dismissed.
-Don't change the C<n> ids. The line numbers refer to the note and may be stale; the quote is authoritative. -->
+<!-- lectern: review comments on the note, for AI agents and people.
+Reply: add a paragraph under the comment starting **Claude (reply):**, with your own name and the kind reply, question, pushback or resolved.
+New comment: append "## C<next number> · open · L<line> · <Heading>", then "> exact words from the note", then **Claude (question):** and your text.
+Edit nothing else. The quote outranks line numbers; resolved and dismissed comments need nothing. -->
 
 ## C1 · open · L88 · Offline sync › Task 3: Queue edits on the device
 <!-- anchor prefix="d edits with their base version " suffix=" Back off after a failed push: 2" fp="fnv1a64:de88e339f0ffa9c4" n=1 created="2026-09-29T09:12:00Z" -->

@@ -15,7 +15,7 @@ const HTML = `<h1 id="tide-sync" data-sourcepos="1:1-1:11">Tide sync</h1>
 </ul>`;
 
 function you(text: string): EntryView {
-  return { author: "you", kind: null, text, html: `<p>${text}</p>` };
+  return { author: "you", name: "You", kind: null, text, html: `<p>${text}</p>` };
 }
 
 function comment(over: Partial<CommentView> & { id: number }): CommentView {
@@ -62,7 +62,13 @@ function review(path: string): ReviewPayload {
         quote: "Retry with a short backoff",
         entries: [
           you("How short?"),
-          { author: "claude", kind: "question", text: "Seconds?", html: "<p>Seconds?</p>" },
+          {
+            author: "agent",
+            name: "Claude",
+            kind: "question",
+            text: "Seconds?",
+            html: "<p>Seconds?</p>",
+          },
         ],
       }),
       comment({
@@ -269,7 +275,7 @@ describe("CommentsController", () => {
     const second = card(panel, 2);
     expect(second.dataset.status).toBe("question");
     expect(second.querySelector(".comment-status")?.textContent).toBe("question");
-    expect(second.querySelector(".comment-entry.claude .comment-author")?.textContent).toBe(
+    expect(second.querySelector(".comment-entry.agent .comment-author")?.textContent).toBe(
       "Claude question",
     );
     // The outline's selectors never meet a card.
@@ -393,15 +399,68 @@ describe("CommentsController", () => {
     await settle();
     expect(load).not.toHaveBeenCalled();
 
-    fake.claudeReply(A, 1, "reply", "Fifty fits one request.");
+    fake.agentReply(A, 1, "Claude", "reply", "Fifty fits one request.");
     fake.emit("review-changed", { path: A });
     await vi.waitFor(() => {
-      expect(card(panel, 1).querySelectorAll(".comment-entry.claude")).toHaveLength(1);
+      expect(card(panel, 1).querySelectorAll(".comment-entry.agent")).toHaveLength(1);
     });
     expect(card(panel, 1).dataset.status).toBe("replied");
     expect(panel.commentsPane.ownerDocument.querySelector("[role=tab].flash")).not.toBeNull();
     // The panel is closed, so the header badge pulses too.
     expect(host.pulseBadge).toHaveBeenCalledTimes(1);
+  });
+
+  it("names each agent, and an agent-started thread goes on with your reply", async () => {
+    const { fake, panel, controller } = setup();
+    await controller.load();
+    // An agent appends a comment of its own to the sidecar.
+    fake.agentComment(A, {
+      startLine: 3,
+      endLine: 3,
+      quote: "to the hub",
+      headingPath: ["Tide sync"],
+      name: "Codex",
+      kind: "question",
+      text: "Which hub, the station's or the server's?",
+    });
+    fake.emit("review-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(cards(panel).map((c) => c.dataset.id)).toEqual(["4", "1", "5", "2"]);
+    });
+    const started = card(panel, 5);
+    expect(started.dataset.status).toBe("question");
+    expect(started.querySelector(".comment-quote")?.textContent).toBe("to the hub");
+    const first = started.querySelector(".comment-entry");
+    expect(first?.className).toBe("comment-entry agent");
+    expect(first?.querySelector(".comment-author")?.textContent).toBe("Codex question");
+    // Reply is there; Edit is only ever on your own entries.
+    expect(action(panel, 5, "reply").disabled).toBe(false);
+    expect(started.querySelector('[data-action="edit"]')).toBeNull();
+
+    action(panel, 5, "reply").click();
+    ctrlEnter(typeReply(panel, 5, "The station's."));
+    await vi.waitFor(() => {
+      expect(card(panel, 5).querySelectorAll(".comment-entry")).toHaveLength(2);
+    });
+    expect(card(panel, 5).dataset.status).toBe("open");
+    const authors = () =>
+      [...card(panel, 5).querySelectorAll(".comment-author")].map((a) => a.textContent);
+    expect(authors()).toEqual(["Codex question", "You"]);
+    const edits = card(panel, 5).querySelectorAll<HTMLElement>('[data-action="edit"]');
+    expect([...edits].map((e) => e.dataset.entry)).toEqual(["1"]);
+
+    // Another agent answers: its own name, and its kind sets the status.
+    fake.agentReply(A, 5, "Gemini", "pushback", "The server's: stations relay.");
+    fake.agentReply(A, 2, "Claude", null, "A few seconds.");
+    fake.emit("review-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(card(panel, 5).dataset.status).toBe("pushback");
+    });
+    expect(authors()).toEqual(["Codex question", "You", "Gemini pushback"]);
+    expect(
+      card(panel, 2).querySelector(".comment-entry:last-child .comment-author")?.textContent,
+    ).toBe("Claude");
+    expect(card(panel, 2).dataset.status).toBe("replied");
   });
 
   it("hidden removes highlights and dots", async () => {
@@ -519,7 +578,8 @@ describe("CommentsController", () => {
     const { fake, panel, host, controller } = setup();
     const p = review(A);
     p.comments[0]?.entries.push({
-      author: "claude",
+      author: "agent",
+      name: "Claude",
       kind: null,
       text: "See [the notes](notes.md).",
       html: '<p>See <a href="#" data-kind="doc" data-target="C:\\V\\notes.md">the notes</a>.</p>',
@@ -833,12 +893,12 @@ describe("CommentsController", () => {
     });
     action(panel, 2, "resolve").click();
     await settle();
-    fake.claudeReply(A, 1, "reply", "Fifty fits one request.");
+    fake.agentReply(A, 1, "Claude", "reply", "Fifty fits one request.");
     fake.emit("review-changed", { path: A });
     await settle();
     gate.resolve();
     await settle();
-    expect(card(panel, 1).querySelectorAll(".comment-entry.claude")).toHaveLength(1);
+    expect(card(panel, 1).querySelectorAll(".comment-entry.agent")).toHaveLength(1);
     expect(card(panel, 1).dataset.status).toBe("replied");
     panel.commentsPane.querySelector<HTMLButtonElement>('[data-filter="all"]')?.click();
     expect(card(panel, 2).dataset.status).toBe("resolved");
@@ -889,7 +949,8 @@ describe("CommentsController", () => {
     const { fake, panel, host, controller } = setup();
     const p = review(A);
     p.comments[0]?.entries.push({
-      author: "claude",
+      author: "agent",
+      name: "Claude",
       kind: null,
       text: "Like this:",
       html: '<p>Like this:</p>\n<div class="code-block" data-lang="toml" data-sourcepos="3:1-5:3"><div class="code-head"><span class="code-lang">toml</span><button type="button" class="code-copy" aria-label="Copy code">Copy</button></div><pre><code class="language-toml">[sync]\nbatch = 50\n</code></pre></div>',
@@ -942,10 +1003,10 @@ describe("CommentsController", () => {
     const area = typeReply(panel, 1, "Make it a setting");
     area.focus();
     area.setSelectionRange(5, 7, "backward");
-    fake.claudeReply(A, 1, "reply", "Fifty fits one request.");
+    fake.agentReply(A, 1, "Claude", "reply", "Fifty fits one request.");
     fake.emit("review-changed", { path: A });
     await vi.waitFor(() => {
-      expect(card(panel, 1).querySelectorAll(".comment-entry.claude")).toHaveLength(1);
+      expect(card(panel, 1).querySelectorAll(".comment-entry.agent")).toHaveLength(1);
     });
     expect(card(panel, 1).querySelector("textarea")).toBe(area);
     expect(document.activeElement).toBe(area);

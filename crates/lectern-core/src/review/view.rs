@@ -16,6 +16,8 @@ use super::{raw_section_id, ClaudeKind, Comment, CommentStatus, Entry, EntryAuth
 #[ts(export)]
 pub struct EntryView {
     pub author: EntryAuthor,
+    /// `You` for the reader; an agent's name as written.
+    pub name: String,
     pub kind: Option<ClaudeKind>,
     /// The Markdown as written.
     pub text: String,
@@ -234,6 +236,7 @@ fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
 fn entry_view(e: &Entry, render: &dyn Fn(&str) -> String) -> EntryView {
     EntryView {
         author: e.author,
+        name: e.name.clone(),
         kind: e.kind,
         text: e.text.clone(),
         html: render(&e.text),

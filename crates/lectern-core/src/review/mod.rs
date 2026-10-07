@@ -1,4 +1,4 @@
-//! Review comments: a sidecar file beside a note holds the reader's comments on it and Claude's
+//! Review comments: a sidecar file beside a note holds the reader's comments on it and AI agents'
 //! replies, as a Markdown thread both can edit.
 //!
 //! The sidecar of `plan.md` is `plan.review.md`. [`format`] reads and writes it. [`text`] is the
@@ -80,7 +80,8 @@ impl CommentStatus {
     }
 }
 
-/// What a Claude entry says about the comment: `**Claude (question):**` and so on.
+/// What an agent entry says about the comment: `**Claude (question):**`, `**Codex (pushback):**`
+/// and so on.
 #[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
@@ -122,20 +123,22 @@ impl ClaudeKind {
     }
 }
 
-/// Who wrote a thread entry.
+/// Who wrote a thread entry: the reader, or an AI agent (Claude, Codex or any other).
 #[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
 pub enum EntryAuthor {
     You,
-    Claude,
+    Agent,
 }
 
-/// One paragraph of a comment's thread, from `**You:**` or `**Claude[ (kind)]:**` to the next.
+/// One paragraph of a comment's thread, from `**You:**` or `**<Name>[ (kind)]:**` to the next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub author: EntryAuthor,
-    /// Only Claude entries have a kind; a bare `**Claude:**` has none and counts as a reply.
+    /// `You` for the reader; an agent's name as written, trimmed.
+    pub name: String,
+    /// Only agent entries have a kind; a bare `**Claude:**` has none and counts as a reply.
     pub kind: Option<ClaudeKind>,
     pub text: String,
 }
@@ -177,19 +180,20 @@ pub struct Comment {
 }
 
 impl Comment {
-    /// The status to show: the kind of a Claude entry added since Lectern last wrote the comment,
-    /// otherwise the header's. A user's resolve or reopen isn't undone by an older Claude entry.
+    /// The status to show: the kind of an agent entry added since Lectern last wrote the comment,
+    /// whatever the agent's name, otherwise the header's. A user's resolve or reopen isn't undone
+    /// by an older agent entry.
     pub fn effective_status(&self) -> CommentStatus {
         let seen = self.anchor.as_ref().map_or(0, |a| a.n) as usize;
         match self.entries.last() {
-            Some(e) if self.entries.len() > seen && e.author == EntryAuthor::Claude => {
+            Some(e) if self.entries.len() > seen && e.author == EntryAuthor::Agent => {
                 e.kind.unwrap_or(ClaudeKind::Reply).status()
             }
             _ => self.status,
         }
     }
 
-    /// Before Lectern changes a comment: fold newer Claude entries into the header.
+    /// Before Lectern changes a comment: fold newer agent entries into the header.
     pub fn settle(&mut self) {
         self.status = self.effective_status();
     }
@@ -246,7 +250,7 @@ impl Review {
 
     /// The id for a new comment: one more than any in the file, so an id is never reused. Every
     /// `## C<n>` line read counts: those starting sections kept raw, and those inside a section's
-    /// text, where a code fence Claude left open swallowed the sections after it.
+    /// text, where a code fence an agent left open swallowed the sections after it.
     pub fn next_id(&self) -> u32 {
         let read = self.items.iter().filter_map(|item| match item {
             Item::Raw(section) => Some(section.as_str()),

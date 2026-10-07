@@ -48,7 +48,7 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
 }
 
 function you(text: string) {
-  return { author: "you", kind: null, text, html: `<p>${text}</p>` } as const;
+  return { author: "you", name: "You", kind: null, text, html: `<p>${text}</p>` } as const;
 }
 
 /** Comments on work/alpha/README.md: three open (one detached), one resolved. */
@@ -90,7 +90,13 @@ function alphaReview(): ReviewPayload {
         quote: "with every step",
         entries: [
           you("Split this cell."),
-          { author: "claude", kind: "resolved", text: "Split.", html: "<p>Split.</p>" },
+          {
+            author: "agent",
+            name: "Claude",
+            kind: "resolved",
+            text: "Split.",
+            html: "<p>Split.</p>",
+          },
         ],
       }),
       comment({
@@ -330,10 +336,10 @@ test("a live reload while typing a reply keeps the caret", async ({ page }) => {
     el.setSelectionRange(5, 8, "backward");
   });
   await page.evaluate((path) => {
-    window.__fake.claudeReply(path, 1, "reply", "Noted.");
+    window.__fake.agentReply(path, 1, "Claude", "reply", "Noted.");
     window.__fake.emit("review-changed", { path });
   }, fixturePath(ALPHA));
-  await expect(card(page, 1).locator(".comment-entry.claude")).toHaveCount(1);
+  await expect(card(page, 1).locator(".comment-entry.agent")).toHaveCount(1);
   expect(
     await box.evaluate((el: HTMLTextAreaElement) => [
       el === document.activeElement,
@@ -352,7 +358,8 @@ test("a long code line in a comment scrolls in its block, not the pane", async (
   const line = `const batch = ${"x".repeat(85)};`;
   expect(line.length).toBe(100);
   review.comments[0]?.entries.push({
-    author: "claude",
+    author: "agent",
+    name: "Claude",
     kind: null,
     text: `\`\`\`js\n${line}\n\`\`\``,
     html: `<div class="code-block" data-lang="js" data-sourcepos="1:1-3:3"><div class="code-head"><span class="code-lang">js</span><button type="button" class="code-copy" aria-label="Copy code">Copy</button></div><pre><code class="language-js">${line}\n</code></pre></div>`,
@@ -372,16 +379,58 @@ test("Claude's reply appears live", async ({ page }) => {
   await openFixture(page, ALPHA);
   await seed(page, alphaReview());
   await expect(card(page, 1)).toHaveCount(1);
-  await expect(card(page, 1).locator(".comment-entry.claude")).toHaveCount(0);
+  await expect(card(page, 1).locator(".comment-entry.agent")).toHaveCount(0);
   await page.evaluate((path) => {
-    window.__fake.claudeReply(path, 1, "question", "The platform team, or the data team?");
+    window.__fake.agentReply(path, 1, "Claude", "question", "The platform team, or the data team?");
     window.__fake.emit("review-changed", { path });
   }, fixturePath(ALPHA));
-  await expect(card(page, 1).locator(".comment-entry.claude .comment-body")).toHaveText(
+  await expect(card(page, 1).locator(".comment-entry.agent .comment-body")).toHaveText(
     "The platform team, or the data team?",
   );
   await expect(card(page, 1).locator(".comment-status")).toHaveText("question");
   await expect(page.locator("#lx-tab-comments")).toHaveClass(/flash/);
+});
+
+test("an agent starts a thread, you reply, and another agent answers", async ({ page }) => {
+  await openFixture(page, ALPHA);
+  await seed(page, alphaReview());
+  await page.getByRole("tab", { name: /^Comments/ }).click();
+  await page.evaluate((path) => {
+    window.__fake.agentComment(path, {
+      startLine: 14,
+      endLine: 14,
+      quote: "Ship the first slice",
+      headingPath: ["Alpha", "Tasks"],
+      name: "Claude",
+      kind: "question",
+      text: "Which slice comes first?",
+    });
+    window.__fake.emit("review-changed", { path });
+  }, fixturePath(ALPHA));
+  const started = card(page, 5);
+  await expect(started.locator(".comment-quote")).toHaveText("Ship the first slice");
+  await expect(started.locator(".comment-entry.agent .comment-author")).toHaveText(
+    "Claude question",
+  );
+  await expect(started.locator(".comment-status")).toHaveText("question");
+  await expect(started.getByRole("button", { name: "Edit" })).toHaveCount(0);
+
+  await started.getByRole("button", { name: "Reply" }).click();
+  await started.locator("textarea").fill("The sync slice.");
+  await started.locator("textarea").press("Control+Enter");
+  await expect(started.locator(".comment-entry")).toHaveCount(2);
+  await expect(started.locator(".comment-entry.you .comment-body")).toHaveText("The sync slice.");
+  await expect(started.locator(".comment-status")).toHaveText("open");
+
+  await page.evaluate((path) => {
+    window.__fake.agentReply(path, 5, "Codex", "pushback", "Sync needs the schema slice first.");
+    window.__fake.emit("review-changed", { path });
+  }, fixturePath(ALPHA));
+  await expect(started.locator(".comment-entry")).toHaveCount(3);
+  await expect(started.locator(".comment-entry.agent .comment-author").last()).toHaveText(
+    "Codex pushback",
+  );
+  await expect(started.locator(".comment-status")).toHaveText("pushback");
 });
 
 test("an edit that deletes the passage shows the comment as detached with its original text", async ({
@@ -685,7 +734,7 @@ test("turning the feature off in Preferences removes every surface and the heade
   const toggle = page.locator('input[name="lx-review-comments"]');
   await expect(toggle).toBeChecked();
   await expect(page.locator(".prefs")).toContainText(
-    "Comments are saved next to each note as <note>.review.md, a Markdown file Claude can read and reply in.",
+    "Comments are saved next to each note as <note>.review.md, a Markdown file Claude, Codex or another AI agent can read and reply in.",
   );
   await toggle.uncheck();
   await page.keyboard.press("Escape");

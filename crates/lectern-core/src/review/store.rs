@@ -16,10 +16,10 @@ use std::thread;
 use std::time::Duration;
 
 use super::anchor::{refresh_anchored, resolve_all};
-use super::format::{new_review, parse, serialize};
+use super::format::{new_review, parse, refresh_instructions, serialize};
 use super::ops::{self, OpContext, OpError, ReviewOp};
 use super::text::TextMap;
-use super::{fingerprint, Review, HARD_READ_CAP, MAX_SIDECAR_BYTES};
+use super::{fingerprint, Item, Review, HARD_READ_CAP, MAX_SIDECAR_BYTES};
 
 /// How many times a save starts over because the sidecar changed under it.
 pub(crate) const WRITE_RETRIES: usize = 3;
@@ -101,10 +101,12 @@ impl std::error::Error for StoreError {}
 /// file that is already there is changed only when [`load`] would show it writable.
 /// `source` is the note's text and `now` the time to record on a new comment.
 ///
-/// The sidecar is read, `op` applied, and the result written to a temporary file that replaces
-/// the sidecar only if the sidecar's bytes are still the ones read, checked before every rename
-/// attempt; otherwise it starts over, up to 3 times. Saves in this process take turns. A save
-/// that would take the sidecar past [`MAX_SIDECAR_BYTES`] is refused before anything is written.
+/// The sidecar is read, `op` applied, anchor lines it gained dated `now`, the instructions block
+/// brought up to date (see [`refresh_instructions`]), and the result written to a temporary file
+/// that replaces the sidecar only if the sidecar's bytes are still the ones read, checked before
+/// every rename attempt; otherwise it starts over, up to 3 times. Saves in this process take
+/// turns. A save that would take the sidecar past [`MAX_SIDECAR_BYTES`] is refused before anything
+/// is written.
 /// The temporary file is removed again whenever the save fails.
 /// Returns the review as saved and the id of the comment `op` changed.
 pub fn apply_op(
@@ -159,6 +161,8 @@ pub(crate) fn apply_op_with_hooks(
         let resolved = resolve_all(&review, &text, &fp);
         refresh_anchored(&mut review, &resolved, &text, &fp);
         let id = ops::apply(&mut review, op, &ctx).map_err(StoreError::Op)?;
+        date_new_anchors(&mut review, now);
+        refresh_instructions(&mut review);
         let out = serialize(&review);
         // Saved past the cap, the sidecar would turn read-only and refuse every later change.
         if u64::try_from(out.len()).unwrap_or(u64::MAX) > MAX_SIDECAR_BYTES {
@@ -187,6 +191,19 @@ pub(crate) fn apply_op_with_hooks(
         }
     }
     Err(StoreError::Conflict)
+}
+
+/// Gives `now` as the creation time to every anchor line without one: those this save added to
+/// comments that had none, such as a comment an agent started.
+fn date_new_anchors(review: &mut Review, now: &str) {
+    for item in &mut review.items {
+        if let Item::Comment(c) = item {
+            if let Some(anchor) = c.anchor.as_mut().filter(|a| a.created.is_empty()) {
+                anchor.created = now.to_owned();
+                c.dirty = true;
+            }
+        }
+    }
 }
 
 /// What reading a sidecar found.
@@ -386,7 +403,7 @@ mod tests {
         let authors: Vec<EntryAuthor> = c1.entries.iter().map(|e| e.author).collect();
         assert_eq!(
             authors,
-            [EntryAuthor::You, EntryAuthor::Claude, EntryAuthor::You]
+            [EntryAuthor::You, EntryAuthor::Agent, EntryAuthor::You]
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temp file");
     }
@@ -477,7 +494,7 @@ mod tests {
         let authors: Vec<EntryAuthor> = c1.entries.iter().map(|e| e.author).collect();
         assert_eq!(
             authors,
-            [EntryAuthor::You, EntryAuthor::Claude, EntryAuthor::You]
+            [EntryAuthor::You, EntryAuthor::Agent, EntryAuthor::You]
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "no temp file");
     }
