@@ -12,6 +12,7 @@ pub mod search;
 pub mod store;
 pub mod text;
 pub mod watch;
+pub mod workspace;
 
 /// The Lectern version, taken from the workspace manifest.
 pub fn version() -> &'static str {

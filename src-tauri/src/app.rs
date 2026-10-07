@@ -11,7 +11,7 @@ use lectern_core::cli::Args;
 use lectern_core::ipc::{OpenRequest, Settings, ThemeId, ThemeMode};
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
-use serde::{Deserialize, Serialize};
+use lectern_core::workspace::WindowPlacement;
 use tauri::window::Color;
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow, Window,
@@ -222,7 +222,7 @@ fn prepare_window(window: &WebviewWindow, state: &AppState) {
         })
         .collect();
     let restored = state.saved_placement().and_then(|saved| {
-        clamp_to_work_areas(saved.rect(), &work_areas).map(|rect| (rect, saved.maximized))
+        clamp_to_work_areas(Rect::from(saved), &work_areas).map(|rect| (rect, saved.maximized))
     });
     match restored {
         Some((rect, maximized)) => {
@@ -232,11 +232,11 @@ fn prepare_window(window: &WebviewWindow, state: &AppState) {
             if maximized {
                 let _ = window.maximize();
             }
-            state.set_initial_placement(WindowPlacement::from_rect(rect));
+            state.set_initial_placement(WindowPlacement::from(rect));
         }
         None => {
             if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                state.set_initial_placement(WindowPlacement::from_rect(Rect {
+                state.set_initial_placement(WindowPlacement::from(Rect {
                     x: pos.x,
                     y: pos.y,
                     width: size.width,
@@ -334,28 +334,21 @@ fn on_run_event(app: &AppHandle, event: RunEvent) {
     }
 }
 
-/// The window's normal size and position in physical pixels, and whether it was maximised.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowPlacement {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub maximized: bool,
-}
-
-impl WindowPlacement {
-    fn rect(&self) -> Rect {
-        Rect {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
+/// The placement's normal rect.
+impl From<WindowPlacement> for Rect {
+    fn from(placement: WindowPlacement) -> Self {
+        Self {
+            x: placement.x,
+            y: placement.y,
+            width: placement.width,
+            height: placement.height,
         }
     }
+}
 
-    pub(crate) fn from_rect(rect: Rect) -> Self {
+/// A normal (not maximised) placement at `rect`.
+impl From<Rect> for WindowPlacement {
+    fn from(rect: Rect) -> Self {
         Self {
             x: rect.x,
             y: rect.y,

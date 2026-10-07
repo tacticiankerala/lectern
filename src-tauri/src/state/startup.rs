@@ -53,6 +53,8 @@ impl AppState {
             version: lectern_core::version().to_owned(),
             portable: self.portable,
             startup_notice: lock(&self.notice).take(),
+            workspace: None,
+            primary: true,
         };
         self.perf.mark("startup-ready", None);
         payload

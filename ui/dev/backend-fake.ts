@@ -488,6 +488,8 @@ export class FakeBackend implements Backend, FakeControl {
       version: "0.0.0-fake",
       portable: false,
       startupNotice: null,
+      workspace: null,
+      primary: true,
     });
   }
 

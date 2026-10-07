@@ -43,6 +43,7 @@ use lectern_core::render::highlight::{BackgroundRelease, StartupWarmUp};
 use lectern_core::render::RenderedDoc;
 use lectern_core::search::ContentCache;
 use lectern_core::watch::WatchEvent;
+use lectern_core::workspace::WindowPlacement;
 use tauri::Window;
 
 pub use self::assets::AssetResponse;
@@ -61,7 +62,7 @@ use self::profile::StateFile;
 use self::saver::Saver;
 use self::startup::spawn_forwarder;
 use self::sync::{lock, read, write, Gate};
-use crate::app::{Rect, WindowPlacement};
+use crate::app::Rect;
 use crate::events::{Host, UiEvent};
 
 const CACHE_CAP: usize = 64;
@@ -358,7 +359,7 @@ impl AppState {
     /// Takes `rect` as the normal placement when the window is in its normal shape.
     fn track_placement(&self, shape: WindowShape, rect: Option<Rect>) {
         if let (true, Some(rect)) = (shape.is_normal(), rect) {
-            *lock(&self.window) = Some(WindowPlacement::from_rect(rect));
+            *lock(&self.window) = Some(WindowPlacement::from(rect));
         }
     }
 
@@ -452,10 +453,7 @@ mod tests {
             height: 860,
         };
         f.state.track_placement(normal, Some(rect));
-        assert_eq!(
-            f.state.saved_placement(),
-            Some(WindowPlacement::from_rect(rect))
-        );
+        assert_eq!(f.state.saved_placement(), Some(WindowPlacement::from(rect)));
         let screen = Rect {
             x: 0,
             y: 0,
@@ -484,7 +482,7 @@ mod tests {
             f.state.track_placement(shape, Some(screen));
             assert_eq!(
                 f.state.saved_placement(),
-                Some(WindowPlacement::from_rect(rect)),
+                Some(WindowPlacement::from(rect)),
                 "{shape:?}"
             );
         }

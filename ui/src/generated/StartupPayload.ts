@@ -3,6 +3,7 @@ import type { LibraryPayload } from "./LibraryPayload";
 import type { OpenResult } from "./OpenResult";
 import type { RecentEntry } from "./RecentEntry";
 import type { Settings } from "./Settings";
+import type { WorkspaceSummary } from "./WorkspaceSummary";
 
 /**
  * Everything the UI needs for its first paint.
@@ -15,4 +16,12 @@ initial: OpenResult | null, version: string, portable: boolean,
 /**
  * A one-time message for the user, such as settings having been reset.
  */
-startupNotice: string | null, };
+startupNotice: string | null, 
+/**
+ * The workspace this window shows; `None` for a blank window.
+ */
+workspace: WorkspaceSummary | null, 
+/**
+ * True only for the first `startup` call in the process. The UI checks for updates only then.
+ */
+primary: boolean, };

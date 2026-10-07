@@ -1,0 +1,23 @@
+{
+  "themeMode": "dark",
+  "lightTheme": "sepia",
+  "darkTheme": "nord",
+  "bodyFont": "Segoe UI Variable Text",
+  "codeFont": "JetBrains Mono",
+  "fontSize": 19,
+  "lineHeight": 1.7,
+  "measure": 110,
+  "codeWrap": false,
+  "libraryVisible": true,
+  "outlineVisible": false,
+  "libraryWidth": 312,
+  "outlineWidth": 260,
+  "libraryRoots": ["S:\\Notes\\My Vault", "\\\\nas\\share\\garden"],
+  "pathMappings": [{ "from": "/home/me/shared", "to": "S:\\Shared" }],
+  "editor": { "mode": "auto" },
+  "autoUpdate": true,
+  "showStatusBadges": true,
+  "sidebarFontSize": 13,
+  "reviewComments": true,
+  "commentsVisible": false
+}

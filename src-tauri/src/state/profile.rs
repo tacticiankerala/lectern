@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use lectern_core::ipc::Settings;
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::store::{load_json_or_default, Loaded, State};
+use lectern_core::workspace::WindowPlacement;
 use serde::{Deserialize, Serialize};
-
-use crate::app::WindowPlacement;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 

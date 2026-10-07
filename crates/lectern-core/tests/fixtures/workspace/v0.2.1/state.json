@@ -1,0 +1,16 @@
+{
+  "positions": [
+    [
+      "S:\\Notes\\My Vault\\projects\\plan.md",
+      { "headingId": "milestones", "offset": 12.5, "line": 40, "fraction": 0.3 },
+      1791100000000
+    ]
+  ],
+  "recent": [
+    { "path": "S:\\Notes\\My Vault\\projects\\plan.md", "title": "Plan", "openedMs": 1791100000000 },
+    { "path": "\\\\nas\\share\\garden\\tomatoes.md", "title": "Tomatoes", "openedMs": 1791000000000 },
+    { "path": "C:\\Users\\me\\Downloads\\notes.md", "title": "Notes", "openedMs": 1790900000000 }
+  ],
+  "lastDoc": "S:\\Notes\\My Vault\\projects\\plan.md",
+  "window": { "x": 120, "y": 80, "width": 1280, "height": 860, "maximized": true }
+}

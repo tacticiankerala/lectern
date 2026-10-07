@@ -5,8 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
-    DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult,
-    RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
+    DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult, OpenWhere,
+    RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen, WorkspaceOutcome,
+    WorkspaceSummary,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
 use lectern_core::review::anchor::AnchorState;
@@ -64,6 +65,9 @@ fn ts_bindings_exported() {
         "CommentView",
         "EntryView",
         "UnreadableView",
+        "WorkspaceSummary",
+        "OpenWhere",
+        "WorkspaceOutcome",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -141,6 +145,14 @@ fn ts_unions_follow_the_serde_tags() {
     assert_eq!(
         decl::<StatusChange>(),
         r#"type StatusChange = "resolve" | "reopen" | "dismiss";"#
+    );
+    assert_eq!(
+        decl::<OpenWhere>(),
+        r#"type OpenWhere = "here" | "newWindow";"#
+    );
+    assert_eq!(
+        decl::<WorkspaceOutcome>(),
+        r#"type WorkspaceOutcome = "reload" | "focused" | "opened";"#
     );
     assert_eq!(
         decl::<NewAnchor>(),
@@ -269,9 +281,49 @@ fn startup_payload_carries_a_notice() {
         version: "0.1.0".to_owned(),
         portable: false,
         startup_notice: Some("Settings were reset".to_owned()),
+        workspace: None,
+        primary: true,
     })
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
     assert!(j["initial"].is_null());
     assert_eq!(j["settings"]["measure"], 100);
+    // A blank window shows no workspace.
+    assert!(j["workspace"].is_null());
+    assert_eq!(j["primary"], true);
+}
+
+#[test]
+fn startup_payload_names_the_window_workspace() {
+    let j = serde_json::to_value(StartupPayload {
+        settings: Default::default(),
+        library: lectern_core::ipc::LibraryPayload { roots: vec![] },
+        recent: vec![],
+        initial: None,
+        version: "0.3.0".to_owned(),
+        portable: false,
+        startup_notice: None,
+        workspace: Some(WorkspaceSummary {
+            id: "w2".to_owned(),
+            name: "Personal".to_owned(),
+            open: true,
+            current: true,
+            roots: vec!["C:\\Users\\me\\projects".to_owned()],
+        }),
+        primary: false,
+    })
+    .unwrap();
+    assert_eq!(
+        j["workspace"],
+        json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"]})
+    );
+    assert_eq!(j["primary"], false);
+    assert_eq!(
+        serde_json::to_value(OpenWhere::NewWindow).unwrap(),
+        json!("newWindow")
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkspaceOutcome>(json!("focused")).unwrap(),
+        WorkspaceOutcome::Focused
+    );
 }

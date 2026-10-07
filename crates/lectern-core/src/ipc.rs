@@ -278,6 +278,44 @@ pub struct StartupPayload {
     pub portable: bool,
     /// A one-time message for the user, such as settings having been reset.
     pub startup_notice: Option<String>,
+    /// The workspace this window shows; `None` for a blank window.
+    pub workspace: Option<WorkspaceSummary>,
+    /// True only for the first `startup` call in the process. The UI checks for updates only then.
+    pub primary: bool,
+}
+
+/// A workspace as the header's workspace chip and a blank window's list show it.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    /// Shown in some window, this one or another.
+    pub open: bool,
+    /// Shown in the window that asked.
+    pub current: bool,
+    pub roots: Vec<String>,
+}
+
+/// Where a workspace the user chose opens: in the window they chose it from, or a new one.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum OpenWhere {
+    Here,
+    NewWindow,
+}
+
+/// What opening a workspace did: this window reloads to show it, the window already showing it
+/// was focused, or it opened in a new window.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum WorkspaceOutcome {
+    Reload,
+    Focused,
+    Opened,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
