@@ -20,11 +20,26 @@ static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .expect("the header pattern is valid")
 });
 
-/// The line that starts a thread entry: `**You:**`, `**Claude:**`, `**Claude (kind):**`, with
-/// the colon inside or outside the bold and the name in any case.
+/// The line that starts a thread entry, with the colon inside or outside the bold:
+/// - `**You:**`, the reader;
+/// - `**<Name> (<kind>):**`, an agent: 1 to 32 letters, digits, spaces, `.`, `_` or `-`, starting
+///   with a letter, then one of the four kinds. [`entry_head`] turns away the name `You`;
+/// - `**<Name>:**` with no kind, an agent's reply, only for the agents named here.
+///
+/// Names and kinds are matched in any case. Without the kind, bold text such as `**Note:**`
+/// would start an entry.
 static ENTRY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\*\*(?i:(you|claude))(?:\s*\(([A-Za-z]+)\))?(?::\*\*|\*\*:)\s?(.*)$")
-        .expect("the entry pattern is valid")
+    Regex::new(
+        r"^\*\*(?:(\p{L}(?:[\p{L}\p{Nd} ._\-]{0,30}[\p{L}\p{Nd}._\-])?)\s*\(((?i:reply|question|pushback|resolved))\)|((?i:you|claude|codex|gemini|copilot|cursor|ai)))(?::\*\*|\*\*:)\s?(.*)$",
+    )
+    .expect("the entry pattern is valid")
+});
+
+/// The entry line v0.2.0 read: also `**You (<word>):**` and `**Claude (<word>):**` for any word.
+/// Lines it matches are still escaped, so the backslash v0.2.0 put before them still comes off.
+static V020_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\*\*(?i:you|claude)(?:\s*\([A-Za-z]+\))?(?::\*\*|\*\*:)")
+        .expect("the v0.2.0 entry pattern is valid")
 });
 
 /// The anchor line under a header.
@@ -42,13 +57,13 @@ static ATTR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(\w+)=("(?:[^"\\]|\\.)*"|\d+)"#).expect("the attribute pattern is valid")
 });
 
-/// The instructions comment at the top of every sidecar Lectern creates.
-const INSTRUCTIONS: &str = "<!-- lectern: How this file works, for Claude and for people.
-Each comment is a \"## C<n> · <status> · L<a>–L<b> · <heading path>\" section, then the quoted text,
-then a thread of entries. Reply by adding a paragraph that starts with
-**Claude (reply):**, **Claude (question):**, **Claude (pushback):** or **Claude (resolved):**.
-Statuses: open, replied, question, pushback, resolved, dismissed.
-Don't change the C<n> ids. The line numbers refer to the note and may be stale; the quote is authoritative. -->
+/// The instructions comment at the top of every sidecar Lectern creates. No line of it may read as
+/// structure, and nothing inside may end the comment early. Lectern owns it: a save puts the
+/// current text in place of the block an older version wrote (see [`refresh_instructions`]).
+pub const INSTRUCTIONS: &str = "<!-- lectern: review comments on the note, for AI agents and people.
+Reply: add a paragraph under the comment starting **Claude (reply):**, with your own name and the kind reply, question, pushback or resolved.
+New comment: append \"## C<next number> · open · L<line> · <Heading>\", then \"> exact words from the note\", then **Claude (question):** and your text.
+Edit nothing else. The quote outranks line numbers; resolved and dismissed comments need nothing. -->
 ";
 
 /// An empty sidecar for the note called `note_file_name`.
@@ -65,6 +80,35 @@ pub fn new_review(note_file_name: &str) -> Review {
         crlf: false,
         bom: false,
     }
+}
+
+/// Puts the current [`INSTRUCTIONS`] in place of the instructions block in the preamble: the first
+/// line starting `<!-- lectern:`, through its closing `-->`, the new text taking the file's line
+/// ending. The rest of the preamble is kept byte for byte. A preamble without such a block, or
+/// whose block is never closed, is left alone, so Lectern refreshes only the block it wrote.
+///
+/// Only a save calls this: reading a file and writing it back still changes nothing.
+pub fn refresh_instructions(review: &mut Review) {
+    let mut at = 0;
+    let start = review.preamble.split_inclusive('\n').find_map(|line| {
+        let here = at;
+        at += line.len();
+        line.starts_with("<!-- lectern:").then_some(here)
+    });
+    let Some(start) = start else {
+        return;
+    };
+    let Some(len) = review.preamble[start..].find("-->") else {
+        return;
+    };
+    let end = start + len + "-->".len();
+    let block = INSTRUCTIONS.trim_end_matches('\n');
+    let block = if review.crlf {
+        block.replace('\n', "\r\n")
+    } else {
+        block.to_owned()
+    };
+    review.preamble.replace_range(start..end, &block);
 }
 
 /// The YAML indicators a plain scalar can't start with.
@@ -245,25 +289,18 @@ fn attr_value(raw: &str) -> Option<String> {
 fn parse_thread<'a>(lines: impl Iterator<Item = &'a str>, notes: &mut Vec<String>) -> Vec<Entry> {
     let mut fence = Fence::default();
     let mut paragraph: Vec<&str> = Vec::new();
-    let mut entries: Vec<(EntryAuthor, Option<ClaudeKind>, Vec<&str>)> = Vec::new();
+    let mut entries: Vec<(EntryHead, Vec<&str>)> = Vec::new();
     for line in lines {
         let code = fence.step(line);
         if !code {
-            if let Some(caps) = ENTRY.captures(line) {
-                let (author, kind) = if caps[1].eq_ignore_ascii_case("you") {
-                    (EntryAuthor::You, None)
-                } else {
-                    let kind = caps.get(2).and_then(|k| ClaudeKind::parse(k.as_str()));
-                    (EntryAuthor::Claude, kind)
-                };
-                let first = caps.get(3).map_or("", |rest| rest.as_str());
-                entries.push((author, kind, vec![first]));
+            if let Some((head, first)) = entry_head(line) {
+                entries.push((head, vec![first]));
                 continue;
             }
         }
         let line = if code { line } else { unescape(line) };
         match entries.last_mut() {
-            Some((_, _, text)) => text.push(line),
+            Some((_, text)) => text.push(line),
             None if !code && line.trim().is_empty() => flush(&mut paragraph, notes),
             None => paragraph.push(line),
         }
@@ -271,12 +308,50 @@ fn parse_thread<'a>(lines: impl Iterator<Item = &'a str>, notes: &mut Vec<String
     flush(&mut paragraph, notes);
     entries
         .into_iter()
-        .map(|(author, kind, text)| Entry {
-            author,
-            kind,
+        .map(|(head, text)| Entry {
+            author: head.author,
+            name: head.name.to_owned(),
+            kind: head.kind,
             text: trim_blank_lines(&text).join("\n"),
         })
         .collect()
+}
+
+/// Who an entry line says wrote the entry.
+struct EntryHead<'a> {
+    author: EntryAuthor,
+    /// `You`, or the agent's name as written.
+    name: &'a str,
+    kind: Option<ClaudeKind>,
+}
+
+/// If `line` starts an entry (see [`ENTRY`]): who wrote it, and the rest of the line.
+fn entry_head(line: &str) -> Option<(EntryHead<'_>, &str)> {
+    let caps = ENTRY.captures(line)?;
+    let is_you = |name: &str| name.eq_ignore_ascii_case("you");
+    let head = if let (Some(name), Some(kind)) = (caps.get(1), caps.get(2)) {
+        // The reader's entries have no kind.
+        if is_you(name.as_str()) {
+            return None;
+        }
+        EntryHead {
+            author: EntryAuthor::Agent,
+            name: name.as_str(),
+            kind: ClaudeKind::parse(kind.as_str()),
+        }
+    } else {
+        let name = caps.get(3)?.as_str();
+        EntryHead {
+            author: if is_you(name) {
+                EntryAuthor::You
+            } else {
+                EntryAuthor::Agent
+            },
+            name: if is_you(name) { "You" } else { name },
+            kind: None,
+        }
+    };
+    Some((head, caps.get(4).map_or("", |rest| rest.as_str())))
 }
 
 fn flush(paragraph: &mut Vec<&str>, notes: &mut Vec<String>) {
@@ -296,12 +371,12 @@ fn trim_blank_lines<'a, 'b>(lines: &'b [&'a str]) -> &'b [&'a str] {
     &lines[start..end]
 }
 
-/// True if a line of comment text would read as structure (a section header or an entry line),
-/// counting one that is already escaped, so it needs a leading backslash.
+/// True if a line of comment text would read as structure (a section header or an entry line, or
+/// one v0.2.0 escaped), counting one that is already escaped, so it needs a leading backslash.
 fn needs_escape(line: &str) -> bool {
     let bare = line.trim_start_matches('\\');
     // Every header starts with `## `, so this covers HEADER too.
-    bare.starts_with("## ") || ENTRY.is_match(bare)
+    bare.starts_with("## ") || ENTRY.is_match(bare) || V020_ENTRY.is_match(bare)
 }
 
 /// Strips the backslash the writer put before a line that would read as structure.
@@ -439,8 +514,8 @@ fn render_note(note: &str) -> String {
 fn render_entry(e: &Entry) -> String {
     let mut out = match (e.author, e.kind) {
         (EntryAuthor::You, _) => "**You:**".to_owned(),
-        (EntryAuthor::Claude, None) => "**Claude:**".to_owned(),
-        (EntryAuthor::Claude, Some(kind)) => format!("**Claude ({}):**", kind.as_str()),
+        (EntryAuthor::Agent, None) => format!("**{}:**", e.name),
+        (EntryAuthor::Agent, Some(kind)) => format!("**{} ({}):**", e.name, kind.as_str()),
     };
     let mut fence = Fence::default();
     let mut lines = e.text.split('\n');

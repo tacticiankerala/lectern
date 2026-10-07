@@ -1,5 +1,5 @@
 // Review comments as data: which are open, the order the Comments tab lists them in, their labels,
-// and the plain text "Copy comments" puts on the clipboard for pasting into Claude. No DOM.
+// and the plain text "Copy comments" puts on the clipboard for pasting into an AI agent. No DOM.
 import type { CommentView } from "./generated/CommentView";
 import type { EntryView } from "./generated/EntryView";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -10,7 +10,7 @@ export type Filter = "open" | "all";
 /** As core caps a stored quote: this many characters, then an ellipsis. */
 export const QUOTE_CAP = 500;
 
-/** Still open: neither resolved nor dismissed. A Claude reply or question keeps it open. */
+/** Still open: neither resolved nor dismissed. An agent's reply or question keeps it open. */
 export function isOpen(c: CommentView): boolean {
   return c.status !== "resolved" && c.status !== "dismissed";
 }
@@ -54,17 +54,17 @@ export function matchPart(quote: string): string {
   return Array.from(head).length === QUOTE_CAP ? head : quote;
 }
 
-/** How many entries Claude has written, across every comment. */
-export function claudeEntryCount(p: ReviewPayload | null): number {
+/** How many entries AI agents have written, across every comment. */
+export function agentEntryCount(p: ReviewPayload | null): number {
   let n = 0;
   for (const c of p?.comments ?? []) {
-    n += c.entries.filter((e) => e.author === "claude").length;
+    n += c.entries.filter((e) => e.author === "agent").length;
   }
   return n;
 }
 
 /**
- * The comments as plain text for Claude: the note and its sidecar, then each comment with its
+ * The comments as plain text for an AI agent: the note and its sidecar, then each comment with its
  * quote and thread, detached first, then by line. Only the open ones unless `includeResolved`;
  * only those in `ids` when given.
  */
@@ -122,8 +122,9 @@ function copyLines(c: CommentView): string[] {
   return out;
 }
 
+/** An entry's lines: who wrote it (an agent by name, with its kind), then its text. */
 function entryLines(e: EntryView): string[] {
-  const who = e.author === "you" ? "You" : e.kind === null ? "Claude" : `Claude (${e.kind})`;
+  const who = e.author === "you" ? "You" : e.kind === null ? e.name : `${e.name} (${e.kind})`;
   return continued(`  ${who}: `, e.text);
 }
 

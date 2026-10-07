@@ -173,7 +173,7 @@ fn comment(review: &mut Review, id: u32) -> Result<&mut Comment, OpError> {
     review.comment_mut(id).ok_or(OpError::NoSuchComment(id))
 }
 
-/// Changes a comment the way every operation does: newer Claude entries are folded into its status
+/// Changes a comment the way every operation does: newer agent entries are folded into its status
 /// first, and it's marked for rewriting with its entry count last.
 fn change(c: &mut Comment, f: impl FnOnce(&mut Comment)) -> u32 {
     c.settle();
@@ -185,6 +185,7 @@ fn change(c: &mut Comment, f: impl FnOnce(&mut Comment)) -> u32 {
 fn yours(text: String) -> Entry {
     Entry {
         author: EntryAuthor::You,
+        name: "You".to_owned(),
         kind: None,
         text,
     }

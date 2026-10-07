@@ -127,7 +127,7 @@ export class Preferences {
         h(
           "p",
           { class: "prefs-hint" },
-          "Comments are saved next to each note as <note>.review.md, a Markdown file Claude can read and reply in.",
+          "Comments are saved next to each note as <note>.review.md, a Markdown file Claude, Codex or another AI agent can read and reply in.",
         ),
       ),
       section(

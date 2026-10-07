@@ -1,7 +1,8 @@
 //! Loading and saving a note's sidecar: the first comment creates it beside the note, every save
 //! replaces it atomically, and a sidecar Lectern mustn't change is never written.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::thread;
@@ -11,7 +12,7 @@ use lectern_core::review::{
     ops::{NewAnchor, ReviewOp},
     sidecar_path,
     store::{self, StoreError},
-    HARD_READ_CAP, MAX_SIDECAR_BYTES,
+    CommentStatus, EntryAuthor, HARD_READ_CAP, MAX_SIDECAR_BYTES,
 };
 use tempfile::TempDir;
 
@@ -57,6 +58,25 @@ fn between<'t>(text: &'t str, from: &str, to: Option<&str>) -> &'t str {
         .and_then(|to| text[start..].find(to))
         .map_or(text.len(), |len| start + len);
     &text[start..end]
+}
+
+fn golden(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/review")
+        .join(name);
+    fs::read_to_string(path).unwrap()
+}
+
+fn append(path: &Path, text: &str) {
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(text.as_bytes()).unwrap();
+}
+
+/// `text` with its first `<!-- lectern:` block, through its `-->`, replaced by `block`.
+fn with_block(text: &str, block: &str) -> String {
+    let start = text.find("<!-- lectern:").unwrap();
+    let end = start + text[start..].find("-->").unwrap() + "-->".len();
+    format!("{}{block}{}", &text[..start], &text[end..])
 }
 
 fn temp_file(sidecar: &Path) -> PathBuf {
@@ -356,9 +376,10 @@ fn untouched_comments_survive_byte_for_byte_through_an_op() {
 
     assert_eq!(id, 2);
     let after = fs::read_to_string(&sidecar).unwrap();
+    // The instructions block is refreshed (see `instructions_block_is_refreshed_on_save`).
     assert_eq!(
-        between(&after, "---", Some("## C1")),
-        between(&before, "---", Some("## C1")),
+        between(&after, "---", Some("<!-- lectern:")),
+        between(&before, "---", Some("<!-- lectern:")),
         "preamble"
     );
     assert_eq!(
@@ -375,4 +396,153 @@ fn untouched_comments_survive_byte_for_byte_through_an_op() {
         after.contains("**You:** Thanks, that reads well."),
         "{after}"
     );
+}
+
+#[test]
+fn agent_started_comment_parses_and_continues() {
+    let golden = golden("agent-started.review.md");
+    let r = format::parse(&golden);
+    let c3 = r.comments().find(|c| c.id == 3).unwrap();
+    assert!(c3.anchor.is_none(), "the agent wrote no anchor line");
+    assert_eq!(c3.quote, "after a failed upload");
+    let first = &c3.entries[0];
+    assert_eq!(
+        (first.author, first.name.as_str()),
+        (EntryAuthor::Agent, "Claude")
+    );
+    assert_eq!(c3.effective_status(), CommentStatus::Question);
+    assert_eq!(r.next_id(), 4);
+
+    // You reply: the thread goes on, open, and the save anchors it.
+    let (_dir, _note, sidecar) = tide();
+    fs::write(&sidecar, &golden).unwrap();
+    let now = "2026-10-07T09:30:00Z";
+    let (saved, id) = store::apply_op(
+        &sidecar,
+        "tide.md",
+        NOTE,
+        &reply(3, "Only after a timeout."),
+        now,
+    )
+    .unwrap();
+    assert_eq!(id, 3);
+    let c3 = saved.comments().find(|c| c.id == 3).unwrap();
+    assert_eq!(c3.effective_status(), CommentStatus::Open);
+    let anchor = c3.anchor.as_ref().unwrap();
+    assert_eq!(anchor.n, 2);
+    assert_eq!(
+        anchor.created, now,
+        "the save that adds the anchor line dates it"
+    );
+    let after = fs::read_to_string(&sidecar).unwrap();
+    assert_eq!(
+        between(&after, "---", Some("## C3")),
+        between(&golden, "---", Some("## C3")),
+        "the preamble, C1 and C2 are untouched"
+    );
+    let c3_text = between(&after, "## C3", None);
+    assert!(
+        c3_text.starts_with(
+            "## C3 · open · L9 · Tide sync › Retries\n\
+             <!-- anchor prefix=\"t 50. Retries Retry with jitter \" suffix=\".\" \
+             fp=\"fnv1a64:592e4f21891a6582\" n=2 created=\"2026-10-07T09:30:00Z\" -->\n"
+        ),
+        "{c3_text}"
+    );
+    assert!(
+        c3_text.ends_with(
+            "**Claude (question):** After every failed upload, or only after a timeout? \
+             A rejected batch will fail again however long it waits.\n\n\
+             **You:** Only after a timeout.\n"
+        ),
+        "{c3_text}"
+    );
+
+    // A later agent entry sets the status again.
+    append(
+        &sidecar,
+        "\n**Codex (pushback):** A timeout can hide a rejected batch too.\n",
+    );
+    let loaded = store::load(&sidecar, "tide.md").unwrap();
+    assert_eq!(loaded.read_only, None);
+    let review = loaded.review.unwrap();
+    let c3 = review.comments().find(|c| c.id == 3).unwrap();
+    let last = c3.entries.last().unwrap();
+    assert_eq!(
+        (last.author, last.name.as_str()),
+        (EntryAuthor::Agent, "Codex")
+    );
+    assert_eq!(c3.entries.len(), 3);
+    assert_eq!(c3.effective_status(), CommentStatus::Pushback);
+    assert_eq!(review.next_id(), 4);
+}
+
+#[test]
+fn instructions_block_is_refreshed_on_save() {
+    let fresh = format::INSTRUCTIONS.trim_end_matches('\n');
+    // A v0.2.0 sidecar: the old block, here with a line of the owner's own after it.
+    let before = golden("claude-edited.review.md").replacen(
+        "-->\n\n## C1",
+        "-->\n\nKeep this line.\n\n## C1",
+        1,
+    );
+    assert!(!before.contains(fresh));
+    assert_eq!(
+        format::serialize(&format::parse(&before)),
+        before,
+        "reading and writing alone change nothing"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The note the golden's fingerprints were taken from, so every comment stays where it is.
+    let source = "# Plan\n";
+    let note = dir.path().join("2026-03-02-tide-sync.md");
+    fs::write(&note, source).unwrap();
+    let sidecar = sidecar_path(&note);
+    let name = "2026-03-02-tide-sync.md";
+    fs::write(&sidecar, &before).unwrap();
+
+    let (saved, _) = store::apply_op(&sidecar, name, source, &reply(2, "Thanks."), NOW).unwrap();
+
+    let after = fs::read_to_string(&sidecar).unwrap();
+    let preamble = with_block(between(&before, "---", Some("## C1")), fresh);
+    assert_eq!(between(&after, "---", Some("## C1")), preamble);
+    assert!(
+        preamble.contains("-->\n\nKeep this line.\n\n"),
+        "{preamble}"
+    );
+    assert_eq!(
+        saved.preamble, preamble,
+        "the review returned is the one saved"
+    );
+    assert_eq!(
+        between(&after, "## C1", Some("## C2")),
+        between(&before, "## C1", Some("## C2")),
+        "C1"
+    );
+
+    // In a CRLF file the new block takes CRLF.
+    let crlf = golden("claude-variants-crlf.review.md");
+    fs::write(&sidecar, &crlf).unwrap();
+    store::apply_op(&sidecar, name, source, &reply(1, "Thanks."), NOW).unwrap();
+    let after = fs::read_to_string(&sidecar).unwrap();
+    assert!(after.starts_with('\u{feff}'));
+    assert!(after.contains(&fresh.replace('\n', "\r\n")), "{after}");
+    assert!(!after.replace("\r\n", "").contains('\n'), "{after:?}");
+    assert_eq!(
+        between(&after, "---", Some("## C1")),
+        with_block(
+            between(&crlf, "---", Some("## C1")),
+            &fresh.replace('\n', "\r\n")
+        )
+    );
+
+    // A sidecar without a Lectern block gets none.
+    let plain =
+        "---\nlectern-review: 1\nnote: tide.md\n---\n# My review notes\n\n<!-- my own note -->\n\n";
+    let (_dir, _note, sidecar) = tide();
+    fs::write(&sidecar, plain).unwrap();
+    store::apply_op(&sidecar, "tide.md", NOTE, &add_op(), NOW).unwrap();
+    let after = fs::read_to_string(&sidecar).unwrap();
+    assert!(after.starts_with(plain), "{after}");
+    assert!(!after.contains("<!-- lectern:"), "{after}");
 }

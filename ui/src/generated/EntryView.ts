@@ -5,7 +5,11 @@ import type { EntryAuthor } from "./EntryAuthor";
 /**
  * One entry of a comment's thread.
  */
-export type EntryView = { author: EntryAuthor, kind: ClaudeKind | null, 
+export type EntryView = { author: EntryAuthor, 
+/**
+ * `You` for the reader; an agent's name as written.
+ */
+name: string, kind: ClaudeKind | null, 
 /**
  * The Markdown as written.
  */

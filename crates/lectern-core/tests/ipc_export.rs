@@ -132,7 +132,7 @@ fn ts_unions_follow_the_serde_tags() {
     );
     assert_eq!(
         decl::<EntryAuthor>(),
-        r#"type EntryAuthor = "you" | "claude";"#
+        r#"type EntryAuthor = "you" | "agent";"#
     );
     assert_eq!(
         decl::<AnchorState>(),
