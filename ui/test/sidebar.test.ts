@@ -14,7 +14,13 @@ function root(path: string, truncated: boolean): RootView {
 }
 
 function host() {
-  return { open: vi.fn(), retry: vi.fn(), contextMenu: vi.fn(), addFolder: vi.fn() };
+  return {
+    open: vi.fn(),
+    retry: vi.fn(),
+    contextMenu: vi.fn(),
+    addFolder: vi.fn(),
+    chooseWorkspace: vi.fn(),
+  };
 }
 
 describe("Sidebar", () => {
@@ -76,5 +82,27 @@ describe("Sidebar", () => {
     sidebar.setLibrary({ roots: [root("C:\\Notes", false)] });
     expect(el.querySelector(".lib-empty")).toBeNull();
     expect(el.querySelectorAll(".lib-root")).toHaveLength(1);
+  });
+
+  it("in a blank window, points at choosing a workspace or starting one", () => {
+    const el = document.createElement("div");
+    const app = host();
+    const sidebar = new Sidebar(el, app);
+    sidebar.start();
+    sidebar.setBlank(true);
+    expect(el.querySelector(".lib-empty-title")?.textContent).toBe(
+      "Choose a workspace, or add a folder to start a new one.",
+    );
+    const buttons = [...el.querySelectorAll<HTMLButtonElement>(".lib-empty button")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Choose a workspace", "Add folder…"]);
+    buttons[0]?.click();
+    expect(app.chooseWorkspace).toHaveBeenCalledTimes(1);
+    buttons[1]?.click();
+    expect(app.addFolder).toHaveBeenCalledTimes(1);
+    // A window with a workspace has only Add folder.
+    sidebar.setBlank(false);
+    expect([...el.querySelectorAll(".lib-empty button")].map((b) => b.textContent)).toEqual([
+      "Add folder…",
+    ]);
   });
 });

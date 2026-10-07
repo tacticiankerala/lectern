@@ -1575,4 +1575,36 @@ describe("CommentsController", () => {
     expect(docEl.querySelectorAll(".lx-cdot")).toHaveLength(2);
     expect(editorText()).toBeDefined();
   });
+
+  it("knows when typed text would be lost: a new comment, a reply, a changed entry", async () => {
+    const { panel, controller } = setup();
+    await controller.load();
+    expect(controller.hasUnsavedText()).toBe(false);
+
+    controller.addAtTop();
+    const area = editorText();
+    expect(controller.hasUnsavedText()).toBe(false);
+    area.value = "Half a thought";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(controller.hasUnsavedText()).toBe(true);
+    area.value = "";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(controller.hasUnsavedText()).toBe(false);
+
+    action(panel, 1, "reply").click();
+    const reply = typeReply(panel, 1, "Make it a setting.");
+    expect(controller.hasUnsavedText()).toBe(true);
+    reply.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+    expect(controller.hasUnsavedText()).toBe(false);
+
+    // An entry opened for editing counts only once its text changes.
+    card(panel, 1).querySelector<HTMLButtonElement>('[data-action="edit"]')?.click();
+    const edit = card(panel, 1).querySelector<HTMLTextAreaElement>("textarea");
+    if (!edit) throw new Error("no edit box");
+    expect(controller.hasUnsavedText()).toBe(false);
+    edit.value = "Why fifty, not a hundred?";
+    expect(controller.hasUnsavedText()).toBe(true);
+  });
 });

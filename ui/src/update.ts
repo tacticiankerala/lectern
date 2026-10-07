@@ -1,14 +1,21 @@
 // Updates (spec §9): the automatic check, at most once a day and quiet unless it finds an update;
 // the ⋯ menu's "Check for updates", which always checks and says what it found; and the header
-// pill an update brings. Its click installs the update and restarts (an installed copy) or opens
-// the Releases page (a portable copy); Rust decides which. While an install runs, the pill stays
-// disabled whatever a check finds. Loaded on first use.
+// pill an update brings. Its click installs the update and restarts (an installed copy), once
+// Lectern may leave (unsaved comment text, here or in another window, is asked about first), or
+// opens the Releases page (a portable copy); Rust decides which. While an install runs, the pill
+// stays disabled whatever a check finds. Rust hears which check was the automatic one, which then
+// runs no more this session. Loaded on first use.
 import { h } from "./dom";
 import type { UpdateInfo } from "./generated/UpdateInfo";
 
 export interface UpdateHost {
-  checkUpdate(): Promise<UpdateInfo | null>;
-  installUpdate(): Promise<void>;
+  /** `automatic`: the check after startup. */
+  checkUpdate(automatic: boolean): Promise<UpdateInfo | null>;
+  /**
+   * Installs the update, asking first about unsaved comment text, or (`portable`) opens the
+   * Releases page.
+   */
+  installUpdate(portable: boolean): Promise<void>;
   toast(message: string): void;
 }
 
@@ -42,7 +49,7 @@ export class Updater {
       return;
     }
     try {
-      await this.check();
+      await this.check(true);
     } catch (e) {
       console.warn("update check failed", e);
     }
@@ -52,7 +59,7 @@ export class Updater {
   async checkNow(): Promise<void> {
     let found: UpdateInfo | null;
     try {
-      found = await this.check();
+      found = await this.check(false);
     } catch (e) {
       this.host.toast(`Couldn't check for updates: ${String(e)}`);
       return;
@@ -62,9 +69,9 @@ export class Updater {
     );
   }
 
-  /** The update found, if any: its pill shows. */
-  private async check(): Promise<UpdateInfo | null> {
-    this.checking ??= this.host.checkUpdate().finally(() => {
+  /** The update found, if any: its pill shows. A check joins one in flight. */
+  private async check(automatic: boolean): Promise<UpdateInfo | null> {
+    this.checking ??= this.host.checkUpdate(automatic).finally(() => {
       this.checking = null;
     });
     const found = await this.checking;
@@ -116,7 +123,7 @@ export class Updater {
       this.pill.textContent = "Installing…";
     }
     try {
-      await this.host.installUpdate();
+      await this.host.installUpdate(update.portable);
     } catch (e) {
       this.host.toast(
         update.portable

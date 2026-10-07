@@ -11,7 +11,7 @@ use lectern_core::library::scan::probe_with;
 
 use super::paths::path_string;
 use super::sync::read;
-use super::{trust, AppState};
+use super::{trust, WindowState};
 use crate::shell::{self, FileKind};
 
 /// What following a link comes to, before anything is launched.
@@ -99,12 +99,12 @@ pub fn plan_follow(
     }
 }
 
-impl AppState {
+impl WindowState {
     pub fn follow(&self, target: &FollowTarget) -> FollowResult {
         let index = self.index();
         let mapper = self.mapper();
         let index = (!index.roots.is_empty()).then_some(&*index);
-        let exists_timeout = self.timings.exists;
+        let exists_timeout = self.app.timings.exists;
         let plan = plan_follow(
             target,
             |raw| mapper.map(raw, index),
@@ -133,7 +133,7 @@ impl AppState {
         if !self.trusts(path) {
             return Err(trust::refusal(path));
         }
-        let pref = read(&self.settings).editor.clone();
+        let pref = read(&self.app.settings).editor.clone();
         let vscode = match pref {
             EditorPref::Auto => shell::vscode_cli(),
             EditorPref::Custom { .. } => None,

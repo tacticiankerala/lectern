@@ -29,12 +29,14 @@ export type Action =
   | "preferences"
   | "toggle-comments"
   | "add-comment"
+  | "new-window"
+  | "quit"
   | "escape";
 
 /** Ctrl with a letter or comma, by `e.key` lower-cased: without Shift, then with it. */
 const CTRL: Record<string, [Action | null, Action | null]> = {
   o: ["open-file", "toggle-outline"],
-  n: [null, "add-folder"],
+  n: ["new-window", "add-folder"],
   p: ["quick-open", null],
   f: ["find", "search"],
   t: [null, "toggle-theme"],
@@ -45,6 +47,7 @@ const CTRL: Record<string, [Action | null, Action | null]> = {
   r: ["reload", null],
   ",": ["preferences", null],
   m: [null, "toggle-comments"],
+  q: ["quit", null],
 };
 
 /** The action a key press stands for, or null. */

@@ -6,6 +6,7 @@ use lectern_core::ipc::{
     ThemeMode,
 };
 use lectern_core::store::{load_json_or_default, write_json_atomic, Loaded, State};
+use lectern_core::workspace::{apply_patch, ShownMut, Workspace};
 
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<_> = fs::read_dir(dir)
@@ -37,6 +38,11 @@ fn recent_paths(s: &State) -> Vec<&str> {
     s.recent.iter().map(|e| e.path.as_str()).collect()
 }
 
+/// A change made in the window showing `ws`, as the app applies it.
+fn apply(shared: &mut Settings, ws: &mut Workspace, patch: SettingsPatch) {
+    apply_patch(shared, ShownMut::Workspace(ws), patch);
+}
+
 #[test]
 fn settings_defaults_match_spec() {
     let s = Settings::default();
@@ -65,29 +71,41 @@ fn settings_defaults_match_spec() {
 
 #[test]
 fn settings_clamped() {
-    let mut s = Settings::default();
-    s.apply(SettingsPatch {
-        font_size: Some(99),
-        line_height: Some(0.5),
-        ..Default::default()
-    });
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            font_size: Some(99),
+            line_height: Some(0.5),
+            ..Default::default()
+        },
+    );
     assert_eq!(s.font_size, 32);
     assert_eq!(s.line_height, 1.3);
 
-    s.apply(SettingsPatch {
-        font_size: Some(3),
-        line_height: Some(9.0),
-        measure: Some(Measure::Chars(10)),
-        ..Default::default()
-    });
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            font_size: Some(3),
+            line_height: Some(9.0),
+            measure: Some(Measure::Chars(10)),
+            ..Default::default()
+        },
+    );
     assert_eq!(s.font_size, 12);
     assert_eq!(s.line_height, 2.0);
     assert!(matches!(s.measure, Measure::Chars(60)));
 
-    s.apply(SettingsPatch {
-        measure: Some(Measure::Chars(500)),
-        ..Default::default()
-    });
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            measure: Some(Measure::Chars(500)),
+            ..Default::default()
+        },
+    );
     assert!(matches!(s.measure, Measure::Chars(160)));
 }
 
@@ -109,11 +127,15 @@ fn sidebar_font_size_range_is_11_to_20() {
         s.clamp();
         assert_eq!(s.sidebar_font_size, clamped, "{saved} clamps to {clamped}");
     }
-    let mut s = Settings::default();
-    s.apply(SettingsPatch {
-        sidebar_font_size: Some(99),
-        ..Default::default()
-    });
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            sidebar_font_size: Some(99),
+            ..Default::default()
+        },
+    );
     assert_eq!(s.sidebar_font_size, 20);
 }
 
@@ -151,31 +173,37 @@ fn clamp_resets_a_non_finite_line_height() {
 }
 
 #[test]
-fn apply_sets_only_the_patched_fields() {
-    let mut s = Settings::default();
-    s.apply(SettingsPatch {
-        theme_mode: Some(ThemeMode::Dark),
-        dark_theme: Some(ThemeId::Nord),
-        measure: Some(Measure::Full),
-        editor: Some(EditorPref::Custom {
-            command: "code -g {path}:{line}".to_owned(),
-        }),
-        library_roots: Some(vec!["S:\\Dev".to_owned()]),
-        show_status_badges: Some(false),
-        sidebar_font_size: Some(17),
-        path_mappings: Some(vec![PathMapping {
-            from: "/home/me/shared".to_owned(),
-            to: "S:\\".to_owned(),
-        }]),
-        ..Default::default()
-    });
+fn a_change_sets_only_the_patched_fields() {
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            theme_mode: Some(ThemeMode::Dark),
+            dark_theme: Some(ThemeId::Nord),
+            measure: Some(Measure::Full),
+            editor: Some(EditorPref::Custom {
+                command: "code -g {path}:{line}".to_owned(),
+            }),
+            library_roots: Some(vec!["S:\\Dev".to_owned()]),
+            show_status_badges: Some(false),
+            sidebar_font_size: Some(17),
+            path_mappings: Some(vec![PathMapping {
+                from: "/home/me/shared".to_owned(),
+                to: "S:\\".to_owned(),
+            }]),
+            ..Default::default()
+        },
+    );
     assert!(matches!(s.theme_mode, ThemeMode::Dark));
     assert!(matches!(s.dark_theme, ThemeId::Nord));
     assert!(matches!(s.measure, Measure::Full));
     assert!(
         matches!(&s.editor, EditorPref::Custom { command } if command == "code -g {path}:{line}")
     );
-    assert_eq!(s.library_roots, ["S:\\Dev"]);
+    // The libraries are the workspace's.
+    assert_eq!(ws.roots, ["S:\\Dev"]);
+    assert!(s.library_roots.is_empty());
     assert_eq!(s.path_mappings[0].to, "S:\\");
     assert!(!s.show_status_badges);
     assert_eq!(s.sidebar_font_size, 17);
@@ -186,22 +214,31 @@ fn apply_sets_only_the_patched_fields() {
 }
 
 #[test]
-fn apply_sets_each_review_setting_on_its_own() {
-    let mut s = Settings::default();
-    s.apply(SettingsPatch {
-        review_comments: Some(false),
-        ..Default::default()
-    });
+fn a_change_sets_each_review_setting_on_its_own() {
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            review_comments: Some(false),
+            ..Default::default()
+        },
+    );
     assert!(!s.review_comments);
-    assert!(s.comments_visible);
+    assert!(ws.layout.comments_visible);
 
-    let mut s = Settings::default();
-    s.apply(SettingsPatch {
-        comments_visible: Some(false),
-        ..Default::default()
-    });
+    // Whether comments show is the workspace's layout.
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            comments_visible: Some(false),
+            ..Default::default()
+        },
+    );
     assert!(s.review_comments);
-    assert!(!s.comments_visible);
+    assert!(!ws.layout.comments_visible);
 }
 
 #[test]

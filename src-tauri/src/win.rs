@@ -1,6 +1,6 @@
 //! Windows integrations: the process start time, the boot mutex that tells a second launch apart,
-//! title-bar colours through DWM, DirectWrite font families, the default WSL distribution and
-//! reading the current user's registry.
+//! title-bar colours through DWM, keeping a reopened window behind another, DirectWrite font
+//! families, the default WSL distribution and reading the current user's registry.
 //! Handing files to the shell or an editor is in `shell.rs`.
 //!
 //! Lectern targets Windows only, so this module is compiled unconditionally.
@@ -20,7 +20,13 @@ use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
 use windows::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetProcessTimes};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetGUIThreadInfo, SetWindowPos, GUITHREADINFO, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE,
+};
 
 /// 100 ns intervals from 1601-01-01, the `FILETIME` epoch, to the Unix epoch.
 const FILETIME_UNIX_OFFSET: u64 = 116_444_736_000_000_000;
@@ -175,6 +181,35 @@ pub fn set_title_bar_colors(hwnd: HWND, caption: u32, text: u32, dark: bool) -> 
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Puts `window` just behind `front`, moving and resizing neither. If showing `window` made it
+/// the active window, `front` is activated again first, which takes the foreground only if
+/// Lectern has it. Runs on the thread that owns both windows.
+pub fn put_behind(window: HWND, front: HWND) -> Result<(), String> {
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..GUITHREADINFO::default()
+    };
+    // SAFETY: `info` is a live GUITHREADINFO with its size set; both handles are windows of this
+    // thread, alive while it runs this.
+    unsafe {
+        let active = GetGUIThreadInfo(GetCurrentThreadId(), &mut info).map(|()| info.hwndActive);
+        if active == Ok(window) {
+            SetWindowPos(front, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                .map_err(|e| format!("SetWindowPos (activate): {e}"))?;
+        }
+        SetWindowPos(
+            window,
+            Some(front),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        )
+    }
+    .map_err(|e| format!("SetWindowPos: {e}"))
 }
 
 /// Whether another Lectern is already running or starting, by a named mutex this process then

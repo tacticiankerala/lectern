@@ -1,7 +1,7 @@
 // What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
 // quick open, Preferences, find in page, full-text search, update checks, About and the breadcrumb
-// chooser (all loaded on first use), focus mode, the sidebars' visibility and widths, and showing
-// or hiding the review comments.
+// chooser (all loaded on first use), focus mode, the sidebars' visibility and widths, showing or
+// hiding the review comments, a new window and quitting.
 import type { About } from "./about";
 import type { App } from "./app";
 import type { CrumbChooser } from "./crumb-chooser";
@@ -97,6 +97,12 @@ export class Actions {
     app.layout.headerActions.append(outlineButton, this.moreButton);
     app.on("library", () => {
       this.preferences?.refresh();
+    });
+    app.on("settings", () => {
+      this.preferences?.syncSettings();
+    });
+    app.on("workspaces", () => {
+      this.preferences?.syncWorkspaces();
     });
     for (const handle of app.layout.app.querySelectorAll<HTMLElement>(".resizer")) {
       const side = handle.dataset.for;
@@ -201,9 +207,16 @@ export class Actions {
       case "focus":
         this.setFocusMode(!this.focusMode);
         return true;
+      case "new-window":
+        void this.app.workspaces.newWindow();
+        return true;
+      case "quit":
+        void this.app.quit();
+        return true;
       case "escape":
         for (const overlay of [
           this.menu,
+          this.app.workspaces.menu,
           this.chooser,
           this.quickOpen,
           this.search,
@@ -300,6 +313,7 @@ export class Actions {
   private async showPreferences(): Promise<void> {
     this.menu?.close(false);
     const { Preferences } = await import("./preferences.js");
+    const workspaces = this.app.workspaces;
     this.preferences ??= new Preferences(this.app.layout.overlayRoot, {
       settings: () => this.app.state.settings,
       library: () => this.app.state.library,
@@ -311,6 +325,11 @@ export class Actions {
       addFolder: () => void this.app.addFolder(),
       removeRoot: (path) => void this.app.library.removeRoot(path),
       retryRoot: (path) => void this.app.library.retryRoot(path),
+      workspace: () => workspaces.current,
+      workspaces: () => workspaces.list,
+      renameWorkspace: (id, name) => workspaces.rename(id, name),
+      deleteWorkspace: (id) => void workspaces.remove(id),
+      setOwnTheme: (own) => void workspaces.setOwnTheme(own),
     });
     this.closeOverlays(this.preferences);
     this.preferences.open();
@@ -323,8 +342,8 @@ export class Actions {
   async checkForUpdates(manual: boolean): Promise<void> {
     const { Updater } = await import("./update.js");
     this.updater ??= new Updater(this.app.layout.headerActions, {
-      checkUpdate: () => this.app.backend.checkUpdate(),
-      installUpdate: () => this.app.backend.installUpdate(),
+      checkUpdate: (automatic) => this.app.backend.checkUpdate(automatic),
+      installUpdate: (portable) => this.app.installUpdate(portable),
       toast: (message) => {
         this.app.toast(message);
       },
@@ -387,13 +406,14 @@ export class Actions {
   }
 
   /**
-   * Before `opening` opens: closes the menu and every other overlay (the breadcrumb chooser, quick
-   * open, search, Preferences, About, the reading panel), so only one is ever on top. The find bar
-   * stays: it sits above the document rather than over it, as before.
+   * Before `opening` opens: closes the menu and every other overlay (the workspaces' dropdown, the
+   * breadcrumb chooser, quick open, search, Preferences, About, the reading panel), so only one is
+   * ever on top. The find bar stays: it sits above the document rather than over it, as before.
    */
-  private closeOverlays(opening: { close(): void }): void {
+  closeOverlays(opening: { close(): void }): void {
     this.menu?.close(false);
     for (const overlay of [
+      this.app.workspaces.menu,
       this.chooser,
       this.quickOpen,
       this.search,
@@ -473,6 +493,11 @@ export class Actions {
           },
         },
         "separator",
+        {
+          label: "New window",
+          keys: "Ctrl+N",
+          run: () => void this.app.workspaces.newWindow(),
+        },
         { label: "Preferences", keys: "Ctrl+,", run: () => void this.showPreferences() },
         {
           label: "Check for updates",
@@ -481,6 +506,8 @@ export class Actions {
           },
         },
         { label: "About Lectern", run: () => void this.showAbout() },
+        "separator",
+        { label: "Quit Lectern", keys: "Ctrl+Q", run: () => void this.app.quit() },
       ],
       this.moreButton,
     );

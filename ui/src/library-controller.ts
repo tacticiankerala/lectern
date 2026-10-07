@@ -22,6 +22,9 @@ export class LibraryController {
       retry: (path) => void this.retryRoot(path),
       contextMenu: (e, path, isRoot) => void app.actions.contextMenu(e, path, isRoot),
       addFolder: () => void app.addFolder(),
+      chooseWorkspace: () => {
+        app.nav.home();
+      },
     });
     app.on("library", () => {
       this.sidebar.setLibrary(app.state.library);
@@ -37,6 +40,7 @@ export class LibraryController {
 
   /** Fills in the sidebar, right after the first paint. */
   start(): void {
+    this.sidebar.setBlank(this.app.workspaces.isBlank);
     this.sidebar.setLibrary(this.app.state.library);
     this.sidebar.start();
   }

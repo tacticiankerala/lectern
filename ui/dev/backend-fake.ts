@@ -4,6 +4,16 @@
 // Full-text search matches the fixtures' Markdown, which `build.mjs --fake` inlines, as Rust does:
 // smart case, line by line.
 //
+// Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
+// blank, none), and the others are open in other windows or closed. By default there is one,
+// Studio, over the fixture library; tests seed more, or a blank start, through `FakeOptions` (or
+// the page's URL, dev/main-fake.ts). The theme fields of a settings change go to the workspace's own
+// theme when it has one, as core routes them; everything else stays shared. Every settings
+// snapshot carries a revision, bumped by each change, and a change is told back as
+// `settings-changed` before it is answered, as Rust tells the window that made it. Opening a
+// workspace here answers `reload`, and with `persist` the model survives the page reload that
+// follows.
+//
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
 // lines; one seeded as moved stays moved while its current text is there; anything else is
@@ -27,21 +37,26 @@ import type { FollowResult } from "../src/generated/FollowResult";
 import type { FollowTarget } from "../src/generated/FollowTarget";
 import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
+import type { OpenWhere } from "../src/generated/OpenWhere";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
 import type { ReviewOp } from "../src/generated/ReviewOp";
 import type { ReviewPayload } from "../src/generated/ReviewPayload";
+import type { RootView } from "../src/generated/RootView";
 import type { SavedPosition } from "../src/generated/SavedPosition";
 import type { SearchHit } from "../src/generated/SearchHit";
 import type { Segment } from "../src/generated/Segment";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
+import type { SettingsSnapshot } from "../src/generated/SettingsSnapshot";
 import type { StartupPayload } from "../src/generated/StartupPayload";
 import type { StatusChange } from "../src/generated/StatusChange";
 import type { TreeNode } from "../src/generated/TreeNode";
 import type { UnreadableView } from "../src/generated/UnreadableView";
 import type { UpdateInfo } from "../src/generated/UpdateInfo";
 import type { UserOpen } from "../src/generated/UserOpen";
+import type { WorkspaceOutcome } from "../src/generated/WorkspaceOutcome";
+import type { WorkspaceSummary } from "../src/generated/WorkspaceSummary";
 
 export interface Fixtures {
   /** The fake library root, `C:\Fixtures\vault`. */
@@ -61,16 +76,75 @@ export interface FakeOptions {
   initial?: string;
   recent?: RecentEntry[];
   /**
-   * Keeps the settings and reading positions in sessionStorage, so they survive a page reload as
-   * on disk.
+   * Keeps the settings, reading positions and workspaces in sessionStorage, so they survive a page
+   * reload as on disk.
    */
   persist?: boolean;
+  /** The workspaces, in creation order; Studio alone (`studio`) when not given. */
+  workspaces?: FakeWorkspace[];
+  /**
+   * The id of the workspace this window shows; null starts a blank window. When not given, the
+   * first open workspace.
+   */
+  current?: string | null;
+  /** Whether this is the process's first startup, which checks for updates; true when not given. */
+  primary?: boolean;
 }
+
+/** A workspace in the fake's model. */
+export interface FakeWorkspace {
+  id: string;
+  name: string;
+  roots: string[];
+  /** Shown in a window: this one when it is the current workspace, else another. */
+  open: boolean;
+  /** Its own theme, or null for the shared one. */
+  theme: Pick<Settings, "themeMode" | "lightTheme" | "darkTheme"> | null;
+}
+
+/** The workspaces, and the one this window shows (null for a blank window). */
+interface WorkspaceModel {
+  items: FakeWorkspace[];
+  current: string | null;
+}
+
+/** A call that opens, closes or quits windows, as `windowCalls` records it. */
+export type WindowCall =
+  | { call: "newWindow" }
+  | { call: "openWorkspace"; id: string; where: OpenWhere }
+  | { call: "createWorkspace"; name: string; where: OpenWhere; root: string | null }
+  | { call: "quit"; force: boolean }
+  | { call: "closeWindow" };
+
+/** The default workspace: the fixture library and the offline share, open in this window. */
+export function studio(fixtures: Fixtures): FakeWorkspace {
+  return {
+    id: "w1",
+    name: "Studio",
+    roots: [fixtures.root, OFFLINE_ROOT],
+    open: true,
+    theme: null,
+  };
+}
+
+/** A second workspace, with no folders, closed. */
+export const GARDEN: FakeWorkspace = {
+  id: "w2",
+  name: "Garden",
+  roots: [],
+  open: false,
+  theme: null,
+};
 
 /** The fake library's second root, on a share that never answers. */
 export const OFFLINE_ROOT = "\\\\offline-nas\\share\\notes";
 const SETTINGS_KEY = "lx-fake-settings";
 const POSITIONS_KEY = "lx-fake-positions";
+const WORKSPACES_KEY = "lx-fake-workspaces";
+/** As Rust, a review asked for while review comments are off. */
+const FEATURE_OFF = "Review comments are turned off in Preferences.";
+/** As core: a workspace's name is at most 60 characters. */
+const MAX_NAME_CHARS = 60;
 /**
  * As Rust: matching lines returned per file and in all, and the context kept around a line's first
  * hit.
@@ -126,6 +200,8 @@ export interface FakeControl {
   updateError: string | null;
   /** Every `checkUpdate` and `installUpdate` call, in order. */
   readonly updateCalls: ("check" | "install")[];
+  /** Each of those calls' flag, in the same order: a check's `automatic`, an install's `force`. */
+  readonly updateFlags: boolean[];
   /**
    * Gives a note a sidecar holding `payload`'s comments (each with its status as its header's and
    * every entry already seen), or (with null) none.
@@ -149,6 +225,29 @@ export interface FakeControl {
   reviewCalls(): number;
   /** Makes the next `reviewOp` fail with `message`, as Rust's command would. */
   failNextReviewOp(message: string): void;
+  /** Every `newWindow`, `openWorkspace`, `createWorkspace`, `quit` and `closeWindow` call, in order. */
+  readonly windowCalls: WindowCall[];
+  /**
+   * The other windows holding comment text that isn't saved yet, as Rust names them: an unforced
+   * `quit`, or an unforced install of an update that isn't portable, answers with them instead.
+   */
+  unsavedElsewhere: string[];
+  /** Every `setUnsaved` this window sent, in order. */
+  readonly unsavedReports: boolean[];
+  /** The workspaces, as the model has them now. */
+  workspaces(): FakeWorkspace[];
+  /** The settings every window shares, without this workspace's own theme. */
+  sharedSettings(): Settings;
+  /**
+   * A change to the shared settings made in another window: applied, then `settings-changed`
+   * tells this window its settings, as Rust does.
+   */
+  settingsElsewhere(patch: SettingsPatch): void;
+  /**
+   * Another window changed the workspaces: `change` is applied to workspace `id` (or, with an id
+   * not in the model, a new workspace is added with it), then `workspaces-changed` is sent.
+   */
+  workspacesElsewhere(id: string, change: Partial<Omit<FakeWorkspace, "id">>): void;
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -396,6 +495,9 @@ function wslPath(path: string): string | null {
 
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
+  readonly windowCalls: WindowCall[] = [];
+  unsavedElsewhere: string[] = [];
+  readonly unsavedReports: boolean[] = [];
   readonly shown: number[] = [];
   /** Every native title set, in order. */
   readonly titles: string[] = [];
@@ -405,6 +507,7 @@ export class FakeBackend implements Backend, FakeControl {
   update: UpdateInfo | null = null;
   updateError: string | null = null;
   readonly updateCalls: ("check" | "install")[] = [];
+  readonly updateFlags: boolean[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
@@ -422,7 +525,11 @@ export class FakeBackend implements Backend, FakeControl {
   private readonly textBlocks = new Map<string, [number, number, string][]>();
   private reviewCount = 0;
   private reviewFailure: string | null = null;
+  /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
+  /** The settings revision: bumped by every change to the settings or a workspace's theme. */
+  private rev = 0;
+  private model: WorkspaceModel;
   private library: LibraryPayload;
   private recent: RecentEntry[];
 
@@ -440,29 +547,21 @@ export class FakeBackend implements Backend, FakeControl {
     for (const [path, blocks] of Object.entries(fixtures.textBlocks ?? {})) {
       this.textBlocks.set(key(path), blocks);
     }
-    this.library = {
-      roots: [
-        {
-          path: fixtures.root,
-          name: fixtures.tree.name,
-          state: { state: "ready" },
-          tree: fixtures.tree,
-          truncated: false,
-        },
-        {
-          path: OFFLINE_ROOT,
-          name: baseName(OFFLINE_ROOT),
-          state: { state: "unavailable", reason: `Couldn't reach ${OFFLINE_ROOT} within 3 s` },
-          tree: null,
-          truncated: false,
-        },
-      ],
+    const items = structuredClone(options.workspaces ?? [studio(fixtures)]);
+    this.model = {
+      items,
+      current:
+        options.current === undefined ? (items.find((ws) => ws.open)?.id ?? null) : options.current,
     };
     if (options.persist) {
       try {
         const saved = sessionStorage.getItem(SETTINGS_KEY);
         if (saved !== null) {
           this.settings = { ...this.settings, ...(JSON.parse(saved) as Partial<Settings>) };
+        }
+        const model = sessionStorage.getItem(WORKSPACES_KEY);
+        if (model !== null) {
+          this.model = JSON.parse(model) as WorkspaceModel;
         }
         const positions = sessionStorage.getItem(POSITIONS_KEY);
         if (positions !== null) {
@@ -476,29 +575,76 @@ export class FakeBackend implements Backend, FakeControl {
         // Defaults, then.
       }
     }
+    this.library = { roots: (this.currentWorkspace()?.roots ?? []).map((r) => this.rootView(r)) };
   }
 
   startup(): Promise<StartupPayload> {
     const initial = this.options.initial;
+    const current = this.currentWorkspace();
     return Promise.resolve({
-      settings: this.settings,
+      settings: this.windowSettings(),
+      settingsRev: this.rev,
       library: structuredClone(this.library),
       recent: this.recent,
       initial: initial === undefined ? null : this.open(initial),
       version: "0.0.0-fake",
       portable: false,
       startupNotice: null,
+      workspace: current ? this.summary(current) : null,
+      workspaces: this.summaries(),
+      primary: this.options.primary ?? true,
     });
+  }
+
+  /** A root as the library shows it: the fixtures' ready, the offline share's unavailable. */
+  private rootView(path: string): RootView {
+    if (key(path) === key(this.fixtures.root)) {
+      return {
+        path: this.fixtures.root,
+        name: this.fixtures.tree.name,
+        state: { state: "ready" },
+        tree: this.fixtures.tree,
+        truncated: false,
+      };
+    }
+    if (key(path) === key(OFFLINE_ROOT)) {
+      return {
+        path: OFFLINE_ROOT,
+        name: baseName(OFFLINE_ROOT),
+        state: { state: "unavailable", reason: `Couldn't reach ${OFFLINE_ROOT} within 3 s` },
+        tree: null,
+        truncated: false,
+      };
+    }
+    // A new root, still scanning: the fake never indexes it.
+    return {
+      path,
+      name: baseName(path),
+      state: { state: "scanning" },
+      tree: null,
+      truncated: false,
+    };
   }
 
   openDocument(path: string): Promise<OpenResult> {
     return Promise.resolve(this.open(path));
   }
 
-  /** As Rust decides: a file opens; a folder joins the library unless it nests with a root. */
+  /**
+   * As Rust decides: a file (a Markdown name, or a document the fake has) opens; a folder joins
+   * the library unless it nests with a root. In a blank window a folder opens and joins nothing,
+   * and the answer says it is one.
+   */
   openUserPath(path: string): Promise<UserOpen> {
     if (MARKDOWN_PATH.test(path) || this.docs.has(key(path))) {
-      return Promise.resolve({ doc: this.open(path), library: structuredClone(this.library) });
+      return Promise.resolve({
+        doc: this.open(path),
+        library: structuredClone(this.library),
+        folder: false,
+      });
+    }
+    if (this.currentWorkspace() === null) {
+      return Promise.resolve({ doc: null, library: structuredClone(this.library), folder: true });
     }
     if (!this.library.roots.some((r) => isUnder(path, r.path) || isUnder(r.path, path))) {
       this.addFolder(path);
@@ -507,6 +653,7 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve({
       doc: this.docs.has(key(readme)) ? this.open(readme) : null,
       library: structuredClone(this.library),
+      folder: false,
     });
   }
 
@@ -539,6 +686,11 @@ export class FakeBackend implements Backend, FakeControl {
 
   removeRoot(path: string): Promise<LibraryPayload> {
     this.library.roots = this.library.roots.filter((r) => key(r.path) !== key(path));
+    const current = this.currentWorkspace();
+    if (current) {
+      current.roots = current.roots.filter((r) => key(r) !== key(path));
+      this.saveModel();
+    }
     return this.getLibrary();
   }
 
@@ -548,15 +700,15 @@ export class FakeBackend implements Backend, FakeControl {
     return this.getLibrary();
   }
 
-  /** A new root, still scanning: the fake never indexes it. */
+  /** A new root of this window's workspace. */
   private addFolder(path: string): void {
-    this.library.roots.push({
-      path,
-      name: baseName(path),
-      state: { state: "scanning" },
-      tree: null,
-      truncated: false,
-    });
+    const current = this.currentWorkspace();
+    if (!current) {
+      return;
+    }
+    current.roots.push(path);
+    this.saveModel();
+    this.library.roots.push(this.rootView(path));
   }
 
   quickOpenCandidates(): Promise<Candidate[]> {
@@ -631,8 +783,14 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  /** As Rust: refused while review comments are off. */
   loadReview(path: string): Promise<ReviewPayload> {
     this.reviewCount++;
+    if (!this.settings.reviewComments) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(FEATURE_OFF);
+    }
     return Promise.resolve(this.reviewPayload(path));
   }
 
@@ -867,13 +1025,58 @@ export class FakeBackend implements Backend, FakeControl {
     };
   }
 
-  getSettings(): Promise<Settings> {
-    return Promise.resolve(this.settings);
+  getSettings(): Promise<SettingsSnapshot> {
+    return Promise.resolve(this.snapshot());
   }
 
-  setSettings(patch: SettingsPatch): Promise<Settings> {
+  /**
+   * The theme fields go to the workspace's own theme when it has one, the rest to the shared. As
+   * Rust does, the window hears its settings when they changed, at the new revision, before the
+   * answer.
+   */
+  setSettings(patch: SettingsPatch): Promise<SettingsSnapshot> {
+    const before = JSON.stringify(this.windowSettings());
+    const theme = new Set(["themeMode", "lightTheme", "darkTheme"]);
+    const own = this.currentWorkspace()?.theme;
+    const defined = Object.entries(patch).filter(([, v]) => v != null);
+    if (own) {
+      Object.assign(own, Object.fromEntries(defined.filter(([k]) => theme.has(k))));
+      this.saveModel();
+    }
+    const shared = own ? defined.filter(([k]) => !theme.has(k)) : defined;
+    this.settings = { ...this.settings, ...Object.fromEntries(shared) };
+    this.saveSettings();
+    if (JSON.stringify(this.windowSettings()) !== before) {
+      this.rev++;
+      this.emit("settings-changed", this.snapshot());
+    }
+    return Promise.resolve(this.snapshot());
+  }
+
+  sharedSettings(): Settings {
+    return structuredClone(this.settings);
+  }
+
+  settingsElsewhere(patch: SettingsPatch): void {
     const defined = Object.entries(patch).filter(([, v]) => v != null);
     this.settings = { ...this.settings, ...Object.fromEntries(defined) };
+    this.saveSettings();
+    this.rev++;
+    this.emit("settings-changed", this.snapshot());
+  }
+
+  /** This window's settings: the shared ones under its workspace's own theme. */
+  private windowSettings(): Settings {
+    const theme = this.currentWorkspace()?.theme;
+    return { ...this.settings, ...(theme ?? {}) };
+  }
+
+  /** This window's settings with their revision, as Rust answers and tells them. */
+  private snapshot(): SettingsSnapshot {
+    return { settings: this.windowSettings(), rev: this.rev };
+  }
+
+  private saveSettings(): void {
     if (this.options.persist) {
       try {
         sessionStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings));
@@ -881,7 +1084,175 @@ export class FakeBackend implements Backend, FakeControl {
         // Kept for this page only.
       }
     }
-    return Promise.resolve(this.settings);
+  }
+
+  private currentWorkspace(): FakeWorkspace | null {
+    return this.model.items.find((ws) => ws.id === this.model.current) ?? null;
+  }
+
+  private saveModel(): void {
+    if (this.options.persist) {
+      try {
+        sessionStorage.setItem(WORKSPACES_KEY, JSON.stringify(this.model));
+      } catch {
+        // Kept for this page only.
+      }
+    }
+  }
+
+  private summary(ws: FakeWorkspace): WorkspaceSummary {
+    return {
+      id: ws.id,
+      name: ws.name,
+      open: ws.open,
+      current: ws.id === this.model.current,
+      roots: [...ws.roots],
+      ownTheme: ws.theme !== null,
+    };
+  }
+
+  private summaries(): WorkspaceSummary[] {
+    return this.model.items.map((ws) => this.summary(ws));
+  }
+
+  workspaces(): FakeWorkspace[] {
+    return structuredClone(this.model.items);
+  }
+
+  workspacesElsewhere(id: string, change: Partial<Omit<FakeWorkspace, "id">>): void {
+    const ws = this.model.items.find((w) => w.id === id);
+    if (ws) {
+      Object.assign(ws, change);
+    } else {
+      this.model.items.push({ id, name: id, roots: [], open: false, theme: null, ...change });
+    }
+    this.saveModel();
+    this.emit("workspaces-changed", null);
+  }
+
+  listWorkspaces(): Promise<WorkspaceSummary[]> {
+    return Promise.resolve(this.summaries());
+  }
+
+  /** As core: "Workspace N" for the smallest N from 2 that no name uses, ignoring case. */
+  suggestWorkspaceName(): Promise<string> {
+    const taken = new Set(this.model.items.map((ws) => ws.name.trim().toLowerCase()));
+    let n = 2;
+    while (taken.has(`workspace ${String(n)}`)) n++;
+    return Promise.resolve(`Workspace ${String(n)}`);
+  }
+
+  newWindow(): Promise<void> {
+    this.windowCalls.push({ call: "newWindow" });
+    return Promise.resolve();
+  }
+
+  openWorkspace(id: string, where: OpenWhere): Promise<WorkspaceOutcome> {
+    this.windowCalls.push({ call: "openWorkspace", id, where });
+    return this.turnTo(id, where);
+  }
+
+  /**
+   * As Rust: a workspace shown in a window (this one included) brings it forward; else this
+   * window turns to it (`here`), its old workspace closing, or a new window shows it.
+   */
+  private turnTo(id: string, where: OpenWhere): Promise<WorkspaceOutcome> {
+    const ws = this.model.items.find((w) => w.id === id);
+    if (!ws) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject("That workspace no longer exists.");
+    }
+    if (ws.open) {
+      return Promise.resolve("focused");
+    }
+    ws.open = true;
+    if (where === "here") {
+      const old = this.currentWorkspace();
+      if (old) old.open = false;
+      this.model.current = id;
+    }
+    this.saveModel();
+    this.emit("workspaces-changed", null);
+    return Promise.resolve(where === "here" ? "reload" : "opened");
+  }
+
+  /** As core: the name is trimmed, and a blank one takes the suggestion. */
+  async createWorkspace(name: string, where: OpenWhere, root?: string): Promise<WorkspaceOutcome> {
+    this.windowCalls.push({ call: "createWorkspace", name, where, root: root ?? null });
+    const clean = Array.from(name.trim()).slice(0, MAX_NAME_CHARS).join("");
+    const id = `w${String(1 + Math.max(0, ...this.model.items.map((ws) => Number(ws.id.slice(1)))))}`;
+    this.model.items.push({
+      id,
+      name: clean === "" ? await this.suggestWorkspaceName() : clean,
+      roots: root === undefined ? [] : [root],
+      open: false,
+      theme: null,
+    });
+    return this.turnTo(id, where);
+  }
+
+  renameWorkspace(id: string, name: string): Promise<WorkspaceSummary[]> {
+    const ws = this.model.items.find((w) => w.id === id);
+    const clean = Array.from(name.trim()).slice(0, MAX_NAME_CHARS).join("");
+    if (!ws || clean === "") {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(ws ? "A workspace needs a name." : "That workspace no longer exists.");
+    }
+    ws.name = clean;
+    this.saveModel();
+    this.emit("workspaces-changed", null);
+    return Promise.resolve(this.summaries());
+  }
+
+  deleteWorkspace(id: string): Promise<WorkspaceSummary[]> {
+    const ws = this.model.items.find((w) => w.id === id);
+    const refusal = !ws
+      ? "That workspace no longer exists."
+      : this.model.items.length === 1
+        ? "Lectern needs at least one workspace."
+        : ws.open
+          ? "Close its window first."
+          : null;
+    if (refusal !== null) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(refusal);
+    }
+    this.model.items = this.model.items.filter((w) => w.id !== id);
+    this.saveModel();
+    this.emit("workspaces-changed", null);
+    return Promise.resolve(this.summaries());
+  }
+
+  /** As Rust: an own theme starts from the shared one; the window hears its settings. */
+  setWorkspaceTheme(own: boolean): Promise<SettingsSnapshot> {
+    const ws = this.currentWorkspace();
+    if (ws && own !== (ws.theme !== null)) {
+      const { themeMode, lightTheme, darkTheme } = this.settings;
+      ws.theme = own ? { themeMode, lightTheme, darkTheme } : null;
+      this.saveModel();
+      this.rev++;
+    }
+    const snapshot = this.snapshot();
+    this.emit("settings-changed", snapshot);
+    return Promise.resolve(snapshot);
+  }
+
+  quit(force: boolean): Promise<string[]> {
+    this.windowCalls.push({ call: "quit", force });
+    return Promise.resolve(force ? [] : [...this.unsavedElsewhere]);
+  }
+
+  setUnsaved(on: boolean): Promise<void> {
+    this.unsavedReports.push(on);
+    return Promise.resolve();
+  }
+
+  closeWindow(): Promise<void> {
+    this.windowCalls.push({ call: "closeWindow" });
+    return Promise.resolve();
   }
 
   savePosition(path: string, position: SavedPosition): Promise<void> {
@@ -905,8 +1276,9 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.systemFonts);
   }
 
-  checkUpdate(): Promise<UpdateInfo | null> {
+  checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
     this.updateCalls.push("check");
+    this.updateFlags.push(automatic);
     if (this.updateError !== null) {
       // Rust's commands fail with a message.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
@@ -915,9 +1287,11 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.update);
   }
 
-  installUpdate(): Promise<void> {
+  /** As Rust: a portable copy only opens the Releases page, so nothing unsaved stops it. */
+  installUpdate(force: boolean): Promise<string[]> {
     this.updateCalls.push("install");
-    return Promise.resolve();
+    this.updateFlags.push(force);
+    return Promise.resolve(force || this.update?.portable ? [] : [...this.unsavedElsewhere]);
   }
 
   perfMark(name: string, ms?: number): void {
@@ -953,6 +1327,12 @@ export class FakeBackend implements Backend, FakeControl {
     return () => {
       this.drops.delete(cb);
     };
+  }
+
+  stopListening(): Promise<void> {
+    this.listeners.clear();
+    this.drops.clear();
+    return Promise.resolve();
   }
 
   drop(paths: string[]): void {

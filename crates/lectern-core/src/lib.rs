@@ -12,6 +12,7 @@ pub mod search;
 pub mod store;
 pub mod text;
 pub mod watch;
+pub mod workspace;
 
 /// The Lectern version, taken from the workspace manifest.
 pub fn version() -> &'static str {
@@ -24,6 +25,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_workspace_manifest() {
-        assert_eq!(version(), "0.2.1");
+        assert_eq!(version(), "0.3.0");
     }
 }

@@ -1,5 +1,6 @@
-//! Building and running the Tauri app: plugins, commands, setup, the main window (placement,
-//! background and title-bar colours) and single-instance forwarding.
+//! Building and running the Tauri app: plugins, commands, setup, the windows (building the later
+//! ones, placement, background and title-bar colours, closing), single-instance forwarding and
+//! exit.
 
 use std::env;
 use std::error::Error;
@@ -11,21 +12,22 @@ use lectern_core::cli::Args;
 use lectern_core::ipc::{OpenRequest, Settings, ThemeId, ThemeMode};
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
-use serde::{Deserialize, Serialize};
+use lectern_core::workspace::WindowPlacement;
 use tauri::window::Color;
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow, Window,
-    WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow,
+    WebviewWindowBuilder, Window, WindowEvent,
 };
 
 use crate::events::TauriHost;
 use crate::state::{
-    AppState, AssetResponse, Boot, Early, OpenQueue, Profile, Slot, Timings, WatchControl,
+    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, Profile, Slot, Timings, WatchControl,
+    WindowState,
 };
 use crate::updater::{self, Updates};
 use crate::{commands, win};
 
-/// The label of the one window, as in `tauri.conf.json`.
+/// The label of the first window, as in `tauri.conf.json`.
 pub const MAIN_WINDOW: &str = "main";
 
 /// How long setup, on the main thread, waits for the boot thread to load the settings.
@@ -82,13 +84,13 @@ pub struct Launch {
 }
 
 pub fn run(context: tauri::Context, launch: Launch) {
-    let opens = Arc::new(OpenQueue::default());
-    let forwarded = Arc::clone(&opens);
+    let held = Arc::new(HeldLaunches::default());
+    let early = Arc::clone(&held);
     let perf = Arc::clone(&launch.perf);
     let app = tauri::Builder::default()
         // First, so a second instance hands over its arguments and exits before doing anything.
         .plugin(tauri_plugin_single_instance::init(move |app, argv, cwd| {
-            on_second_launch(app, &forwarded, argv, &cwd);
+            on_second_launch(app, &early, argv, &cwd);
         }))
         .plugin(tauri_plugin_dialog::init())
         // Endpoint, public key and install mode come from `plugins.updater` in tauri.conf.json.
@@ -99,7 +101,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             let path = request.uri().path().to_owned();
             // The checks are in memory; only an allowed file is read, off the main thread.
             tauri::async_runtime::spawn_blocking(move || {
-                let response = match app.try_state::<Arc<AppState>>() {
+                let response = match app.try_state::<Arc<App>>() {
                     Some(state) => state.serve_asset(&path),
                     None => AssetResponse::refused(),
                 };
@@ -131,20 +133,27 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::show_window,
             commands::check_update,
             commands::install_update,
+            commands::list_workspaces,
+            commands::suggest_workspace_name,
+            commands::new_window,
+            commands::open_workspace,
+            commands::create_workspace,
+            commands::rename_workspace,
+            commands::delete_workspace,
+            commands::set_workspace_theme,
+            commands::quit,
+            commands::set_unsaved,
+            commands::close_window,
         ])
         .on_window_event(on_window_event)
-        .setup(move |app| setup(app, launch, opens))
+        .setup(move |app| setup(app, launch, &held))
         .build(context)
         .expect("error while building Lectern");
     perf.mark("built", None);
     app.run(on_run_event);
 }
 
-fn setup(
-    app: &mut tauri::App,
-    launch: Launch,
-    opens: Arc<OpenQueue>,
-) -> Result<(), Box<dyn Error>> {
+fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<(), Box<dyn Error>> {
     launch.perf.mark("setup", None);
     if !launch.booted {
         // The Lectern this launch found has quit, so this one is first after all: start the
@@ -173,7 +182,7 @@ fn setup(
     }
     let portable = updater::detect_portable(&app.package_info().name);
     app.manage(Updates::new(portable));
-    let state = AppState::new(
+    let state = App::new(
         Boot {
             config_dir: launch.dirs.config,
             snapshot_dir: launch.dirs.snapshots,
@@ -182,31 +191,110 @@ fn setup(
             profile,
             early: launch.early,
             warm: launch.warm,
-            opens,
+            opens: Arc::new(OpenQueue::default()),
             timings: Timings::default(),
             portable,
         },
         Arc::new(TauriHost(app.handle().clone())),
         |weak| {
             Box::new(WatchControl::new(move |event| {
-                if let Some(state) = weak.upgrade() {
-                    state.on_watch_event(event);
+                if let Some(window) = weak.upgrade() {
+                    window.on_watch_event(event);
                 }
             }))
         },
     );
     app.manage(Arc::clone(&state));
-    match app.get_webview_window(MAIN_WINDOW) {
-        Some(window) => prepare_window(&window, &state),
-        None => log::error!("the main window is missing"),
+    // Launches that came before there was an app to route them go where any other would.
+    state.route_held(held);
+    let main = state.window(MAIN_WINDOW);
+    match (app.get_webview_window(MAIN_WINDOW), &main) {
+        (Some(window), Some(main)) => prepare_window(&window, main),
+        _ => log::error!("the main window is missing"),
     }
-    state.start_library();
+    if let Some(main) = main {
+        main.start_library();
+    }
     Ok(())
 }
 
-/// Places the hidden window where it was last time, if that is still on a monitor, and gives it
-/// the theme's background and title-bar colours before it is shown.
-fn prepare_window(window: &WebviewWindow, state: &AppState) {
+/// Builds the window `label` for the state the app holds for it, as "main" is built (hidden, its
+/// size), then places and colours it with `prepare_window`, so its workspace's theme shows from
+/// the first frame. It shows itself at its first paint. `focus`: whether it takes the focus.
+pub fn build_window(handle: &AppHandle, label: &str, focus: bool) -> Result<(), String> {
+    let app = handle
+        .try_state::<Arc<App>>()
+        .ok_or("Lectern isn't ready")?;
+    let state = app
+        .window(label)
+        .ok_or_else(|| format!("{label} has no state"))?;
+    let mut config = handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == MAIN_WINDOW)
+        .cloned()
+        .ok_or("the main window's settings are missing")?;
+    config.label = label.to_owned();
+    config.focus = focus;
+    let window = WebviewWindowBuilder::from_config(handle, &config)
+        .and_then(WebviewWindowBuilder::build)
+        .map_err(|e| e.to_string())?;
+    prepare_window(&window, &state);
+    Ok(())
+}
+
+/// Brings the window `label` forward, unminimised. A window still waiting for its first paint
+/// shows itself.
+pub fn focus_window(handle: &AppHandle, label: &str) {
+    if let Some(window) = handle.get_webview_window(label) {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// Keeps `window`, restored at launch and just shown, behind `front`, the window the user is in,
+/// which keeps the focus. Runs on the main thread after the show, unless something asked to
+/// bring `window` forward meanwhile (`state`).
+pub fn keep_behind(window: &WebviewWindow, front: WebviewWindow, state: Arc<WindowState>) {
+    let shown = window.clone();
+    let queued = window.run_on_main_thread(move || {
+        if !state.stays_behind() {
+            return;
+        }
+        let placed = shown
+            .hwnd()
+            .and_then(|hwnd| Ok((hwnd, front.hwnd()?)))
+            .map_err(|e| e.to_string())
+            .and_then(|(hwnd, front)| win::put_behind(hwnd, front));
+        if let Err(e) = placed {
+            log::warn!("couldn't keep {} behind: {e}", shown.label());
+        }
+    });
+    if let Err(e) = queued {
+        log::warn!("couldn't keep {} behind: {e}", window.label());
+    }
+}
+
+/// Puts every window's placement into its workspace, which stays open for the next launch: as
+/// Lectern exits, and before an update's installer runs.
+pub fn remember_every_window(handle: &AppHandle) {
+    let Some(app) = handle.try_state::<Arc<App>>() else {
+        return;
+    };
+    for state in app.windows() {
+        if let Some(window) = handle.get_webview_window(state.label()) {
+            state.remember_window(&window.as_ref().window());
+        }
+    }
+}
+
+/// Places the hidden window where its workspace's window was last time, if that is still on a
+/// monitor, and gives it the theme's background and title-bar colours before it is shown.
+fn prepare_window(window: &WebviewWindow, state: &WindowState) {
     let work_areas: Vec<Rect> = window
         .available_monitors()
         .unwrap_or_default()
@@ -222,7 +310,7 @@ fn prepare_window(window: &WebviewWindow, state: &AppState) {
         })
         .collect();
     let restored = state.saved_placement().and_then(|saved| {
-        clamp_to_work_areas(saved.rect(), &work_areas).map(|rect| (rect, saved.maximized))
+        clamp_to_work_areas(Rect::from(saved), &work_areas).map(|rect| (rect, saved.maximized))
     });
     match restored {
         Some((rect, maximized)) => {
@@ -232,11 +320,11 @@ fn prepare_window(window: &WebviewWindow, state: &AppState) {
             if maximized {
                 let _ = window.maximize();
             }
-            state.set_initial_placement(WindowPlacement::from_rect(rect));
+            state.set_initial_placement(WindowPlacement::from(rect));
         }
         None => {
             if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                state.set_initial_placement(WindowPlacement::from_rect(Rect {
+                state.set_initial_placement(WindowPlacement::from(Rect {
                     x: pos.x,
                     y: pos.y,
                     width: size.width,
@@ -264,49 +352,72 @@ pub fn apply_chrome(window: &WebviewWindow, bg: &str, fg: &str, dark: bool) -> R
     win::set_title_bar_colors(hwnd, caption, text, dark)
 }
 
-fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: &str) {
+/// A second launch: its file goes to the window `App::second_launch` routes it to, off the main
+/// thread, since that may depend on whether it is a folder. Before setup has made the app, it is
+/// held, and setup routes it the same way (`App::route_held`); a launch without a file then has
+/// nothing to bring forward that isn't coming forward already.
+fn on_second_launch(app: &AppHandle, held: &HeldLaunches, argv: Vec<String>, cwd: &str) {
     let args = Args::parse(argv);
-    if let Some(path) = args.path {
+    let t0_ms = args.perf_t0_ms;
+    let request = args.path.map(|path| {
         // A relative path is relative to where the second launch ran.
         let path = if path.is_absolute() {
             path
         } else {
             Path::new(cwd).join(path)
         };
-        let request = OpenRequest {
+        OpenRequest {
             path: path.to_string_lossy().into_owned(),
-            t0_ms: args.perf_t0_ms,
-        };
-        // Held for startup, or resolved (a folder becomes a library root) off the main thread.
-        if let Some(request) = opens.offer(request) {
-            if let Some(state) = app.try_state::<Arc<AppState>>() {
-                state.forward(request);
-            }
+            t0_ms,
+            folder: false,
         }
+    });
+    if let Some(state) = app.try_state::<Arc<App>>() {
+        state.second_launch(request);
+        return;
     }
-    // A window still waiting for its first paint shows itself.
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        if window.is_visible().unwrap_or(false) {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
+    // Setup may release the held launches between the two checks; one handed back is routed now.
+    let request = request.and_then(|request| held.hold(request));
+    if let (Some(request), Some(state)) = (request, app.try_state::<Arc<App>>()) {
+        state.second_launch(Some(request));
     }
 }
 
 fn on_window_event(window: &Window, event: &WindowEvent) {
-    let Some(state) = window.try_state::<Arc<AppState>>() else {
+    let Some(app) = window.try_state::<Arc<App>>() else {
         return;
     };
+    let state = app.window(window.label());
     match event {
-        WindowEvent::Moved(_) => state.track_window(window),
+        WindowEvent::Moved(_) => {
+            if let Some(state) = &state {
+                state.track_window(window);
+            }
+        }
         WindowEvent::Resized(_) => {
-            state.track_window(window);
-            state.set_background(in_background(window, None));
+            if let Some(state) = &state {
+                state.track_window(window);
+            }
+            app.set_background(window.label(), in_background(window, None));
         }
         WindowEvent::Focused(focused) => {
-            state.set_background(in_background(window, Some(*focused)));
+            if *focused {
+                app.window_focused(window.label());
+            }
+            app.set_background(window.label(), in_background(window, Some(*focused)));
         }
-        WindowEvent::CloseRequested { .. } => state.remember_window(window),
+        WindowEvent::CloseRequested { api, .. } => {
+            if let Some(state) = &state {
+                // Its UI asks first about comment text that isn't saved yet.
+                if !state.close_requested() {
+                    api.prevent_close();
+                    return;
+                }
+                state.remember_window(window);
+            }
+            app.window_closing(window.label());
+        }
+        WindowEvent::Destroyed => app.window_destroyed(window.label()),
         _ => {}
     }
 }
@@ -319,43 +430,32 @@ fn in_background(window: &Window, focused: Option<bool>) -> bool {
 }
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {
-    let Some(state) = app.try_state::<Arc<AppState>>() else {
+    let Some(state) = app.try_state::<Arc<App>>() else {
         return;
     };
     match event {
         // `exit` (as after `--exit-after-paint`) skips CloseRequested.
-        RunEvent::ExitRequested { .. } => {
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                state.remember_window(&window.as_ref().window());
-            }
-        }
+        RunEvent::ExitRequested { .. } => remember_every_window(app),
         RunEvent::Exit => state.flush(),
         _ => {}
     }
 }
 
-/// The window's normal size and position in physical pixels, and whether it was maximised.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowPlacement {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub maximized: bool,
-}
-
-impl WindowPlacement {
-    fn rect(&self) -> Rect {
-        Rect {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
+/// The placement's normal rect.
+impl From<WindowPlacement> for Rect {
+    fn from(placement: WindowPlacement) -> Self {
+        Self {
+            x: placement.x,
+            y: placement.y,
+            width: placement.width,
+            height: placement.height,
         }
     }
+}
 
-    pub(crate) fn from_rect(rect: Rect) -> Self {
+/// A normal (not maximised) placement at `rect`.
+impl From<Rect> for WindowPlacement {
+    fn from(rect: Rect) -> Self {
         Self {
             x: rect.x,
             y: rect.y,
@@ -449,6 +549,18 @@ pub fn active_theme(settings: &Settings, system_dark: bool) -> ThemeId {
 
 #[cfg(test)]
 mod capability_tests {
+    /// The permissions are every window's: the first, "main", and each one opened later,
+    /// `win-<n>`.
+    #[test]
+    fn every_window_has_the_permissions() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(
+            caps["windows"],
+            serde_json::json!([super::MAIN_WINDOW, "win-*"])
+        );
+    }
+
     /// The UI sets the native title as documents open, so the window must allow it.
     #[test]
     fn the_main_window_may_set_its_title() {
@@ -460,7 +572,6 @@ mod capability_tests {
             .iter()
             .filter_map(|p| p.as_str())
             .collect();
-        assert_eq!(caps["windows"][0], super::MAIN_WINDOW);
         assert!(
             permissions.contains(&"core:window:allow-set-title"),
             "{permissions:?}"

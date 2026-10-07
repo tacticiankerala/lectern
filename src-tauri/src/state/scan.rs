@@ -16,14 +16,17 @@ use lectern_core::library::tree::build_tree;
 use lectern_core::library::{path_key, RootIndex};
 
 use super::sync::{lock, write};
-use super::AppState;
+use super::WindowState;
 use crate::events::UiEvent;
 
-impl AppState {
+impl WindowState {
     /// Scans `root` on a thread of its own once the first document is on screen; when a scan is
     /// already running, it runs once more after. `done` hears when the root next has a tree or
     /// turns out unavailable, whichever scan gets there.
     pub fn request_scan(self: &Arc<Self>, root: &Path, done: Option<Sender<()>>) {
+        if self.is_retired() {
+            return;
+        }
         let gen = {
             let mut lib = lock(&self.library);
             let Some(slot) = lib.find_mut(root) else {
@@ -43,13 +46,16 @@ impl AppState {
             .name("lectern-scan".to_owned())
             .spawn(move || {
                 // Walking competes with WebView2 for the CPU, so scans wait for first paint.
-                this.ui_shown.wait(this.timings.scan_delay);
-                loop {
+                this.ui_shown.wait(this.app.timings.scan_delay);
+                // A state retired meanwhile (its window closed, or turned to another workspace)
+                // neither probes, scans nor saves a snapshot.
+                while !this.is_retired() {
                     this.scan_once(&path, gen);
                     if this.scan_finished(&path, gen) {
-                        break;
+                        return;
                     }
                 }
+                this.scan_finished(&path, gen);
             });
         if let Err(e) = spawned {
             log::error!("couldn't start a scan of {}: {e}", root.display());
@@ -64,7 +70,7 @@ impl AppState {
         let Some(adhoc) = self.root_is_adhoc(root, gen) else {
             return;
         };
-        if let Err(reason) = probe_root(root, self.timings.probe) {
+        if let Err(reason) = probe_root(root, self.app.timings.probe) {
             log::warn!("library root {} is unavailable: {reason}", root.display());
             self.set_root_state(root, gen, RootState::Unavailable { reason });
             self.notify_waiters(root, gen);
@@ -75,11 +81,11 @@ impl AppState {
             if self.take_needs_watch(root, gen) {
                 self.watch_user_roots();
             }
-            // Its canonical host (`S:\…` is `\\nas\share\…`) is the user's too. The probe
-            // proved the share answers, so this won't stall.
+            // Its canonical host (`S:\…` is `\\nas\share\…`) is the user's too, in every
+            // window. The probe proved the share answers, so this won't stall.
             if let Ok(canonical) = fs::canonicalize(root) {
-                if write(&self.trust).learn_root(root, &canonical) {
-                    self.index_changed(None);
+                if write(&self.app.trust).learn_root(root, &canonical) {
+                    self.app.forget_renders();
                 }
             }
         }
@@ -116,25 +122,31 @@ impl AppState {
             started.elapsed() - walked
         );
         if !adhoc {
-            if let Err(e) = save_snapshot(&self.snapshot_dir, &index) {
+            if let Err(e) = save_snapshot(&self.app.snapshot_dir, &index) {
                 log::warn!("couldn't save the snapshot of {}: {e}", root.display());
             }
         }
         if self.install(root, gen, index, RootState::Ready) {
-            self.host.emit(UiEvent::IndexReady(root.to_path_buf()));
+            self.emit(UiEvent::IndexReady(root.to_path_buf()));
         }
     }
 
-    /// Ends a scan unless another was asked for meanwhile; true when the scan thread can stop.
+    /// Ends a scan unless another was asked for meanwhile; true when the scan thread can stop. A
+    /// retired state's scan always ends, letting go of anyone waiting on it.
     pub(super) fn scan_finished(&self, root: &Path, gen: u64) -> bool {
+        let retired = self.is_retired();
         let mut lib = lock(&self.library);
         match lib.find_gen_mut(root, gen) {
-            Some(slot) if slot.rescan => {
+            Some(slot) if slot.rescan && !retired => {
                 slot.rescan = false;
                 false
             }
             Some(slot) => {
                 slot.scanning = false;
+                slot.rescan = false;
+                if retired {
+                    slot.waiters.clear();
+                }
                 true
             }
             None => true,
@@ -197,7 +209,7 @@ impl AppState {
         self.index_changed(None);
         self.refresh_current(Some(root), files_changed);
         if let Some(payload) = payload {
-            self.host.emit(UiEvent::LibraryUpdated(payload));
+            self.emit(UiEvent::LibraryUpdated(payload));
         }
         true
     }
@@ -216,7 +228,7 @@ impl AppState {
             (!adhoc).then(|| lib.payload())
         };
         if let Some(payload) = payload {
-            self.host.emit(UiEvent::LibraryUpdated(payload));
+            self.emit(UiEvent::LibraryUpdated(payload));
         }
     }
 }

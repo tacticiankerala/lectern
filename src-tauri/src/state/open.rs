@@ -1,5 +1,6 @@
 //! Opening a document: the render cache, the payload, which open becomes current, and the
-//! silent re-render once the index can do better.
+//! silent re-render once the index can do better. Also the recent files, which are the
+//! workspace's, and the reading positions, which every window shares.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -11,14 +12,15 @@ use lectern_core::ipc::{
 };
 use lectern_core::library::{path_key, LibraryIndex};
 use lectern_core::render::RENDER_VERSION;
+use lectern_core::store::State;
 
 use super::doc::{breadcrumbs, now_ms, read_text, readme_in, render_text, stat_doc, Rendered};
 use super::paths::{is_under, path_string, same_path};
 use super::sync::{lock, read, write};
-use super::{trust, AppState, Current};
+use super::{trust, Current, WindowState};
 use crate::events::UiEvent;
 
-impl AppState {
+impl WindowState {
     /// Opens `path`. One on a network host the user hasn't chosen is refused before anything
     /// touches it, and doesn't become the current document.
     pub fn open_document(self: &Arc<Self>, path: &str) -> OpenResult {
@@ -64,7 +66,7 @@ impl AppState {
         }
         let text = read_text(path)?;
         let mapper = self.mapper();
-        let hosts = read(&self.trust).hosts();
+        let hosts = read(&self.app.trust).hosts();
         let with_index = (!index.roots.is_empty()).then_some(&*index);
         let doc = Arc::new(render_text(path, &text.text, with_index, &mapper, &hosts));
         // Lossy renders aren't cached, so a cache hit is never lossy.
@@ -104,21 +106,21 @@ impl AppState {
             // found the previous one; this one gets its look now.
             self.refresh_if_stale(None);
         }
-        {
-            let mut state = lock(&self.state);
-            state.reading.push_recent(RecentEntry {
-                path: doc.path.clone(),
-                title: doc.title.clone(),
-                opened_ms: now_ms(),
-            });
+        let entry = RecentEntry {
+            path: doc.path.clone(),
+            title: doc.title.clone(),
+            opened_ms: now_ms(),
+        };
+        self.change_own_workspace(|ws| {
+            as_reading(&mut ws.recent, |reading| reading.push_recent(entry));
             if current {
-                state.reading.last_doc = Some(doc.path.clone());
+                ws.last_doc = Some(doc.path.clone());
             }
-            self.saver.state(&state);
-        }
+            true
+        });
         // The open succeeded, so the image protocol may serve from the document's folder.
         if let Some(dir) = path.parent() {
-            write(&self.assets).add_folder(dir);
+            write(&self.app.assets).add_folder(dir);
         }
         if current {
             self.ensure_root_for(path, seq);
@@ -152,7 +154,7 @@ impl AppState {
         });
         let doc = &rendered.doc;
         DocPayload {
-            position: lock(&self.state).reading.position(&path_text).cloned(),
+            position: lock(&self.app.state).reading.position(&path_text).cloned(),
             path: path_text,
             title: doc.title.clone(),
             html: doc.html.clone(),
@@ -186,7 +188,9 @@ impl AppState {
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
         });
-        self.watch.doc(Some(path.to_path_buf()));
+        if let Some(watch) = &*lock(&self.watch) {
+            watch.doc(Some(path.to_path_buf()));
+        }
         true
     }
 
@@ -225,7 +229,7 @@ impl AppState {
             }
         };
         if let Some(path) = path {
-            self.host.emit(UiEvent::DocChanged(path));
+            self.emit(UiEvent::DocChanged(path));
         }
     }
 
@@ -245,24 +249,43 @@ impl AppState {
                 c.path.clone()
             });
         if let Some(path) = path {
-            self.host.emit(UiEvent::DocChanged(path));
+            self.emit(UiEvent::DocChanged(path));
         }
     }
 
-    /// Drops `path` from the recent files, for good; returns the recent files left.
+    /// The recent files of the window's workspace, newest first.
+    pub(super) fn recent(&self) -> Vec<RecentEntry> {
+        self.workspace_id()
+            .and_then(|id| self.app.read_workspace(&id, |ws| ws.recent.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Drops `path` from the workspace's recent files, for good; returns the recent files left.
     pub fn remove_recent(&self, path: &str) -> Vec<RecentEntry> {
-        let mut state = lock(&self.state);
-        if state.reading.remove_recent(path) {
-            self.saver.state(&state);
-        }
-        state.reading.recent.clone()
+        self.change_own_workspace(|ws| {
+            as_reading(&mut ws.recent, |reading| reading.remove_recent(path))
+        });
+        self.recent()
     }
 
+    /// Saves the reading position in `path`, which every window shares.
     pub fn save_position(&self, path: &str, position: SavedPosition) {
-        let mut state = lock(&self.state);
+        let mut state = lock(&self.app.state);
         state.reading.set_position(path, position, now_ms());
-        self.saver.state(&state);
+        self.app.saver.state(&state);
     }
+}
+
+/// Runs `f` on `recent` as a reading state's recent files, so a workspace's keep the same rules:
+/// newest first, each path once, 20 at most.
+fn as_reading<R>(recent: &mut Vec<RecentEntry>, f: impl FnOnce(&mut State) -> R) -> R {
+    let mut reading = State {
+        recent: std::mem::take(recent),
+        ..State::default()
+    };
+    let result = f(&mut reading);
+    *recent = reading.recent;
+    result
 }
 
 /// The answer for a path on a network host the user hasn't chosen.
@@ -284,8 +307,8 @@ mod tests {
     use std::fs;
 
     use crate::state::doc::render_file;
-    use crate::state::profile::STATE_FILE;
     use crate::state::sync::lock;
+    use lectern_core::workspace::WORKSPACES_FILE;
 
     #[test]
     fn an_older_open_finishing_late_never_becomes_current() {
@@ -313,10 +336,7 @@ mod tests {
             .iter()
             .any(|r| same_path(&r.path, b.parent().unwrap())));
         drop(lib);
-        assert_eq!(
-            lock(&f.state.state).reading.last_doc.as_deref(),
-            Some(path_string(&a).as_str())
-        );
+        assert_eq!(last_doc(&f), Some(path_string(&a)));
     }
 
     #[test]
@@ -390,8 +410,8 @@ mod tests {
         let left = f.state.remove_recent(&path_string(&a).to_uppercase());
         let left: Vec<PathBuf> = left.iter().map(|r| PathBuf::from(&r.path)).collect();
         assert_eq!(left, [b]);
-        f.state.flush();
-        let saved = fs::read_to_string(f.config.join(STATE_FILE)).unwrap();
+        f.app.flush();
+        let saved = fs::read_to_string(f.config.join(WORKSPACES_FILE)).unwrap();
         assert!(!saved.contains("a.md"), "{saved}");
         assert!(saved.contains("b.md"), "{saved}");
     }

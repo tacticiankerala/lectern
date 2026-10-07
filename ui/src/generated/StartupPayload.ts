@@ -3,11 +3,16 @@ import type { LibraryPayload } from "./LibraryPayload";
 import type { OpenResult } from "./OpenResult";
 import type { RecentEntry } from "./RecentEntry";
 import type { Settings } from "./Settings";
+import type { WorkspaceSummary } from "./WorkspaceSummary";
 
 /**
  * Everything the UI needs for its first paint.
  */
-export type StartupPayload = { settings: Settings, library: LibraryPayload, recent: Array<RecentEntry>, 
+export type StartupPayload = { settings: Settings, 
+/**
+ * The revision `settings` were taken at (`SettingsSnapshot`).
+ */
+settingsRev: number, library: LibraryPayload, recent: Array<RecentEntry>, 
 /**
  * The document given on the command line, or the last one open, rendered during startup.
  */
@@ -15,4 +20,19 @@ initial: OpenResult | null, version: string, portable: boolean,
 /**
  * A one-time message for the user, such as settings having been reset.
  */
-startupNotice: string | null, };
+startupNotice: string | null, 
+/**
+ * The workspace this window shows; `None` for a blank window.
+ */
+workspace: WorkspaceSummary | null, 
+/**
+ * Every workspace, in creation order, with this window's marked current: the UI words the
+ * title from it before the first paint, with no call of its own.
+ */
+workspaces: Array<WorkspaceSummary>, 
+/**
+ * Whether this page runs the process's automatic update check: true in the window that first
+ * asked for its startup payload, each time it starts again (it turned to another workspace),
+ * until a check has run.
+ */
+primary: boolean, };

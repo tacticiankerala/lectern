@@ -244,16 +244,15 @@ pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lectern_core::ipc::Settings;
 
     fn trust() -> Trust {
-        Trust::new(&Settings {
-            library_roots: vec![
+        Trust::new(
+            &[
                 r"S:\Notes\My Vault\dev".to_owned(),
                 r"\\nas\share\notes".to_owned(),
             ],
-            ..Settings::default()
-        })
+            &[],
+        )
     }
 
     fn scope() -> AssetScope {

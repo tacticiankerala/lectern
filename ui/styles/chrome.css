@@ -1253,7 +1253,7 @@ body.resizing {
   border-top: 1px solid var(--border);
 }
 
-.prefs-section h3 {
+.prefs-section h4 {
   margin: 0 0 3px;
   font-size: 13px;
   font-weight: 600;

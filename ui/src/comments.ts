@@ -21,7 +21,8 @@
 // - Loads and operations go to the backend one at a time, in the order they were asked for, so
 //   their answers apply in that order: an older answer never hides a newer agent reply. An
 //   operation is for the note it was asked on: one whose note is no longer on screen by its turn
-//   isn't sent.
+//   isn't sent. Before the window leaves (another workspace, or quitting), only the operations
+//   are waited for (`settled`): a load stalled on a share that has gone away holds nothing up.
 // - Reply drafts belong to their note and comment. They survive a reload of the comments (the box
 //   keeps its caret), a failed send, a reply that couldn't be sent because the note changed, and
 //   a visit to another note; they never move to another note. A reply box is disabled while its
@@ -123,6 +124,8 @@ export class CommentsController {
   private readonly replyBoxes = new Map<number, ReplyBox>();
   /** The loads and operations sent or waiting: each starts once the one before it is done. */
   private queue: Promise<unknown> = Promise.resolve();
+  /** The operations among them, each gone once it is done; `settled` waits for these alone. */
+  private readonly writes = new Set<Promise<unknown>>();
   private readonly head: HTMLElement;
   private readonly banner: HTMLElement;
   private readonly list: HTMLElement;
@@ -356,7 +359,39 @@ export class CommentsController {
     if (path === null || this.disposed) {
       return Promise.resolve("skipped");
     }
-    return this.enqueue(() => this.send(path, op));
+    const done = this.enqueue(() => this.send(path, op));
+    const write: Promise<unknown> = done
+      .catch(() => undefined)
+      .finally(() => {
+        this.writes.delete(write);
+      });
+    this.writes.add(write);
+    return done;
+  }
+
+  /**
+   * Resolves once every operation asked for so far, and since, is done. Loads aren't waited for:
+   * a sidecar read stalled on a share must not hold the window.
+   */
+  async settled(): Promise<void> {
+    while (this.writes.size > 0) {
+      await Promise.all(this.writes);
+    }
+  }
+
+  /**
+   * Whether text typed for a comment would be lost with the page: a new comment's, a reply draft,
+   * or a changed entry being edited.
+   */
+  hasUnsavedText(): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    const replies = [...this.drafts.values()].some((drafts) =>
+      [...drafts.values()].some((text) => text.trim() !== ""),
+    );
+    const edit = this.edit !== null && this.edit.area.value.trim() !== this.edit.original.trim();
+    return replies || edit || this.adding.hasUnsavedText();
   }
 
   /** Runs `task` once everything asked for before it is done. */
@@ -677,6 +712,7 @@ export class CommentsController {
       note,
       id,
       entry,
+      original: text,
       busy: false,
       area,
       el: h(
@@ -1184,6 +1220,8 @@ interface EditBox extends ReplyBox {
   note: string;
   id: number;
   entry: number;
+  /** The entry's text as it was when the box opened. */
+  original: string;
   /** Its text is being saved. */
   busy: boolean;
 }

@@ -127,6 +127,18 @@ pub struct SettingsPatch {
     pub comments_visible: Option<bool>,
 }
 
+/// A window's settings as a command answers or `settings-changed` carries them, with the revision
+/// they were taken at. The revision rises with every change to any window's settings, so the UI
+/// drops a snapshot older than one it has applied, whichever way it arrived. It is no part of
+/// `Settings`, which `settings.json` holds.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SettingsSnapshot {
+    pub settings: Settings,
+    pub rev: u64,
+}
+
 /// Where the reader was in a document: the nearest heading and the pixel offset below it, falling
 /// back to the top block's source line, then to the scroll fraction.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -240,6 +252,9 @@ pub struct LibraryPayload {
 pub struct UserOpen {
     pub doc: Option<OpenResult>,
     pub library: LibraryPayload,
+    /// The path is a folder chosen in a blank window, which has no library to add it to: nothing
+    /// opened or joined. The UI asks for a new workspace's name, then creates it with the folder.
+    pub folder: bool,
 }
 
 /// A file offered by quick open.
@@ -270,6 +285,8 @@ pub struct RecentEntry {
 #[ts(export)]
 pub struct StartupPayload {
     pub settings: Settings,
+    /// The revision `settings` were taken at (`SettingsSnapshot`).
+    pub settings_rev: u64,
     pub library: LibraryPayload,
     pub recent: Vec<RecentEntry>,
     /// The document given on the command line, or the last one open, rendered during startup.
@@ -278,6 +295,51 @@ pub struct StartupPayload {
     pub portable: bool,
     /// A one-time message for the user, such as settings having been reset.
     pub startup_notice: Option<String>,
+    /// The workspace this window shows; `None` for a blank window.
+    pub workspace: Option<WorkspaceSummary>,
+    /// Every workspace, in creation order, with this window's marked current: the UI words the
+    /// title from it before the first paint, with no call of its own.
+    pub workspaces: Vec<WorkspaceSummary>,
+    /// Whether this page runs the process's automatic update check: true in the window that first
+    /// asked for its startup payload, each time it starts again (it turned to another workspace),
+    /// until a check has run.
+    pub primary: bool,
+}
+
+/// A workspace as the header's workspace chip and a blank window's list show it.
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    /// Shown in some window, this one or another.
+    pub open: bool,
+    /// Shown in the window that asked.
+    pub current: bool,
+    pub roots: Vec<String>,
+    /// It has a theme of its own; otherwise it shows the shared one ("Same as other windows").
+    pub own_theme: bool,
+}
+
+/// Where a workspace the user chose opens: in the window they chose it from, or a new one.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum OpenWhere {
+    Here,
+    NewWindow,
+}
+
+/// What opening a workspace did: this window reloads to show it, the window already showing it
+/// was focused, or it opened in a new window.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum WorkspaceOutcome {
+    Reload,
+    Focused,
+    Opened,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -344,4 +406,7 @@ pub struct OpenRequest {
     pub path: String,
     /// When the request started, for perf marks.
     pub t0_ms: Option<f64>,
+    /// `path` is a folder launched into a blank window, which has no workspace to add it to: the
+    /// UI asks for a new workspace's name, then creates it with the folder.
+    pub folder: bool,
 }

@@ -1,4 +1,5 @@
-//! Second launches that arrive before the UI can receive events.
+//! Second launches that arrive before the app can route them, or before a window's UI can receive
+//! events.
 
 use std::sync::Mutex;
 
@@ -37,6 +38,39 @@ impl OpenQueue {
     }
 }
 
+/// Second launches that arrive before setup has made the app, which then routes them as it routes
+/// any other (`App::route_held`): a file goes to the window of the workspace holding it, not to the
+/// first window just because the app wasn't there yet.
+#[derive(Default)]
+pub struct HeldLaunches {
+    inner: Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    released: bool,
+    requests: Vec<OpenRequest>,
+}
+
+impl HeldLaunches {
+    /// Holds `request` until `release`, or, once released, hands it back to be routed now.
+    pub fn hold(&self, request: OpenRequest) -> Option<OpenRequest> {
+        let mut inner = lock(&self.inner);
+        if inner.released {
+            return Some(request);
+        }
+        inner.requests.push(request);
+        None
+    }
+
+    /// The requests held, in the order they came; later ones aren't held.
+    pub(super) fn release(&self) -> Vec<OpenRequest> {
+        let mut inner = lock(&self.inner);
+        inner.released = true;
+        std::mem::take(&mut inner.requests)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,6 +81,7 @@ mod tests {
         let request = |path: &str| OpenRequest {
             path: path.to_owned(),
             t0_ms: None,
+            folder: false,
         };
         assert!(queue.offer(request(r"C:\a.md")).is_none());
         assert!(queue.offer(request(r"C:\b.md")).is_none());
@@ -56,5 +91,24 @@ mod tests {
             Some(r"C:\c.md".to_owned())
         );
         assert!(queue.ready().is_none());
+    }
+
+    #[test]
+    fn launches_before_setup_are_held_in_order_then_go_straight_through() {
+        let held = HeldLaunches::default();
+        let request = |path: &str| OpenRequest {
+            path: path.to_owned(),
+            t0_ms: None,
+            folder: false,
+        };
+        assert!(held.hold(request(r"C:\a.md")).is_none());
+        assert!(held.hold(request(r"C:\b.md")).is_none());
+        let released: Vec<String> = held.release().into_iter().map(|r| r.path).collect();
+        assert_eq!(released, [r"C:\a.md", r"C:\b.md"]);
+        assert_eq!(
+            held.hold(request(r"C:\c.md")).map(|r| r.path),
+            Some(r"C:\c.md".to_owned())
+        );
+        assert!(held.release().is_empty());
     }
 }

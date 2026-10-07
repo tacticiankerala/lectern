@@ -34,6 +34,9 @@ describe("actionFor", () => {
     const table: [KeyboardEventInit, string][] = [
       [{ key: "o", ctrlKey: true }, "open-file"],
       [{ key: "N", ctrlKey: true, shiftKey: true }, "add-folder"],
+      // A new window, which lists the workspaces; and quitting with every window kept.
+      [{ key: "n", ctrlKey: true }, "new-window"],
+      [{ key: "q", ctrlKey: true }, "quit"],
       [{ key: "b", ctrlKey: true }, "toggle-library"],
       [{ key: "O", ctrlKey: true, shiftKey: true }, "toggle-outline"],
       [{ key: "e", ctrlKey: true }, "open-editor"],

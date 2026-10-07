@@ -1,4 +1,5 @@
 // What the document area shows without a document: the welcome screen, or why a file didn't open.
+// A blank window's welcome screen lists the workspaces to choose from first (workspace-menu.ts).
 import { MARKDOWN_PATH, h } from "./dom";
 import type { OpenError } from "./generated/OpenError";
 import type { RecentEntry } from "./generated/RecentEntry";
@@ -35,6 +36,7 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+Alt+M", "Add a comment"],
   ["F11", "Focus mode"],
   ["Ctrl+E", "Open in editor"],
+  ["Ctrl+N", "New window"],
 ];
 
 const ERROR_TITLES: Record<OpenError["kind"], string> = {
@@ -48,10 +50,13 @@ interface ButtonOptions {
   /** The shortcut, shown after the label. */
   keys?: string;
   primary?: boolean;
+  /** A class of its own, besides `btn`. */
+  name?: string;
 }
 
 function button(label: string, onClick: () => void, opts: ButtonOptions = {}): HTMLElement {
-  const b = h("button", { type: "button", class: opts.primary ? "btn primary" : "btn" }, label);
+  const cls = ["btn", ...(opts.primary ? ["primary"] : []), ...(opts.name ? [opts.name] : [])];
+  const b = h("button", { type: "button", class: cls.join(" ") }, label);
   if (opts.keys !== undefined) {
     b.append(h("kbd", {}, opts.keys));
   }
@@ -63,23 +68,33 @@ function heading(text: string): HTMLElement {
   return h("h2", { class: "state-heading" }, text);
 }
 
+/**
+ * The welcome screen. In a blank window (`choose` given), "Choose a workspace" comes first, with
+ * the list that `choose` puts in the slot it is handed.
+ */
 export function renderWelcome(
   host: HTMLElement,
   recent: RecentEntry[],
   actions: WelcomeActions,
+  choose?: (slot: HTMLElement) => void,
 ): void {
-  const welcome = h(
+  const buttons = h(
     "div",
-    { class: "welcome" },
-    h("h1", { class: "welcome-title" }, "Lectern"),
-    h("p", { class: "welcome-lede" }, "Open a Markdown file, or add a folder to your library."),
-    h(
-      "div",
-      { class: "welcome-actions" },
-      button("Open file…", actions.openFile, { keys: "Ctrl+O", primary: true }),
-      button("Add folder…", actions.addFolder, { keys: "Ctrl+Shift+N" }),
-    ),
+    { class: "welcome-actions" },
+    button("Open file…", actions.openFile, { keys: "Ctrl+O", primary: choose === undefined }),
+    button("Add folder…", actions.addFolder, { keys: "Ctrl+Shift+N", name: "welcome-add-folder" }),
   );
+  const welcome = h("div", { class: "welcome" }, h("h1", { class: "welcome-title" }, "Lectern"));
+  if (choose === undefined) {
+    welcome.append(
+      h("p", { class: "welcome-lede" }, "Open a Markdown file, or add a folder to your library."),
+      buttons,
+    );
+  } else {
+    const slot = h("div", { class: "welcome-workspaces" });
+    welcome.append(h("h2", { class: "welcome-choose" }, "Choose a workspace"), slot, buttons);
+    choose(slot);
+  }
   if (recent.length > 0) {
     const list = h("ul", { class: "recent-list" });
     for (const entry of recent) {

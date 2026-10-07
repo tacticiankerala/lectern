@@ -7,4 +7,9 @@ import type { OpenResult } from "./OpenResult";
  * joins the library unless it nests with a root, and opens its README when it has one. The
  * library comes back as it now is.
  */
-export type UserOpen = { doc: OpenResult | null, library: LibraryPayload, };
+export type UserOpen = { doc: OpenResult | null, library: LibraryPayload, 
+/**
+ * The path is a folder chosen in a blank window, which has no library to add it to: nothing
+ * opened or joined. The UI asks for a new workspace's name, then creates it with the folder.
+ */
+folder: boolean, };

@@ -5,8 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
-    DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult,
-    RecentEntry, RootState, SettingsPatch, StartupPayload, UserOpen,
+    DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult, OpenWhere,
+    RecentEntry, RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen,
+    WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
 use lectern_core::review::anchor::AnchorState;
@@ -40,6 +41,7 @@ fn ts_bindings_exported() {
     for name in [
         "Settings",
         "SettingsPatch",
+        "SettingsSnapshot",
         "Measure",
         "EditorPref",
         "OpenResult",
@@ -64,6 +66,10 @@ fn ts_bindings_exported() {
         "CommentView",
         "EntryView",
         "UnreadableView",
+        "WorkspaceSummary",
+        "OpenWhere",
+        "WorkspaceOutcome",
+        "OpenRequest",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -143,6 +149,14 @@ fn ts_unions_follow_the_serde_tags() {
         r#"type StatusChange = "resolve" | "reopen" | "dismiss";"#
     );
     assert_eq!(
+        decl::<OpenWhere>(),
+        r#"type OpenWhere = "here" | "newWindow";"#
+    );
+    assert_eq!(
+        decl::<WorkspaceOutcome>(),
+        r#"type WorkspaceOutcome = "reload" | "focused" | "opened";"#
+    );
+    assert_eq!(
         decl::<NewAnchor>(),
         concat!(
             "type NewAnchor = { startLine: number, endLine: number, quote: string, \n",
@@ -198,11 +212,14 @@ fn review_ops_are_tagged_by_op() {
 }
 
 #[test]
-fn user_open_may_open_nothing() {
-    assert_eq!(
-        decl::<UserOpen>(),
-        r#"type UserOpen = { doc: OpenResult | null, library: LibraryPayload, };"#
+fn user_open_may_open_nothing_or_be_a_folder_for_a_blank_window() {
+    let decl = decl::<UserOpen>();
+    assert!(
+        decl.starts_with("type UserOpen = { doc: OpenResult | null, library: LibraryPayload, "),
+        "{decl}"
     );
+    // After its doc comment.
+    assert!(decl.ends_with("\nfolder: boolean, };"), "{decl}");
 }
 
 #[test]
@@ -210,6 +227,11 @@ fn ts_numbers_are_numbers_and_patches_are_partial() {
     assert!(decl::<DocPayload>().contains("mtimeMs: number,"));
     assert!(decl::<RecentEntry>().contains("openedMs: number,"));
     assert!(decl::<SettingsPatch>().contains("fontSize?: number | null,"));
+    assert_eq!(
+        decl::<SettingsSnapshot>(),
+        "type SettingsSnapshot = { settings: Settings, rev: number, };"
+    );
+    assert!(decl::<StartupPayload>().contains("settingsRev: number,"));
 }
 
 #[test]
@@ -263,15 +285,73 @@ fn follow_result_is_tagged_by_action() {
 fn startup_payload_carries_a_notice() {
     let j = serde_json::to_value(StartupPayload {
         settings: Default::default(),
+        settings_rev: 7,
         library: lectern_core::ipc::LibraryPayload { roots: vec![] },
         recent: vec![],
         initial: None,
         version: "0.1.0".to_owned(),
         portable: false,
         startup_notice: Some("Settings were reset".to_owned()),
+        workspace: None,
+        workspaces: vec![],
+        primary: true,
     })
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
     assert!(j["initial"].is_null());
     assert_eq!(j["settings"]["measure"], 100);
+    assert_eq!(j["settingsRev"], 7);
+    // A blank window shows no workspace.
+    assert!(j["workspace"].is_null());
+    assert_eq!(j["workspaces"], json!([]));
+    assert_eq!(j["primary"], true);
+}
+
+#[test]
+fn startup_payload_names_the_window_workspace() {
+    let personal = WorkspaceSummary {
+        id: "w2".to_owned(),
+        name: "Personal".to_owned(),
+        open: true,
+        current: true,
+        roots: vec!["C:\\Users\\me\\projects".to_owned()],
+        own_theme: true,
+    };
+    let work = WorkspaceSummary {
+        id: "w1".to_owned(),
+        name: "Work".to_owned(),
+        open: false,
+        current: false,
+        roots: vec![],
+        own_theme: false,
+    };
+    let j = serde_json::to_value(StartupPayload {
+        settings: Default::default(),
+        settings_rev: 0,
+        library: lectern_core::ipc::LibraryPayload { roots: vec![] },
+        recent: vec![],
+        initial: None,
+        version: "0.3.0".to_owned(),
+        portable: false,
+        startup_notice: None,
+        workspace: Some(personal.clone()),
+        workspaces: vec![work, personal],
+        primary: false,
+    })
+    .unwrap();
+    let personal = json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true});
+    assert_eq!(j["workspace"], personal);
+    // Every workspace, for the title before the first paint.
+    assert_eq!(j["workspaces"][1], personal);
+    assert_eq!(j["workspaces"][0]["name"], "Work");
+    assert!(decl::<StartupPayload>().contains("workspaces: Array<WorkspaceSummary>,"));
+    assert_eq!(j["primary"], false);
+    assert_eq!(
+        serde_json::to_value(OpenWhere::NewWindow).unwrap(),
+        json!("newWindow")
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkspaceOutcome>(json!("focused")).unwrap(),
+        WorkspaceOutcome::Focused
+    );
 }
