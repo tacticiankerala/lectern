@@ -22,7 +22,9 @@ export type BackendEvent =
   | "open-request"
   | "library-updated"
   | "index-ready"
-  | "review-changed";
+  | "review-changed"
+  | "settings-changed"
+  | "workspaces-changed";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */

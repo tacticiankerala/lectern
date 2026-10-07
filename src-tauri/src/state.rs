@@ -13,7 +13,9 @@
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
 //! `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`, `cache`,
 //! `current`. The app's `mapper`, `notice`, `windows` and `focused`, and a window's `workspace`
-//! and `placement`, are leaves: nothing else is locked while one is held.
+//! and `placement`, are leaves: nothing else is locked while one is held. The app's `backgrounds`
+//! is taken with nothing else held, and stays held while the grammars' release is told, which
+//! then may take `focused`, `windows` and a window's `current` to warm them again.
 
 mod assets;
 mod doc;
@@ -51,7 +53,7 @@ use lectern_core::render::RenderedDoc;
 use lectern_core::search::ContentCache;
 use lectern_core::watch::WatchEvent;
 use lectern_core::workspace::{
-    apply_patch, effective_settings, Layout, WindowPlacement, Workspace, Workspaces,
+    apply_patch, effective_settings, Layout, PatchEffect, WindowPlacement, Workspace, Workspaces,
 };
 use tauri::Window;
 
@@ -72,7 +74,7 @@ use self::startup::spawn_forwarder;
 use self::sync::{lock, read, write, Gate};
 use self::trust::Trust;
 use crate::app::{Rect, MAIN_WINDOW};
-use crate::events::{Host, UiEvent};
+use crate::events::{Host, Target, UiEvent};
 
 const CACHE_CAP: usize = 64;
 
@@ -91,7 +93,7 @@ pub struct Timings {
     pub root: Duration,
     /// Scans and the watcher start once the window has shown its first document, or after this.
     pub scan_delay: Duration,
-    /// The compiled grammars are released once the window has been in the background this long.
+    /// The compiled grammars are released once every window has been in the background this long.
     pub release_after: Duration,
 }
 
@@ -165,8 +167,10 @@ pub struct App {
     wsl_distro: Option<String>,
     mapper: RwLock<Arc<PathMapper>>,
     warm: Arc<StartupWarmUp>,
-    /// Releases the compiled grammars while the window is in the background.
+    /// Releases the compiled grammars while every window is in the background.
     background: BackgroundRelease,
+    /// Whether each window is in the background (unfocused or minimised), by label.
+    backgrounds: Mutex<HashMap<String, bool>>,
     saver: Saver,
     /// Builds a window's watch worker, which reports back through the window's state.
     new_watch: Box<dyn Fn(Weak<WindowState>) -> Box<dyn Watch> + Send + Sync>,
@@ -234,6 +238,7 @@ impl App {
             new_watch: Box::new(watch),
             windows: RwLock::new(HashMap::new()),
             focused: Mutex::new(None),
+            backgrounds: Mutex::new(HashMap::new()),
         });
         if migrated || opened {
             app.saver.workspaces(&read(&app.workspaces));
@@ -274,23 +279,43 @@ impl App {
 
     /// Applies a change made in the window showing the workspace `id` (`None` for a blank
     /// window): each field goes to that workspace or to the shared settings, as `apply_patch`
-    /// decides, and what changed is saved. Returns the window's settings.
+    /// decides, and what changed is saved. Every window whose settings changed is told. Returns
+    /// the window's settings.
     fn apply_settings(&self, id: Option<&str>, patch: SettingsPatch) -> Settings {
-        let mut settings = write(&self.settings);
-        let mut workspaces = write(&self.workspaces);
-        let mirror = mirrored(&workspaces);
-        let effect = apply_patch(
-            &mut settings,
-            id.and_then(|id| workspaces.get_mut(id)),
-            patch,
-        );
-        if effect.workspace_changed {
-            self.saver.workspaces(&workspaces);
+        let (window_settings, effect) = {
+            let mut settings = write(&self.settings);
+            let mut workspaces = write(&self.workspaces);
+            let mirror = mirrored(&workspaces);
+            let effect = apply_patch(
+                &mut settings,
+                id.and_then(|id| workspaces.get_mut(id)),
+                patch,
+            );
+            if effect.workspace_changed {
+                self.saver.workspaces(&workspaces);
+            }
+            if effect.shared_changed || mirrored(&workspaces) != mirror {
+                self.save_settings(&settings, &workspaces);
+            }
+            let window_settings =
+                effective_settings(&settings, id.and_then(|id| workspaces.get(id)));
+            (window_settings, effect)
+        };
+        self.settings_changed(id, effect);
+        window_settings
+    }
+
+    /// Sends `settings-changed` to each window whose settings a change made in the window showing
+    /// the workspace `id` altered, with that window's own: every window when the shared settings
+    /// changed, else only the windows showing that workspace.
+    fn settings_changed(&self, id: Option<&str>, effect: PatchEffect) {
+        for window in self.windows() {
+            if effect.shared_changed
+                || (effect.workspace_changed && window.workspace_id().as_deref() == id)
+            {
+                window.emit(UiEvent::SettingsChanged(window.settings()));
+            }
         }
-        if effect.shared_changed || mirrored(&workspaces) != mirror {
-            self.save_settings(&settings, &workspaces);
-        }
-        effective_settings(&settings, id.and_then(|id| workspaces.get(id)))
     }
 
     /// Reads the workspace `id`, unless it is gone.
@@ -504,6 +529,13 @@ impl WindowState {
         self.app.trusts(path)
     }
 
+    /// Sends `event` to this window's UI alone.
+    fn emit(&self, event: UiEvent) {
+        self.app
+            .host
+            .emit(Target::Window(self.label.clone()), event);
+    }
+
     /// The window is showing the first document: scans may start, and that document is
     /// re-rendered if the index can now do better.
     pub fn window_shown(&self) {
@@ -539,8 +571,8 @@ impl WindowState {
     /// on the watcher's thread, so it never calls back into the watcher.
     pub fn on_watch_event(self: &Arc<Self>, event: WatchEvent) {
         match event {
-            WatchEvent::DocChanged(path) => self.app.host.emit(UiEvent::DocChanged(path)),
-            WatchEvent::DocRemoved(path) => self.app.host.emit(UiEvent::DocRemoved(path)),
+            WatchEvent::DocChanged(path) => self.emit(UiEvent::DocChanged(path)),
+            WatchEvent::DocRemoved(path) => self.emit(UiEvent::DocRemoved(path)),
             WatchEvent::LibraryChanged(root) => self.request_scan(&root, None),
             // The watcher stats the sidecar either way; with the feature off nothing comes of it.
             WatchEvent::ReviewChanged(path) => {
@@ -548,7 +580,7 @@ impl WindowState {
                     for root in self.user_roots_holding(&path) {
                         self.request_scan(&root, None);
                     }
-                    self.app.host.emit(UiEvent::ReviewChanged(path));
+                    self.emit(UiEvent::ReviewChanged(path));
                 }
             }
         }
@@ -1195,5 +1227,88 @@ mod tests {
         f.state.sync_roots();
         let trusted = html(&second);
         assert!(!trusted.contains("img-blocked"), "{trusted}");
+    }
+
+    fn window(label: &str) -> Target {
+        Target::Window(label.to_owned())
+    }
+
+    /// A window's events go to that window alone: the scan of a root in the first window is
+    /// news to it only, and a second window's watcher speaks to the second window only.
+    #[test]
+    fn each_windows_events_go_to_that_window_alone() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        dir.file("vault/plan.md", "# Plan");
+        let seeds = dir.file("garden/seeds.md", "# Seeds");
+        let mut profile = profile(&[&root]);
+        let garden = profile.workspaces.create("Garden");
+        let f = fixture_in(dir, profile, FakeHost::default());
+        f.app
+            .add_window("win-1", Some(garden), Arc::new(OpenQueue::default()), None);
+        f.state.window_shown();
+        wait_until("the root is indexed", || f.host.indexed(&root));
+        let scan = f
+            .host
+            .targets(|e| matches!(e, UiEvent::LibraryUpdated(_) | UiEvent::IndexReady(_)));
+        assert!(!scan.is_empty());
+        assert!(scan.iter().all(|t| *t == window(MAIN_WINDOW)), "{scan:?}");
+        let second = f.app.window("win-1").unwrap();
+        second.on_watch_event(WatchEvent::DocChanged(seeds));
+        assert_eq!(
+            f.host.targets(|e| matches!(e, UiEvent::DocChanged(_))),
+            [window("win-1")]
+        );
+    }
+
+    /// A setting every window shares, changed in any window, reaches every window, each with its
+    /// own settings; a change to one workspace reaches only its window.
+    #[test]
+    fn a_settings_change_reaches_the_windows_whose_settings_it_changes() {
+        let mut profile = profile(&[]);
+        let garden = profile.workspaces.create("Garden");
+        profile
+            .workspaces
+            .get_mut(&garden)
+            .unwrap()
+            .layout
+            .outline_width = 300;
+        let f = fixture(profile, FakeHost::default());
+        f.app
+            .add_window("win-1", Some(garden), Arc::new(OpenQueue::default()), None);
+        let second = f.app.window("win-1").unwrap();
+        second.set_settings(SettingsPatch {
+            font_size: Some(18),
+            ..SettingsPatch::default()
+        });
+        let told = f.host.settings_changes();
+        let sent_to = |label: &str| {
+            let sent: Vec<&Settings> = told
+                .iter()
+                .filter(|(target, _)| *target == window(label))
+                .map(|(_, settings)| settings)
+                .collect();
+            let [settings] = sent.as_slice() else {
+                panic!("{label}: {told:?}");
+            };
+            (*settings).clone()
+        };
+        assert_eq!(told.len(), 2, "{told:?}");
+        let (main, win1) = (sent_to(MAIN_WINDOW), sent_to("win-1"));
+        assert_eq!((main.font_size, win1.font_size), (18, 18));
+        assert_ne!(main.outline_width, 300);
+        assert_eq!(win1.outline_width, 300);
+        lock(&f.host.events).clear();
+        second.set_settings(hide_library());
+        let told = f.host.settings_changes();
+        let [(target, settings)] = told.as_slice() else {
+            panic!("{told:?}");
+        };
+        assert_eq!(*target, window("win-1"));
+        assert!(!settings.library_visible);
+        assert!(f.state.settings().library_visible);
+        lock(&f.host.events).clear();
+        second.set_settings(SettingsPatch::default());
+        assert!(f.host.settings_changes().is_empty());
     }
 }

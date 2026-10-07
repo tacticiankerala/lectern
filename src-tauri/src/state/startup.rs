@@ -99,7 +99,7 @@ impl WindowState {
             write(&self.app.trust).opened_by_user(&doc.path);
         }
         log::info!("the boot render missed startup; asking the UI to open it");
-        self.app.host.emit(UiEvent::OpenRequest(OpenRequest {
+        self.emit(UiEvent::OpenRequest(OpenRequest {
             path: path_string(&doc.path),
             t0_ms: None,
         }));
@@ -155,7 +155,7 @@ impl WindowState {
         // Counts as an open, so a boot render landing late never overrides it.
         self.next_seq();
         if let Some(doc) = self.resolve_target(Path::new(&request.path)) {
-            self.app.host.emit(UiEvent::OpenRequest(OpenRequest {
+            self.emit(UiEvent::OpenRequest(OpenRequest {
                 path: path_string(&doc),
                 t0_ms: request.t0_ms,
             }));

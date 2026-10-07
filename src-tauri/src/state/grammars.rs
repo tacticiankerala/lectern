@@ -1,7 +1,8 @@
-//! The highlighter's compiled grammars while the window is in the background: released after a
-//! while there, and warmed again on return, the languages of the document on screen in the
-//! focused window first.
+//! The highlighter's compiled grammars while every window is in the background: released after a
+//! while there, and warmed again when any window comes back, the languages of the document on
+//! screen in the focused window first.
 
+use std::collections::HashMap;
 use std::sync::Weak;
 use std::time::Instant;
 
@@ -34,9 +35,21 @@ impl Grammars for AppGrammars {
 }
 
 impl App {
-    /// The window went to the background (unfocused or minimised) or came back.
-    pub fn set_background(&self, background: bool) {
-        self.background.set_background(background);
+    /// The window `label` went to the background (unfocused or minimised) or came back. The app
+    /// is in the background once every window is: the grammars' release starts counting then, and
+    /// stops as soon as any window comes back.
+    pub fn set_background(&self, label: &str, background: bool) {
+        let mut windows = lock(&self.backgrounds);
+        windows.insert(label.to_owned(), background);
+        self.background.set_background(all_in_background(&windows));
+    }
+
+    /// The window `label` closed, so whether the app is in the background no longer depends on it.
+    pub fn window_closed(&self, label: &str) {
+        let mut windows = lock(&self.backgrounds);
+        if windows.remove(label).is_some() {
+            self.background.set_background(all_in_background(&windows));
+        }
     }
 
     /// The window `label` was focused: its document's languages are the first to warm again.
@@ -56,6 +69,11 @@ impl App {
             .map(|window| window.current_languages())
             .unwrap_or_default()
     }
+}
+
+/// Whether every window is in the background; with none left, nothing is on screen.
+fn all_in_background(windows: &HashMap<String, bool>) -> bool {
+    windows.values().all(|&background| background)
 }
 
 impl WindowState {
@@ -80,7 +98,10 @@ mod tests {
     use crate::state::doc::render_file;
     use crate::state::open_queue::OpenQueue;
     use crate::state::paths::path_string;
+    use crate::state::sync::lock;
     use crate::state::test_support::*;
+
+    use super::all_in_background;
 
     #[test]
     fn the_languages_to_warm_first_are_the_open_documents() {
@@ -118,6 +139,30 @@ mod tests {
         assert_eq!(f.app.current_languages(), ["jsx"]);
         f.app.window_focused("main");
         assert_eq!(f.app.current_languages(), ["ruby"]);
+    }
+
+    /// The app is in the background, and the grammars' release counting, only while every window
+    /// is unfocused or minimised. A window that closes counts no more.
+    #[test]
+    fn the_app_is_in_the_background_while_every_window_is() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let backgrounded = || all_in_background(&lock(&f.app.backgrounds));
+        // main is focused and win-1 minimised.
+        f.app.set_background("main", false);
+        f.app.set_background("win-1", true);
+        assert!(!backgrounded());
+        // main loses the focus: the release is scheduled.
+        f.app.set_background("main", true);
+        assert!(backgrounded());
+        // win-1 is restored and focused: the release is cancelled.
+        f.app.set_background("win-1", false);
+        assert!(!backgrounded());
+        // win-1 closes, leaving main in the background.
+        f.app.window_closed("win-1");
+        assert!(backgrounded());
+        assert!(!lock(&f.app.backgrounds).contains_key("win-1"));
+        f.app.set_background("main", false);
+        assert!(!backgrounded());
     }
 
     #[test]

@@ -22,11 +22,12 @@ use super::sync::{lock, write, Slot};
 use super::watch_control::Watch;
 use super::{App, Boot, Timings, WindowState};
 use crate::app::MAIN_WINDOW;
-use crate::events::{Host, UiEvent};
+use crate::events::{Host, Target, UiEvent};
 
 #[derive(Default)]
 pub(super) struct FakeHost {
-    pub(super) events: Mutex<Vec<UiEvent>>,
+    /// Every event sent, with the windows it was for, in order.
+    pub(super) events: Mutex<Vec<(Target, UiEvent)>>,
     /// An `index-ready` for this root waits (after it is recorded) until `release` is called,
     /// which holds that root's scan open.
     pub(super) hold_index_ready: Mutex<Option<PathBuf>>,
@@ -35,10 +36,10 @@ pub(super) struct FakeHost {
 }
 
 impl Host for FakeHost {
-    fn emit(&self, event: UiEvent) {
+    fn emit(&self, target: Target, event: UiEvent) {
         let held = matches!(&event, UiEvent::IndexReady(root)
             if lock(&self.hold_index_ready).as_ref() == Some(root));
-        lock(&self.events).push(event);
+        lock(&self.events).push((target, event));
         if held {
             let released = lock(&self.released);
             drop(
@@ -56,7 +57,7 @@ impl FakeHost {
     pub(super) fn open_requests(&self) -> Vec<PathBuf> {
         lock(&self.events)
             .iter()
-            .filter_map(|e| match e {
+            .filter_map(|(_, e)| match e {
                 UiEvent::OpenRequest(r) => Some(PathBuf::from(&r.path)),
                 _ => None,
             })
@@ -66,7 +67,7 @@ impl FakeHost {
     pub(super) fn doc_changes(&self) -> usize {
         lock(&self.events)
             .iter()
-            .filter(|e| matches!(e, UiEvent::DocChanged(_)))
+            .filter(|(_, e)| matches!(e, UiEvent::DocChanged(_)))
             .count()
     }
 
@@ -74,7 +75,7 @@ impl FakeHost {
     pub(super) fn review_changes(&self) -> Vec<PathBuf> {
         lock(&self.events)
             .iter()
-            .filter_map(|e| match e {
+            .filter_map(|(_, e)| match e {
                 UiEvent::ReviewChanged(path) => Some(path.clone()),
                 _ => None,
             })
@@ -84,7 +85,27 @@ impl FakeHost {
     pub(super) fn indexed(&self, root: &Path) -> bool {
         lock(&self.events)
             .iter()
-            .any(|e| matches!(e, UiEvent::IndexReady(r) if r == root))
+            .any(|(_, e)| matches!(e, UiEvent::IndexReady(r) if r == root))
+    }
+
+    /// Where each event that `is` picks out was sent, in order.
+    pub(super) fn targets(&self, is: impl Fn(&UiEvent) -> bool) -> Vec<Target> {
+        lock(&self.events)
+            .iter()
+            .filter(|(_, e)| is(e))
+            .map(|(target, _)| target.clone())
+            .collect()
+    }
+
+    /// The `settings-changed` events sent, in order, with the windows they were for.
+    pub(super) fn settings_changes(&self) -> Vec<(Target, Settings)> {
+        lock(&self.events)
+            .iter()
+            .filter_map(|(target, e)| match e {
+                UiEvent::SettingsChanged(settings) => Some((target.clone(), settings.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Lets a held `index-ready` go on.

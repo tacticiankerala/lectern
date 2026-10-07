@@ -121,7 +121,7 @@ impl WindowState {
             }
         }
         if self.install(root, gen, index, RootState::Ready) {
-            self.app.host.emit(UiEvent::IndexReady(root.to_path_buf()));
+            self.emit(UiEvent::IndexReady(root.to_path_buf()));
         }
     }
 
@@ -197,7 +197,7 @@ impl WindowState {
         self.index_changed(None);
         self.refresh_current(Some(root), files_changed);
         if let Some(payload) = payload {
-            self.app.host.emit(UiEvent::LibraryUpdated(payload));
+            self.emit(UiEvent::LibraryUpdated(payload));
         }
         true
     }
@@ -216,7 +216,7 @@ impl WindowState {
             (!adhoc).then(|| lib.payload())
         };
         if let Some(payload) = payload {
-            self.app.host.emit(UiEvent::LibraryUpdated(payload));
+            self.emit(UiEvent::LibraryUpdated(payload));
         }
     }
 }

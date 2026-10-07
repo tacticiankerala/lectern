@@ -1,11 +1,11 @@
-//! Events sent to the UI, and the `Host` through which the app state reaches Tauri: emitting
-//! events and quitting. Tests swap in a fake host.
+//! Events sent to the UI, each to one window or to every window, and the `Host` through which the
+//! app state reaches Tauri: emitting events and quitting. Tests swap in a fake host.
 
 use std::path::{Path, PathBuf};
 
-use lectern_core::ipc::{DocChanged, LibraryPayload, OpenRequest};
+use lectern_core::ipc::{DocChanged, LibraryPayload, OpenRequest, Settings};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, EventTarget};
 
 /// The open document changed on disk (`DocChanged`). Also sent when it should be re-rendered
 /// silently, such as once the library index can resolve its wikilinks.
@@ -21,6 +21,20 @@ pub const INDEX_READY: &str = "index-ready";
 /// The open document's review sidecar was created, changed or deleted (`DocChanged`, holding the
 /// document's path).
 pub const REVIEW_CHANGED: &str = "review-changed";
+/// The window's settings changed (`Settings`, the window's own).
+pub const SETTINGS_CHANGED: &str = "settings-changed";
+/// The workspaces changed (no payload); sent to every window.
+pub const WORKSPACES_CHANGED: &str = "workspaces-changed";
+
+/// Which windows an event is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// The window with this label.
+    Window(String),
+    /// Every window.
+    #[expect(dead_code, reason = "nothing changes the workspaces yet")]
+    All,
+}
 
 /// An event for the UI.
 #[derive(Debug, Clone)]
@@ -32,11 +46,15 @@ pub enum UiEvent {
     IndexReady(PathBuf),
     /// Holds the document's path, not the sidecar's.
     ReviewChanged(PathBuf),
+    /// The settings of the window it is sent to.
+    SettingsChanged(Settings),
+    #[expect(dead_code, reason = "nothing changes the workspaces yet")]
+    WorkspacesChanged,
 }
 
 /// What the app state needs from Tauri.
 pub trait Host: Send + Sync {
-    fn emit(&self, event: UiEvent);
+    fn emit(&self, target: Target, event: UiEvent);
     fn exit(&self);
 }
 
@@ -44,14 +62,23 @@ pub trait Host: Send + Sync {
 pub struct TauriHost(pub AppHandle);
 
 impl Host for TauriHost {
-    fn emit(&self, event: UiEvent) {
+    /// A window's UI listens on its webview window's target, so an event for one window reaches
+    /// only that window.
+    fn emit(&self, target: Target, event: UiEvent) {
+        let target = match target {
+            Target::Window(label) => EventTarget::webview_window(label),
+            Target::All => EventTarget::Any,
+        };
+        let app = &self.0;
         match event {
-            UiEvent::DocChanged(path) => emit(&self.0, DOC_CHANGED, doc(&path)),
-            UiEvent::DocRemoved(path) => emit(&self.0, DOC_REMOVED, doc(&path)),
-            UiEvent::OpenRequest(request) => emit(&self.0, OPEN_REQUEST, request),
-            UiEvent::LibraryUpdated(library) => emit(&self.0, LIBRARY_UPDATED, library),
-            UiEvent::IndexReady(root) => emit(&self.0, INDEX_READY, root.to_string_lossy()),
-            UiEvent::ReviewChanged(path) => emit(&self.0, REVIEW_CHANGED, doc(&path)),
+            UiEvent::DocChanged(path) => emit(app, target, DOC_CHANGED, doc(&path)),
+            UiEvent::DocRemoved(path) => emit(app, target, DOC_REMOVED, doc(&path)),
+            UiEvent::OpenRequest(request) => emit(app, target, OPEN_REQUEST, request),
+            UiEvent::LibraryUpdated(library) => emit(app, target, LIBRARY_UPDATED, library),
+            UiEvent::IndexReady(root) => emit(app, target, INDEX_READY, root.to_string_lossy()),
+            UiEvent::ReviewChanged(path) => emit(app, target, REVIEW_CHANGED, doc(&path)),
+            UiEvent::SettingsChanged(settings) => emit(app, target, SETTINGS_CHANGED, settings),
+            UiEvent::WorkspacesChanged => emit(app, target, WORKSPACES_CHANGED, ()),
         }
     }
 
@@ -66,8 +93,8 @@ fn doc(path: &Path) -> DocChanged {
     }
 }
 
-fn emit<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: P) {
-    if let Err(e) = app.emit(event, payload) {
+fn emit<P: Serialize + Clone>(app: &AppHandle, target: EventTarget, event: &str, payload: P) {
+    if let Err(e) = app.emit_to(target, event, payload) {
         log::warn!("couldn't send {event}: {e}");
     }
 }

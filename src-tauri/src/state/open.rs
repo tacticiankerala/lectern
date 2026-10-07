@@ -229,7 +229,7 @@ impl WindowState {
             }
         };
         if let Some(path) = path {
-            self.app.host.emit(UiEvent::DocChanged(path));
+            self.emit(UiEvent::DocChanged(path));
         }
     }
 
@@ -249,7 +249,7 @@ impl WindowState {
                 c.path.clone()
             });
         if let Some(path) = path {
-            self.app.host.emit(UiEvent::DocChanged(path));
+            self.emit(UiEvent::DocChanged(path));
         }
     }
 

@@ -1,7 +1,7 @@
 // The Backend on Tauri: commands through `invoke` (arguments camelCased, as Rust expects them),
 // events through `listen`, and the file and folder pickers through the dialog plugin.
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type EventTarget as TauriTarget } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { Candidate } from "./generated/Candidate";
@@ -21,12 +21,32 @@ import type { StartupPayload } from "./generated/StartupPayload";
 import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
 
-/** The one window's label, as in tauri.conf.json. */
-const MAIN_WINDOW = "main";
+declare global {
+  interface Window {
+    /** Tauri's, set before any script runs; `getCurrentWebviewWindow` reads the label here. */
+    __TAURI_INTERNALS__: { metadata: { currentWebview: { label: string } } };
+  }
+}
+
+/**
+ * This window's label ("main" or `win-<n>`), read where `getCurrentWebviewWindow` reads it: the
+ * webview module would add to the bundle loaded before first paint.
+ */
+function thisLabel(): string {
+  return window.__TAURI_INTERNALS__.metadata.currentWebview.label;
+}
 
 export class TauriBackend implements Backend {
   /** Listener registrations still on their way to Rust; `startup` waits for them. */
   private readonly registering: Promise<unknown>[] = [];
+  /** The window this UI runs in; the window commands act on it alone. */
+  private readonly label = thisLabel();
+  /**
+   * This window's own target, as `getCurrentWebviewWindow().listen` uses it: an event Rust sends
+   * to another window, or a file dropped on one, never reaches this one. `listen`'s default
+   * target, `Any`, would hear them all.
+   */
+  private readonly target: TauriTarget = { kind: "WebviewWindow", label: this.label };
 
   async startup(): Promise<StartupPayload> {
     // Rust sends launches held until startup as events, so every listener must be in place first.
@@ -51,12 +71,12 @@ export class TauriBackend implements Backend {
    * importing the Window class would add about 14 KB to the bundle loaded before first paint.
    */
   setTitle(title: string): Promise<void> {
-    return invoke("plugin:window|set_title", { label: MAIN_WINDOW, value: title });
+    return invoke("plugin:window|set_title", { label: this.label, value: title });
   }
 
   /** The window plugin's `set_fullscreen`, invoked directly for the same reason as `setTitle`. */
   setFullscreen(on: boolean): Promise<void> {
-    return invoke("plugin:window|set_fullscreen", { label: MAIN_WINDOW, value: on });
+    return invoke("plugin:window|set_fullscreen", { label: this.label, value: on });
   }
 
   getLibrary(): Promise<LibraryPayload> {
@@ -156,14 +176,18 @@ export class TauriBackend implements Backend {
   }
 
   /**
-   * The webview's drop event, which `getCurrentWebview().onDragDropEvent` wraps, heard through
-   * `listen`: the webview module would add to the bundle loaded before first paint. Not awaited
-   * by `startup`, as nothing is dropped before the window shows.
+   * The window's drop event, which `getCurrentWebviewWindow().onDragDropEvent` wraps, heard
+   * through `listen` on this window's target: the webview module would add to the bundle loaded
+   * before first paint. Not awaited by `startup`, as nothing is dropped before the window shows.
    */
   onDragDrop(cb: (paths: string[]) => void): () => void {
-    const unlisten = listen<{ paths: string[] }>("tauri://drag-drop", (e) => {
-      cb(e.payload.paths);
-    });
+    const unlisten = listen<{ paths: string[] }>(
+      "tauri://drag-drop",
+      (e) => {
+        cb(e.payload.paths);
+      },
+      { target: this.target },
+    );
     return () => {
       void unlisten.then((stop) => {
         stop();
@@ -173,9 +197,13 @@ export class TauriBackend implements Backend {
 
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- callers name the payload type
   on<T>(event: BackendEvent, cb: (payload: T) => void): () => void {
-    const unlisten = listen<T>(event, (e) => {
-      cb(e.payload);
-    });
+    const unlisten = listen<T>(
+      event,
+      (e) => {
+        cb(e.payload);
+      },
+      { target: this.target },
+    );
     this.registering.push(unlisten);
     return () => {
       void unlisten.then((stop) => {

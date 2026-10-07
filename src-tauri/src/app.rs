@@ -314,19 +314,20 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
             if let Some(state) = &state {
                 state.track_window(window);
             }
-            app.set_background(in_background(window, None));
+            app.set_background(window.label(), in_background(window, None));
         }
         WindowEvent::Focused(focused) => {
             if *focused {
                 app.window_focused(window.label());
             }
-            app.set_background(in_background(window, Some(*focused)));
+            app.set_background(window.label(), in_background(window, Some(*focused)));
         }
         WindowEvent::CloseRequested { .. } => {
             if let Some(state) = &state {
                 state.remember_window(window);
             }
         }
+        WindowEvent::Destroyed => app.window_closed(window.label()),
         _ => {}
     }
 }
@@ -465,6 +466,18 @@ pub fn active_theme(settings: &Settings, system_dark: bool) -> ThemeId {
 
 #[cfg(test)]
 mod capability_tests {
+    /// The permissions are every window's: the first, "main", and each one opened later,
+    /// `win-<n>`.
+    #[test]
+    fn every_window_has_the_permissions() {
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(
+            caps["windows"],
+            serde_json::json!([super::MAIN_WINDOW, "win-*"])
+        );
+    }
+
     /// The UI sets the native title as documents open, so the window must allow it.
     #[test]
     fn the_main_window_may_set_its_title() {
@@ -476,7 +489,6 @@ mod capability_tests {
             .iter()
             .filter_map(|p| p.as_str())
             .collect();
-        assert_eq!(caps["windows"][0], super::MAIN_WINDOW);
         assert!(
             permissions.contains(&"core:window:allow-set-title"),
             "{permissions:?}"

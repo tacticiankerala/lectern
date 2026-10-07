@@ -270,7 +270,7 @@ impl WindowState {
             }
         };
         if let Some(payload) = payload {
-            self.app.host.emit(UiEvent::LibraryUpdated(payload));
+            self.emit(UiEvent::LibraryUpdated(payload));
             let (done, finished) = mpsc::channel();
             self.request_scan(&root, Some(done));
             let _ = finished.recv_timeout(self.app.timings.root);
@@ -545,9 +545,9 @@ mod tests {
         capped.truncated = true;
         f.state.install(&root, gen, capped, RootState::Ready);
         assert!(f.state.library_payload().roots[0].truncated);
-        let told = lock(&f.host.events)
-            .iter()
-            .any(|e| matches!(e, UiEvent::LibraryUpdated(library) if library.roots[0].truncated));
+        let told = lock(&f.host.events).iter().any(
+            |(_, e)| matches!(e, UiEvent::LibraryUpdated(library) if library.roots[0].truncated),
+        );
         assert!(told, "the UI heard nothing");
     }
 
