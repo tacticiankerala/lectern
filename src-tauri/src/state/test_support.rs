@@ -1,5 +1,5 @@
 //! Fakes and fixtures for the app-state tests: a host that records events, a watch that records
-//! requests, temp folders, and an `AppState` wired to them.
+//! requests, temp folders, and an `App` wired to them, with its first window's `WindowState`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,14 +12,16 @@ use lectern_core::ipc::{OpenResult, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
+use lectern_core::workspace::Workspaces;
 
 use super::doc::{now_ms, render_file, Early, EarlyDoc};
 use super::open_queue::OpenQueue;
 use super::paths::{path_string, same_path};
 use super::profile::{Profile, StateFile};
-use super::sync::{lock, Slot};
+use super::sync::{lock, write, Slot};
 use super::watch_control::Watch;
-use super::{AppState, Boot, Timings};
+use super::{App, Boot, Timings, WindowState};
+use crate::app::MAIN_WINDOW;
 use crate::events::{Host, UiEvent};
 
 #[derive(Default)]
@@ -147,7 +149,9 @@ impl Drop for TempDir {
 }
 
 pub(super) struct Fixture {
-    pub(super) state: Arc<AppState>,
+    /// The first window's state.
+    pub(super) state: Arc<WindowState>,
+    pub(super) app: Arc<App>,
     pub(super) host: Arc<FakeHost>,
     pub(super) watched: Arc<Mutex<Vec<Watched>>>,
     pub(super) early: Arc<Slot<Early>>,
@@ -160,24 +164,32 @@ pub(super) struct Fixture {
 impl Drop for Fixture {
     /// Scans and the save thread write into the temp folder from threads of their own, and a
     /// write after it is removed makes it again. So, a failed test included, this lets a held
-    /// scan go on, waits until no other thread holds the state, and writes what is waiting to be
-    /// saved: dropping the state then ends the save thread with nothing left to write.
+    /// scan go on, waits until no other thread holds the window's state (the app and the fixture
+    /// do), and writes what is waiting to be saved. The windows' states hold the app, so they are
+    /// let go of here: dropping the fixture then drops the app and ends the save thread with
+    /// nothing left to write.
     fn drop(&mut self) {
         self.host.release();
         let started = Instant::now();
-        while Arc::strong_count(&self.state) > 1 && started.elapsed() < Duration::from_secs(10) {
+        while Arc::strong_count(&self.state) > 2 && started.elapsed() < Duration::from_secs(10) {
             thread::sleep(Duration::from_millis(5));
         }
-        self.state.saver.flush(Duration::from_secs(10));
+        self.app.saver.flush(Duration::from_secs(10));
+        write(&self.app.windows).clear();
     }
 }
 
+/// A profile whose one workspace, "Main" (`w1`), has the libraries `roots` and is open, as an
+/// older Lectern's profile becomes; its `workspaces.json` is taken as saved already.
 pub(super) fn profile(roots: &[&Path]) -> Profile {
+    let settings = Settings {
+        library_roots: roots.iter().map(|r| path_string(r)).collect(),
+        ..Settings::default()
+    };
     Profile {
-        settings: Settings {
-            library_roots: roots.iter().map(|r| path_string(r)).collect(),
-            ..Settings::default()
-        },
+        workspaces: Workspaces::migrate(&settings, None, Vec::new(), None),
+        migrated: false,
+        settings,
         state: StateFile::default(),
         notice: None,
         wsl_distro: None,
@@ -231,9 +243,10 @@ fn fixture_full(
         portable: false,
     };
     let fake_watch = Arc::clone(&watched);
-    let state = AppState::new(boot, Arc::clone(&host) as Arc<dyn Host>, move |_| {
-        Box::new(FakeWatch(fake_watch))
+    let app = App::new(boot, Arc::clone(&host) as Arc<dyn Host>, move |_| {
+        Box::new(FakeWatch(Arc::clone(&fake_watch)))
     });
+    let state = app.window(MAIN_WINDOW).expect("the first window's state");
     state.start_library();
     // The boot thread takes the roots once and then watches them: past that, nothing it does
     // races what a test does to the roots.
@@ -244,6 +257,7 @@ fn fixture_full(
     });
     Fixture {
         state,
+        app,
         host,
         watched,
         early,
@@ -284,6 +298,14 @@ pub(super) fn opened_path(result: &OpenResult) -> PathBuf {
         OpenResult::Ok { doc } => PathBuf::from(&doc.path),
         OpenResult::Err { error } => panic!("open failed: {}", error.message),
     }
+}
+
+/// The last document of the workspace the fixture's window shows.
+pub(super) fn last_doc(f: &Fixture) -> Option<String> {
+    let id = f.state.workspace_id()?;
+    f.app
+        .read_workspace(&id, |ws| ws.last_doc.clone())
+        .flatten()
 }
 
 pub(super) fn current(f: &Fixture) -> (PathBuf, bool) {

@@ -20,12 +20,12 @@ use tauri::{
 
 use crate::events::TauriHost;
 use crate::state::{
-    AppState, AssetResponse, Boot, Early, OpenQueue, Profile, Slot, Timings, WatchControl,
+    App, AssetResponse, Boot, Early, OpenQueue, Profile, Slot, Timings, WatchControl, WindowState,
 };
 use crate::updater::{self, Updates};
 use crate::{commands, win};
 
-/// The label of the one window, as in `tauri.conf.json`.
+/// The label of the first window, as in `tauri.conf.json`.
 pub const MAIN_WINDOW: &str = "main";
 
 /// How long setup, on the main thread, waits for the boot thread to load the settings.
@@ -99,7 +99,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             let path = request.uri().path().to_owned();
             // The checks are in memory; only an allowed file is read, off the main thread.
             tauri::async_runtime::spawn_blocking(move || {
-                let response = match app.try_state::<Arc<AppState>>() {
+                let response = match app.try_state::<Arc<App>>() {
                     Some(state) => state.serve_asset(&path),
                     None => AssetResponse::refused(),
                 };
@@ -173,7 +173,7 @@ fn setup(
     }
     let portable = updater::detect_portable(&app.package_info().name);
     app.manage(Updates::new(portable));
-    let state = AppState::new(
+    let state = App::new(
         Boot {
             config_dir: launch.dirs.config,
             snapshot_dir: launch.dirs.snapshots,
@@ -189,24 +189,27 @@ fn setup(
         Arc::new(TauriHost(app.handle().clone())),
         |weak| {
             Box::new(WatchControl::new(move |event| {
-                if let Some(state) = weak.upgrade() {
-                    state.on_watch_event(event);
+                if let Some(window) = weak.upgrade() {
+                    window.on_watch_event(event);
                 }
             }))
         },
     );
     app.manage(Arc::clone(&state));
-    match app.get_webview_window(MAIN_WINDOW) {
-        Some(window) => prepare_window(&window, &state),
-        None => log::error!("the main window is missing"),
+    let main = state.window(MAIN_WINDOW);
+    match (app.get_webview_window(MAIN_WINDOW), &main) {
+        (Some(window), Some(main)) => prepare_window(&window, main),
+        _ => log::error!("the main window is missing"),
     }
-    state.start_library();
+    if let Some(main) = main {
+        main.start_library();
+    }
     Ok(())
 }
 
-/// Places the hidden window where it was last time, if that is still on a monitor, and gives it
-/// the theme's background and title-bar colours before it is shown.
-fn prepare_window(window: &WebviewWindow, state: &AppState) {
+/// Places the hidden window where its workspace's window was last time, if that is still on a
+/// monitor, and gives it the theme's background and title-bar colours before it is shown.
+fn prepare_window(window: &WebviewWindow, state: &WindowState) {
     let work_areas: Vec<Rect> = window
         .available_monitors()
         .unwrap_or_default()
@@ -279,8 +282,11 @@ fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: 
         };
         // Held for startup, or resolved (a folder becomes a library root) off the main thread.
         if let Some(request) = opens.offer(request) {
-            if let Some(state) = app.try_state::<Arc<AppState>>() {
-                state.forward(request);
+            if let Some(main) = app
+                .try_state::<Arc<App>>()
+                .and_then(|state| state.window(MAIN_WINDOW))
+            {
+                main.forward(request);
             }
         }
     }
@@ -294,19 +300,33 @@ fn on_second_launch(app: &AppHandle, opens: &OpenQueue, argv: Vec<String>, cwd: 
 }
 
 fn on_window_event(window: &Window, event: &WindowEvent) {
-    let Some(state) = window.try_state::<Arc<AppState>>() else {
+    let Some(app) = window.try_state::<Arc<App>>() else {
         return;
     };
+    let state = app.window(window.label());
     match event {
-        WindowEvent::Moved(_) => state.track_window(window),
+        WindowEvent::Moved(_) => {
+            if let Some(state) = &state {
+                state.track_window(window);
+            }
+        }
         WindowEvent::Resized(_) => {
-            state.track_window(window);
-            state.set_background(in_background(window, None));
+            if let Some(state) = &state {
+                state.track_window(window);
+            }
+            app.set_background(in_background(window, None));
         }
         WindowEvent::Focused(focused) => {
-            state.set_background(in_background(window, Some(*focused)));
+            if *focused {
+                app.window_focused(window.label());
+            }
+            app.set_background(in_background(window, Some(*focused)));
         }
-        WindowEvent::CloseRequested { .. } => state.remember_window(window),
+        WindowEvent::CloseRequested { .. } => {
+            if let Some(state) = &state {
+                state.remember_window(window);
+            }
+        }
         _ => {}
     }
 }
@@ -319,14 +339,17 @@ fn in_background(window: &Window, focused: Option<bool>) -> bool {
 }
 
 fn on_run_event(app: &AppHandle, event: RunEvent) {
-    let Some(state) = app.try_state::<Arc<AppState>>() else {
+    let Some(state) = app.try_state::<Arc<App>>() else {
         return;
     };
     match event {
         // `exit` (as after `--exit-after-paint`) skips CloseRequested.
         RunEvent::ExitRequested { .. } => {
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                state.remember_window(&window.as_ref().window());
+            if let (Some(window), Some(main)) = (
+                app.get_webview_window(MAIN_WINDOW),
+                state.window(MAIN_WINDOW),
+            ) {
+                main.remember_window(&window.as_ref().window());
             }
         }
         RunEvent::Exit => state.flush(),

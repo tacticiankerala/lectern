@@ -16,10 +16,10 @@ use lectern_core::library::tree::build_tree;
 use lectern_core::library::{path_key, RootIndex};
 
 use super::sync::{lock, write};
-use super::AppState;
+use super::WindowState;
 use crate::events::UiEvent;
 
-impl AppState {
+impl WindowState {
     /// Scans `root` on a thread of its own once the first document is on screen; when a scan is
     /// already running, it runs once more after. `done` hears when the root next has a tree or
     /// turns out unavailable, whichever scan gets there.
@@ -43,7 +43,7 @@ impl AppState {
             .name("lectern-scan".to_owned())
             .spawn(move || {
                 // Walking competes with WebView2 for the CPU, so scans wait for first paint.
-                this.ui_shown.wait(this.timings.scan_delay);
+                this.ui_shown.wait(this.app.timings.scan_delay);
                 loop {
                     this.scan_once(&path, gen);
                     if this.scan_finished(&path, gen) {
@@ -64,7 +64,7 @@ impl AppState {
         let Some(adhoc) = self.root_is_adhoc(root, gen) else {
             return;
         };
-        if let Err(reason) = probe_root(root, self.timings.probe) {
+        if let Err(reason) = probe_root(root, self.app.timings.probe) {
             log::warn!("library root {} is unavailable: {reason}", root.display());
             self.set_root_state(root, gen, RootState::Unavailable { reason });
             self.notify_waiters(root, gen);
@@ -75,11 +75,11 @@ impl AppState {
             if self.take_needs_watch(root, gen) {
                 self.watch_user_roots();
             }
-            // Its canonical host (`S:\…` is `\\nas\share\…`) is the user's too. The probe
-            // proved the share answers, so this won't stall.
+            // Its canonical host (`S:\…` is `\\nas\share\…`) is the user's too, in every
+            // window. The probe proved the share answers, so this won't stall.
             if let Ok(canonical) = fs::canonicalize(root) {
-                if write(&self.trust).learn_root(root, &canonical) {
-                    self.index_changed(None);
+                if write(&self.app.trust).learn_root(root, &canonical) {
+                    self.app.forget_renders();
                 }
             }
         }
@@ -116,12 +116,12 @@ impl AppState {
             started.elapsed() - walked
         );
         if !adhoc {
-            if let Err(e) = save_snapshot(&self.snapshot_dir, &index) {
+            if let Err(e) = save_snapshot(&self.app.snapshot_dir, &index) {
                 log::warn!("couldn't save the snapshot of {}: {e}", root.display());
             }
         }
         if self.install(root, gen, index, RootState::Ready) {
-            self.host.emit(UiEvent::IndexReady(root.to_path_buf()));
+            self.app.host.emit(UiEvent::IndexReady(root.to_path_buf()));
         }
     }
 
@@ -197,7 +197,7 @@ impl AppState {
         self.index_changed(None);
         self.refresh_current(Some(root), files_changed);
         if let Some(payload) = payload {
-            self.host.emit(UiEvent::LibraryUpdated(payload));
+            self.app.host.emit(UiEvent::LibraryUpdated(payload));
         }
         true
     }
@@ -216,7 +216,7 @@ impl AppState {
             (!adhoc).then(|| lib.payload())
         };
         if let Some(payload) = payload {
-            self.host.emit(UiEvent::LibraryUpdated(payload));
+            self.app.host.emit(UiEvent::LibraryUpdated(payload));
         }
     }
 }

@@ -24,7 +24,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Error, Update, UpdaterExt};
 
 use crate::app::MAIN_WINDOW;
-use crate::state::AppState;
+use crate::state::App;
 use crate::{shell, win};
 
 /// Where a portable copy sends the user for a new version.
@@ -167,9 +167,12 @@ async fn find(app: &AppHandle) -> Result<Option<Update>, String> {
 /// unlike the updater's default (`cleanup_before_exit`, which hides the window), nothing here
 /// needs undoing if the installer then fails to start.
 fn save_before_exit(app: &AppHandle) {
-    if let Some(state) = app.try_state::<Arc<AppState>>() {
-        if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-            state.remember_window(&window.as_ref().window());
+    if let Some(state) = app.try_state::<Arc<App>>() {
+        if let (Some(window), Some(main)) = (
+            app.get_webview_window(MAIN_WINDOW),
+            state.window(MAIN_WINDOW),
+        ) {
+            main.remember_window(&window.as_ref().window());
         }
         state.flush();
     }

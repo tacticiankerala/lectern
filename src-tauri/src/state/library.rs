@@ -1,5 +1,5 @@
-//! The library: the user's roots and the ad-hoc root, their index, and keeping them in line with
-//! the settings.
+//! A window's library: its workspace's roots and the ad-hoc root, their index, and keeping them
+//! in line with the workspace.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -17,8 +17,8 @@ use lectern_core::library::{path_key, LibraryIndex};
 use lectern_core::search::FileHits;
 
 use super::paths::{is_under, normalize_root, path_string, root_name, same_path};
-use super::sync::{lock, read, write};
-use super::{AppState, CACHE_CAP};
+use super::sync::lock;
+use super::{WindowState, CACHE_CAP};
 use crate::events::UiEvent;
 
 /// A library root as the app tracks it.
@@ -45,7 +45,7 @@ pub(super) struct Root {
 
 #[derive(Default)]
 pub(super) struct Library {
-    /// The user's roots in settings order, then the ad-hoc root.
+    /// The workspace's roots in order, then the ad-hoc root.
     pub(super) roots: Vec<Root>,
     /// Every root with an index, swapped whole on each change so renders never wait.
     pub(super) index: Arc<LibraryIndex>,
@@ -130,7 +130,7 @@ impl Library {
     }
 }
 
-impl AppState {
+impl WindowState {
     /// Loads the library snapshots, then (once the first document is on screen) starts the
     /// watcher and scans every root. Runs on a thread of its own.
     pub fn start_library(self: &Arc<Self>) {
@@ -149,7 +149,7 @@ impl AppState {
         let started = Instant::now();
         // Snapshots are local files; a root itself is touched only after its probe answers.
         for (root, gen) in &roots {
-            if let Some(index) = load_snapshot(&self.snapshot_dir, root) {
+            if let Some(index) = load_snapshot(&self.app.snapshot_dir, root) {
                 self.install(root, *gen, index, RootState::Scanning);
             }
         }
@@ -160,7 +160,7 @@ impl AppState {
         );
         self.snapshots_loaded.open();
         // Like the scans, the watcher starts once the first document is on screen.
-        self.ui_shown.wait(self.timings.scan_delay);
+        self.ui_shown.wait(self.app.timings.scan_delay);
         self.watch_user_roots();
         for (root, _) in &roots {
             self.request_scan(root, None);
@@ -220,20 +220,19 @@ impl AppState {
         }
     }
 
+    /// Adds `path` to the workspace's roots, unless it is one already, and starts it. A blank
+    /// window has no workspace to keep it in.
     pub(super) fn insert_root(self: &Arc<Self>, path: &str, wait: bool) -> Result<(), String> {
         let root = normalize_root(path)?;
-        let added = {
-            let mut settings = write(&self.settings);
-            let known = settings
-                .library_roots
-                .iter()
-                .any(|r| same_path(Path::new(r), &root));
-            if !known {
-                settings.library_roots.push(path_string(&root));
-                self.saver.settings(&settings);
-            }
-            !known
-        };
+        let added = self.workspace_id().is_some_and(|id| {
+            self.app.change_workspace(&id, |ws| {
+                let known = ws.roots.iter().any(|r| same_path(Path::new(r), &root));
+                if !known {
+                    ws.roots.push(path_string(&root));
+                }
+                !known
+            })
+        });
         if added {
             for (root, gen) in self.sync_roots() {
                 self.start_root(&root, gen, wait);
@@ -244,12 +243,13 @@ impl AppState {
     }
 
     pub fn remove_root(&self, path: &str) -> LibraryPayload {
-        {
-            let mut settings = write(&self.settings);
-            settings
-                .library_roots
-                .retain(|r| !same_path(Path::new(r), Path::new(path)));
-            self.saver.settings(&settings);
+        if let Some(id) = self.workspace_id() {
+            self.app.change_workspace(&id, |ws| {
+                let before = ws.roots.len();
+                ws.roots
+                    .retain(|r| !same_path(Path::new(r), Path::new(path)));
+                ws.roots.len() != before
+            });
         }
         self.sync_roots();
         self.watch_user_roots();
@@ -270,23 +270,19 @@ impl AppState {
             }
         };
         if let Some(payload) = payload {
-            self.host.emit(UiEvent::LibraryUpdated(payload));
+            self.app.host.emit(UiEvent::LibraryUpdated(payload));
             let (done, finished) = mpsc::channel();
             self.request_scan(&root, Some(done));
-            let _ = finished.recv_timeout(self.timings.root);
+            let _ = finished.recv_timeout(self.app.timings.root);
         }
         self.library_payload()
     }
 
-    /// Brings the tracked roots in line with the settings: new ones are added (and returned, to
+    /// Brings the tracked roots in line with the workspace: new ones are added (and returned, to
     /// be started), removed ones dropped with their indexes. An ad-hoc root that becomes a user
     /// root is promoted, keeping its index; one that a user root now covers is dropped.
     pub(super) fn sync_roots(&self) -> Vec<(PathBuf, u64)> {
-        let wanted: Vec<PathBuf> = read(&self.settings)
-            .library_roots
-            .iter()
-            .map(PathBuf::from)
-            .collect();
+        let wanted: Vec<PathBuf> = self.roots().iter().map(PathBuf::from).collect();
         let mut lib = lock(&self.library);
         let mut changed =
             lib.remove_where(|r| !r.adhoc && !wanted.iter().any(|w| same_path(w, &r.path)));
@@ -320,10 +316,11 @@ impl AppState {
         };
         lib.roots.sort_by_key(order);
         drop(lib);
-        // The roots' hosts are trusted; images on them render once the cache is cleared.
-        changed |= self.reconfigure_trust();
-        write(&self.assets).set_roots(&wanted);
-        if changed {
+        // Every workspace's roots' hosts are trusted, and their images served; images on them
+        // render once the caches are cleared, in every window.
+        if self.app.reconfigure_trust() {
+            self.app.forget_renders();
+        } else if changed {
             self.index_changed(None);
         }
         added
@@ -332,13 +329,13 @@ impl AppState {
     /// Shows a new root's snapshot, if it has one, then scans it; with `wait`, until its tree is
     /// ready or it turns out unavailable, for a few seconds at most.
     pub(super) fn start_root(self: &Arc<Self>, root: &Path, gen: u64, wait: bool) {
-        if let Some(index) = load_snapshot(&self.snapshot_dir, root) {
+        if let Some(index) = load_snapshot(&self.app.snapshot_dir, root) {
             self.install(root, gen, index, RootState::Scanning);
         }
         let (done, finished) = mpsc::channel();
         self.request_scan(root, wait.then_some(done));
         if wait {
-            let _ = finished.recv_timeout(self.timings.root);
+            let _ = finished.recv_timeout(self.app.timings.root);
         }
     }
 

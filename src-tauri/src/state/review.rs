@@ -17,7 +17,7 @@ use lectern_core::review::{fingerprint, is_sidecar_name, iso_utc, sidecar_path, 
 
 use super::doc::{read_text, render_text};
 use super::sync::{lock, read};
-use super::{trust, AppState};
+use super::{trust, WindowState};
 
 const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
@@ -40,7 +40,7 @@ impl Target {
     }
 }
 
-impl AppState {
+impl WindowState {
     /// The open note's comments. Without a sidecar the note isn't read. A file that can't take
     /// comments (see `review_target`) shows none, read-only, and nothing is read.
     pub fn load_review(&self, path: &str) -> Result<ReviewPayload, String> {
@@ -81,7 +81,7 @@ impl AppState {
 
     /// Whether review comments are on.
     pub(super) fn reviews_on(&self) -> bool {
-        read(&self.settings).review_comments
+        read(&self.app.settings).review_comments
     }
 
     /// `path` as a note a review command may change the sidecar of: the open note (see
@@ -140,7 +140,7 @@ impl AppState {
         };
         let index = self.index();
         let mapper = self.mapper();
-        let hosts = read(&self.trust).hosts();
+        let hosts = read(&self.app.trust).hosts();
         let with_index = (!index.roots.is_empty()).then_some(&*index);
         let render = |md: &str| render_text(&target.note, md, with_index, &mapper, &hosts).html;
         build_payload(

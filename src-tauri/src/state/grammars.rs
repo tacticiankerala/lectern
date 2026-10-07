@@ -1,5 +1,6 @@
 //! The highlighter's compiled grammars while the window is in the background: released after a
-//! while there, and warmed again on return, the document on screen's languages first.
+//! while there, and warmed again on return, the languages of the document on screen in the
+//! focused window first.
 
 use std::sync::Weak;
 use std::time::Instant;
@@ -8,10 +9,10 @@ use lectern_core::render::code_languages;
 use lectern_core::render::highlight::{self, Grammars};
 
 use super::sync::lock;
-use super::AppState;
+use super::{App, WindowState};
 
-/// The process's grammars, with the document on screen for the re-warm.
-pub(super) struct AppGrammars(pub(super) Weak<AppState>);
+/// The process's grammars, with the documents on screen for the re-warm.
+pub(super) struct AppGrammars(pub(super) Weak<App>);
 
 impl Grammars for AppGrammars {
     fn last_used(&self) -> Option<Instant> {
@@ -26,18 +27,38 @@ impl Grammars for AppGrammars {
         let first = self
             .0
             .upgrade()
-            .map(|state| state.current_languages())
+            .map(|app| app.current_languages())
             .unwrap_or_default();
         highlight::warm_up_in_background(&first);
     }
 }
 
-impl AppState {
+impl App {
     /// The window went to the background (unfocused or minimised) or came back.
     pub fn set_background(&self, background: bool) {
         self.background.set_background(background);
     }
 
+    /// The window `label` was focused: its document's languages are the first to warm again.
+    pub fn window_focused(&self, label: &str) {
+        *lock(&self.focused) = Some(label.to_owned());
+    }
+
+    /// The languages of the code blocks in the document on screen in the focused window, else
+    /// in any window.
+    fn current_languages(&self) -> Vec<String> {
+        let focused = lock(&self.focused).clone();
+        let windows = self.windows();
+        windows
+            .iter()
+            .find(|window| focused.as_ref() == Some(&window.label))
+            .or_else(|| windows.first())
+            .map(|window| window.current_languages())
+            .unwrap_or_default()
+    }
+}
+
+impl WindowState {
     /// The languages of the code blocks in the document on screen, in order of first use.
     pub(super) fn current_languages(&self) -> Vec<String> {
         lock(&self.current)
@@ -53,8 +74,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use lectern_core::library::pathmap::PathMapper;
     use lectern_core::render::highlight::StartupWarmUp;
 
+    use crate::state::doc::render_file;
+    use crate::state::open_queue::OpenQueue;
     use crate::state::paths::path_string;
     use crate::state::test_support::*;
 
@@ -73,6 +97,29 @@ mod tests {
         assert!(f.state.current_languages().is_empty());
     }
 
+    /// Coming back from the background, the grammars of the focused window's document are warmed
+    /// first; before any window has had the focus, any window's.
+    #[test]
+    fn the_rewarm_starts_with_the_focused_windows_document() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let ruby = f.dir.file("one/tide.md", "```ruby\na\n```\n");
+        let jsx = f.dir.file("two/chart.md", "```jsx\n<b />\n```\n");
+        let mapper = PathMapper::default();
+        let rendered = render_file(&ruby, &mapper, &[]);
+        f.state
+            .make_current(f.state.next_seq(), &ruby, rendered.as_ref().ok());
+        assert_eq!(f.app.current_languages(), ["ruby"]);
+        f.app
+            .add_window("second", None, Arc::new(OpenQueue::default()), None);
+        let second = f.app.window("second").unwrap();
+        let rendered = render_file(&jsx, &mapper, &[]);
+        second.make_current(second.next_seq(), &jsx, rendered.as_ref().ok());
+        f.app.window_focused("second");
+        assert_eq!(f.app.current_languages(), ["jsx"]);
+        f.app.window_focused("main");
+        assert_eq!(f.app.current_languages(), ["ruby"]);
+    }
+
     #[test]
     fn the_first_paint_starts_the_warm_up_when_boot_had_no_document() {
         let started = Arc::new(AtomicUsize::new(0));
@@ -83,9 +130,9 @@ mod tests {
         let f = fixture_with_warm(profile(&[]), FakeHost::default(), Arc::clone(&warm));
         warm.boot_finished(false);
         assert_eq!(started.load(Ordering::SeqCst), 0);
-        f.state.perf_mark("doc-switch", Some(1.0));
+        f.app.perf_mark("doc-switch", Some(1.0));
         assert_eq!(started.load(Ordering::SeqCst), 0);
-        f.state.perf_mark("first-paint", None);
+        f.app.perf_mark("first-paint", None);
         assert_eq!(started.load(Ordering::SeqCst), 1);
     }
 }

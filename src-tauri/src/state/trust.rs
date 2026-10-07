@@ -1,12 +1,13 @@
 //! Which network hosts Lectern may reach. Windows answers any SMB host with the user's NTLM
 //! credentials, so a path that comes from a note may only lead to a host the user chose: a
-//! library root's (its canonical form included), a path mapping's, WSL's, or one the user opened a
-//! file from by launching Lectern with it. Local paths are always fine.
+//! library root's in any workspace, open or closed (its canonical form included), a path
+//! mapping's, WSL's, or one the user opened a file from by launching Lectern with it. Local paths
+//! are always fine.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use lectern_core::ipc::Settings;
+use lectern_core::ipc::PathMapping;
 use lectern_core::library::path_key;
 use lectern_core::library::pathmap::unc_host;
 
@@ -25,28 +26,23 @@ pub struct Trust {
 }
 
 impl Trust {
-    pub fn new(settings: &Settings) -> Self {
+    pub fn new(roots: &[String], mappings: &[PathMapping]) -> Self {
         let mut trust = Self::default();
-        trust.configure(settings);
+        trust.configure(roots, mappings);
         trust
     }
 
-    /// Takes the roots and mappings from `settings`, forgetting the canonical hosts of roots that
-    /// are gone. True when the trusted hosts changed.
-    pub fn configure(&mut self, settings: &Settings) -> bool {
+    /// Takes the hosts of `roots` and of the mappings' targets, forgetting the canonical hosts of
+    /// roots that are gone. True when the trusted hosts changed.
+    pub fn configure(&mut self, roots: &[String], mappings: &[PathMapping]) -> bool {
         let before = self.hosts();
-        self.configured = settings
-            .library_roots
+        self.configured = roots
             .iter()
-            .chain(settings.path_mappings.iter().map(|m| &m.to))
+            .chain(mappings.iter().map(|m| &m.to))
             .filter_map(|path| network_host(path))
             .chain(ALWAYS.iter().map(|host| (*host).to_owned()))
             .collect();
-        let roots: HashSet<String> = settings
-            .library_roots
-            .iter()
-            .map(|root| path_key(Path::new(root)))
-            .collect();
+        let roots: HashSet<String> = roots.iter().map(|root| path_key(Path::new(root))).collect();
         self.canonical.retain(|root, _| roots.contains(root));
         self.hosts() != before
     }
@@ -113,29 +109,26 @@ pub fn refusal(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lectern_core::ipc::PathMapping;
     use std::path::PathBuf;
 
-    fn settings(roots: &[&str], mapping_targets: &[&str]) -> Settings {
-        Settings {
-            library_roots: roots.iter().map(|r| (*r).to_owned()).collect(),
-            path_mappings: mapping_targets
-                .iter()
-                .map(|to| PathMapping {
-                    from: "/home/me/shared".to_owned(),
-                    to: (*to).to_owned(),
-                })
-                .collect(),
-            ..Settings::default()
-        }
+    fn trusting(roots: &[&str], mapping_targets: &[&str]) -> Trust {
+        let roots: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
+        let mappings: Vec<PathMapping> = mapping_targets
+            .iter()
+            .map(|to| PathMapping {
+                from: "/home/me/shared".to_owned(),
+                to: (*to).to_owned(),
+            })
+            .collect();
+        Trust::new(&roots, &mappings)
     }
 
     #[test]
     fn roots_mappings_and_wsl_are_trusted_and_nothing_else() {
-        let trust = Trust::new(&settings(
+        let trust = trusting(
             &[r"\\NAS\Share\dev", r"S:\Notes\My Vault\dev"],
             &[r"\\nas2\notes"],
-        ));
+        );
         assert!(trust.allows(r"\\nas\share\dev\a.md"));
         assert!(trust.allows(r"\\NAS2\notes\b.png"));
         assert!(trust.allows(r"\\wsl.localhost\Ubuntu\home\a.md"));
@@ -149,20 +142,20 @@ mod tests {
 
     #[test]
     fn a_roots_canonical_host_is_trusted_until_the_root_goes() {
-        let mut trust = Trust::new(&settings(&[r"S:\Notes\My Vault\dev"], &[]));
+        let mut trust = trusting(&[r"S:\Notes\My Vault\dev"], &[]);
         let root = Path::new(r"S:\Notes\My Vault\dev");
         assert!(!trust.allows(r"\\nas\share\x.png"));
         let canonical = PathBuf::from(r"\\?\UNC\nas\share\Notes\My Vault\dev");
         assert!(trust.learn_root(root, &canonical));
         assert!(!trust.learn_root(root, &canonical));
         assert!(trust.allows(r"\\nas\share\x.png"));
-        assert!(trust.configure(&settings(&[], &[])));
+        assert!(trust.configure(&[], &[]));
         assert!(!trust.allows(r"\\nas\share\x.png"));
     }
 
     #[test]
     fn a_local_roots_canonical_form_trusts_no_host() {
-        let mut trust = Trust::new(&settings(&[r"C:\notes"], &[]));
+        let mut trust = trusting(&[r"C:\notes"], &[]);
         assert!(!trust.learn_root(Path::new(r"C:\notes"), Path::new(r"\\?\C:\notes")));
         assert!(!trust.allows(r"\\?\C:\x"));
         assert_eq!(trust.hosts(), ["wsl$", "wsl.localhost"]);
@@ -170,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_host_the_user_launched_a_file_from_is_trusted() {
-        let mut trust = Trust::new(&settings(&[], &[]));
+        let mut trust = trusting(&[], &[]);
         trust.opened_by_user(Path::new(r"\\fileserver\docs\plan.md"));
         assert!(trust.allows(r"\\FileServer\docs\other.md"));
         assert!(!trust.allows(r"\\elsewhere\docs\other.md"));

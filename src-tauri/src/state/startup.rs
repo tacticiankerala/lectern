@@ -14,23 +14,25 @@ use lectern_core::ipc::{OpenRequest, OpenResult, StartupPayload, UserOpen};
 use super::doc::Early;
 use super::paths::path_string;
 use super::sync::{lock, write};
-use super::AppState;
+use super::WindowState;
 use crate::events::UiEvent;
 
-impl AppState {
-    /// The startup payload. The document rendered during boot becomes the initial document,
-    /// unless a second launch asked for another one meanwhile.
+impl WindowState {
+    /// The window's startup payload. For the first window, the document rendered during boot
+    /// becomes the initial document, unless a second launch asked for another one meanwhile.
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
-        self.perf.mark("webview-ready", None);
-        if !self.snapshots_loaded.wait(self.timings.snapshots) {
+        self.app.perf.mark("webview-ready", None);
+        if !self.snapshots_loaded.wait(self.app.timings.snapshots) {
             log::warn!("startup went ahead before the library snapshots loaded");
         }
         let seq = self.open_seq.load(Ordering::SeqCst);
-        let weak = Arc::downgrade(self);
-        let early = self.early.take_or_later(self.timings.early, move |early| {
-            if let Some(state) = weak.upgrade() {
-                state.early_landed_late(early, seq);
-            }
+        let early = self.early.as_ref().and_then(|slot| {
+            let weak = Arc::downgrade(self);
+            slot.take_or_later(self.app.timings.early, move |early| {
+                if let Some(state) = weak.upgrade() {
+                    state.early_landed_late(early, seq);
+                }
+            })
         });
         // A launch already queued supersedes the boot document, which is then never opened.
         let superseded = self.opens.has_pending();
@@ -44,19 +46,19 @@ impl AppState {
                 initial = Some(self.open_document(&path_string(&doc)));
             }
         }
-        let recent = lock(&self.state).reading.recent.clone();
+        let recent = self.recent();
         let payload = StartupPayload {
             settings: self.settings(),
             library: lock(&self.library).payload(),
             recent,
             initial,
             version: lectern_core::version().to_owned(),
-            portable: self.portable,
-            startup_notice: lock(&self.notice).take(),
+            portable: self.app.portable,
+            startup_notice: lock(&self.app.notice).take(),
             workspace: None,
             primary: true,
         };
-        self.perf.mark("startup-ready", None);
+        self.app.perf.mark("startup-ready", None);
         payload
     }
 
@@ -70,7 +72,7 @@ impl AppState {
         }
         let doc = early.doc.filter(|_| !superseded)?;
         if doc.from_args {
-            write(&self.trust).opened_by_user(&doc.path);
+            write(&self.app.trust).opened_by_user(&doc.path);
         }
         match doc.outcome {
             Err(error) if !doc.from_args => {
@@ -94,10 +96,10 @@ impl AppState {
             return;
         }
         if doc.from_args {
-            write(&self.trust).opened_by_user(&doc.path);
+            write(&self.app.trust).opened_by_user(&doc.path);
         }
         log::info!("the boot render missed startup; asking the UI to open it");
-        self.host.emit(UiEvent::OpenRequest(OpenRequest {
+        self.app.host.emit(UiEvent::OpenRequest(OpenRequest {
             path: path_string(&doc.path),
             t0_ms: None,
         }));
@@ -107,7 +109,7 @@ impl AppState {
     /// holds one) and opens its README, if it has one; anything else is opened as given. The user
     /// chose the path, so its network host is trusted. Touches the file system.
     pub(super) fn resolve_target(self: &Arc<Self>, path: &Path) -> Option<PathBuf> {
-        write(&self.trust).opened_by_user(path);
+        write(&self.app.trust).opened_by_user(path);
         match fs::metadata(path) {
             Ok(meta) if meta.is_dir() => {
                 self.add_folder(path);
@@ -153,7 +155,7 @@ impl AppState {
         // Counts as an open, so a boot render landing late never overrides it.
         self.next_seq();
         if let Some(doc) = self.resolve_target(Path::new(&request.path)) {
-            self.host.emit(UiEvent::OpenRequest(OpenRequest {
+            self.app.host.emit(UiEvent::OpenRequest(OpenRequest {
                 path: path_string(&doc),
                 t0_ms: request.t0_ms,
             }));
@@ -161,9 +163,9 @@ impl AppState {
     }
 }
 
-/// The thread behind `AppState::forward`: requests are resolved in order, one at a time, so the
+/// The thread behind `WindowState::forward`: requests are resolved in order, one at a time, so the
 /// last launch still wins when several arrive together.
-pub(super) fn spawn_forwarder(state: Weak<AppState>) -> Sender<OpenRequest> {
+pub(super) fn spawn_forwarder(state: Weak<WindowState>) -> Sender<OpenRequest> {
     let (tx, rx) = mpsc::channel::<OpenRequest>();
     let spawned = thread::Builder::new()
         .name("lectern-forward".to_owned())
@@ -389,10 +391,7 @@ mod tests {
         // The README still renders for the UI, which drops the stale answer, but B stays current.
         assert!(matches!(opened.doc, Some(OpenResult::Ok { .. })));
         assert_eq!(current(&f).0, newer);
-        assert_eq!(
-            lock(&f.state.state).reading.last_doc.as_deref(),
-            Some(path_string(&newer).as_str())
-        );
+        assert_eq!(last_doc(&f), Some(path_string(&newer)));
         let last_watched = lock(&f.watched)
             .iter()
             .rev()

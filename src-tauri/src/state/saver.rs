@@ -1,4 +1,4 @@
-//! Writing settings and reading state to disk, debounced, on a thread of its own.
+//! Writing the workspaces, settings and reading state to disk, debounced, on a thread of its own.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -7,18 +7,20 @@ use std::time::{Duration, Instant};
 
 use lectern_core::ipc::Settings;
 use lectern_core::store::write_json_atomic;
+use lectern_core::workspace::{Workspaces, WORKSPACES_FILE};
 
 use super::profile::{StateFile, SETTINGS_FILE, STATE_FILE};
 
 pub(super) const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
-/// Writes settings and state on a thread of its own, a moment after the last change. A saver
-/// made with `persist` false writes nothing.
+/// Writes the workspaces, settings and state on a thread of its own, a moment after the last
+/// change. A saver made with `persist` false writes nothing.
 pub(super) struct Saver {
     tx: Option<Sender<Save>>,
 }
 
 pub(super) enum Save {
+    Workspaces(Box<Workspaces>),
     Settings(Box<Settings>),
     State(Box<StateFile>),
     Flush(Sender<()>),
@@ -45,6 +47,10 @@ impl Saver {
         }
     }
 
+    pub(super) fn workspaces(&self, workspaces: &Workspaces) {
+        self.send(Save::Workspaces(Box::new(workspaces.clone())));
+    }
+
     pub(super) fn settings(&self, settings: &Settings) {
         self.send(Save::Settings(Box::new(settings.clone())));
     }
@@ -65,6 +71,7 @@ impl Saver {
 }
 
 pub(super) fn save_loop(dir: &Path, rx: &Receiver<Save>) {
+    let mut workspaces: Option<Box<Workspaces>> = None;
     let mut settings: Option<Box<Settings>> = None;
     let mut state: Option<Box<StateFile>> = None;
     let mut due: Option<Instant> = None;
@@ -74,7 +81,7 @@ pub(super) fn save_loop(dir: &Path, rx: &Receiver<Save>) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => {
-                    write_pending(dir, &mut settings, &mut state);
+                    write_pending(dir, &mut workspaces, &mut settings, &mut state);
                     return;
                 }
             },
@@ -84,16 +91,17 @@ pub(super) fn save_loop(dir: &Path, rx: &Receiver<Save>) {
             },
         };
         match message {
+            Some(Save::Workspaces(w)) => workspaces = Some(w),
             Some(Save::Settings(s)) => settings = Some(s),
             Some(Save::State(s)) => state = Some(s),
             Some(Save::Flush(ack)) => {
-                write_pending(dir, &mut settings, &mut state);
+                write_pending(dir, &mut workspaces, &mut settings, &mut state);
                 due = None;
                 let _ = ack.send(());
                 continue;
             }
             None => {
-                write_pending(dir, &mut settings, &mut state);
+                write_pending(dir, &mut workspaces, &mut settings, &mut state);
                 due = None;
                 continue;
             }
@@ -102,11 +110,19 @@ pub(super) fn save_loop(dir: &Path, rx: &Receiver<Save>) {
     }
 }
 
+/// Writes what is pending: the workspaces, then the settings that mirror the first of them, then
+/// the reading state.
 pub(super) fn write_pending(
     dir: &Path,
+    workspaces: &mut Option<Box<Workspaces>>,
     settings: &mut Option<Box<Settings>>,
     state: &mut Option<Box<StateFile>>,
 ) {
+    if let Some(workspaces) = workspaces.take() {
+        if let Err(e) = write_json_atomic(&dir.join(WORKSPACES_FILE), &*workspaces) {
+            log::warn!("couldn't save the workspaces: {e}");
+        }
+    }
     if let Some(settings) = settings.take() {
         if let Err(e) = write_json_atomic(&dir.join(SETTINGS_FILE), &*settings) {
             log::warn!("couldn't save the settings: {e}");

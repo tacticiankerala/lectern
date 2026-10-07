@@ -28,7 +28,7 @@ use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
 
 use crate::app::{Dirs, Launch};
-use crate::state::{Early, EarlyDoc, Profile, Slot, Trust};
+use crate::state::{Early, EarlyDoc, Profile, Slot};
 
 fn main() {
     let args = Args::parse(std::env::args());
@@ -90,10 +90,11 @@ pub(crate) fn start_boot(
         .expect("couldn't start the boot thread");
 }
 
-/// Starts logging, loads the settings for setup, then reads and renders the document to open
-/// with the user's path mappings and no index yet: the one given on the command line (a folder's
-/// README for a folder), else the last one open, unless that is on a network host the user no
-/// longer trusts. True when it had a document to render, whether or not reading it worked.
+/// Starts logging, loads the settings and workspaces for setup, then reads and renders the
+/// document to open with the user's path mappings and no index yet: the one given on the command
+/// line (a folder's README for a folder), else the last one open in the workspace the first window
+/// shows, unless that is on a network host the user no longer trusts. True when it had a document
+/// to render, whether or not reading it worked.
 fn boot(
     dirs: &Dirs,
     arg: Option<PathBuf>,
@@ -104,12 +105,9 @@ fn boot(
     logging::init_logging(&dirs.logs);
     let profile = state::load_profile(&dirs.config, win::wsl_default_distro());
     let mapper = state::mapper_for(&profile.settings, profile.wsl_distro.clone());
-    let mut trust = Trust::new(&profile.settings);
+    let mut trust = profile.trust();
     let last_doc = profile
-        .state
-        .reading
-        .last_doc
-        .clone()
+        .last_doc()
         .filter(|doc| trust.allows(doc))
         .map(PathBuf::from);
     profile_slot.fill(profile);
