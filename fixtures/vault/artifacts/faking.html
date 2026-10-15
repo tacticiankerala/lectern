@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Faked load</title>
+</head>
+<body>
+<h1>Faked load</h1>
+<p>An invented page that, once loaded, fakes its own DOMContentLoaded and load, then leaves for the other page.</p>
+<script>
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      document.dispatchEvent(new Event("DOMContentLoaded"));
+      window.dispatchEvent(new Event("load"));
+    }, 200);
+    setTimeout(function () {
+      location.href = "other.html";
+    }, 600);
+  });
+</script>
+</body>
+</html>

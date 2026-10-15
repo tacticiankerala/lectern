@@ -32,8 +32,14 @@
 //   the note on screen only.
 // - In focus mode the panel is hidden: the dots and the adding buttons hide too (comments.css) and
 //   clicks on highlighted text do nothing; the highlights stay.
+// - An HTML page takes comments on the text its bridge reports (comments-page.ts), with no dots or
+//   "+": its comments load only once it has reported its text (the Comments tab says they are
+//   loading until then), and again when its text changes while it has comments to find in it.
+//   Its bridge paints the highlights inside its frame, says when marked text is clicked, and
+//   scrolls to a comment's text.
 import type { Backend } from "./backend";
 import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
+import { pageSpan, type PageSurface } from "./comments-page";
 import {
   agentEntryCount,
   copyCount,
@@ -54,9 +60,11 @@ import {
   type TextIndex,
 } from "./comments-text";
 import { h, samePath } from "./dom";
+import type { Span } from "./find";
 import type { CommentView } from "./generated/CommentView";
 import type { DocChanged } from "./generated/DocChanged";
 import type { EntryView } from "./generated/EntryView";
+import type { PageBlock } from "./generated/PageBlock";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { RightPanel } from "./right-panel";
@@ -80,6 +88,12 @@ export interface CommentsHost {
   follow: (a: HTMLAnchorElement) => void;
   /** Calls `cb` whenever the document area re-renders; returns the unsubscribe. */
   onDoc: (cb: () => void) => () => void;
+  /** Whether the document on screen is an HTML page, whose comments go on its bridge's text. */
+  isPage: () => boolean;
+  /** The HTML page on screen, once its session has started; null for anything else. */
+  page: () => PageSurface | null;
+  /** Calls `cb` whenever the HTML page on screen reports its text; returns the unsubscribe. */
+  onPage: (cb: () => void) => () => void;
   /** Whether comments show (the feature on, and not hidden by the header toggle). */
   visible: () => boolean;
   /** Whether the right panel shows. */
@@ -95,6 +109,9 @@ export interface CommentsHost {
 }
 
 const EMPTY = "No comments yet. Select text in the note, or hover a paragraph and press +.";
+const EMPTY_PAGE = "No comments yet. Select text in the page to comment on it.";
+/** What a page's Comments tab says until the page has reported its text. */
+const LOADING = "Loading comments…";
 /** Where a card scrolled to lands below the pane's top, in pixels. */
 const CARD_GAP = 12;
 /** How long the blocks a card went to stay flashed, in ms: its animation's (comments.css). */
@@ -110,6 +127,15 @@ export class CommentsController {
   private shown: boolean;
   /** Where each marked comment's text is in the note, by id. */
   private readonly ranges = new Map<number, Range[]>();
+  /** Where each marked comment's text is in the HTML page on screen, by id. */
+  private readonly spans = new Map<number, Span>();
+  /** A load came while the HTML page on screen hadn't reported its text: it goes once it has. */
+  private pageWaiting = false;
+  /**
+   * How many times the HTML page on screen has reported its text: a load sent with older text
+   * goes again.
+   */
+  private pageRevision = 0;
   /** The visible text of the note on screen, built when first needed after its render. */
   private index: TextIndex | null = null;
   private focused: number | null = null;
@@ -218,6 +244,7 @@ export class CommentsController {
       },
       readOnly: () => this.review?.readOnly ?? null,
       textIndex: () => this.docIndex(),
+      page: () => this.readyPage(),
       perform: (op, path) => this.perform(op, path),
       showing: (path) => this.showing(path),
       ids: () => this.review?.comments.map((c) => c.id) ?? [],
@@ -240,6 +267,9 @@ export class CommentsController {
       }),
       host.onDoc(() => {
         this.onDoc();
+      }),
+      host.onPage(() => {
+        this.onPage();
       }),
     );
     this.syncFilter();
@@ -269,17 +299,38 @@ export class CommentsController {
     if (gen !== this.gen || !this.showing(path)) {
       return;
     }
+    const page = this.pageText();
+    if (page === undefined) {
+      // A page's comments are found in its text: they load once it has reported it (`onPage`).
+      if (!this.pageWaiting) {
+        this.pageWaiting = true;
+        this.render();
+      }
+      return;
+    }
+    const waited = this.pageWaiting;
+    this.pageWaiting = false;
+    const revision = this.pageRevision;
     let payload: ReviewPayload;
     try {
-      payload = await this.host.backend.loadReview(path);
+      payload =
+        page === null
+          ? await this.host.backend.loadReview(path)
+          : await this.host.backend.loadReview(path, page);
     } catch (e) {
       if (gen === this.gen && this.showing(path)) {
         this.host.toast(String(e));
+        // Loading no longer.
+        if (waited) this.render();
       }
       return;
     }
     if (gen === this.gen && this.showing(path)) {
       this.apply(payload);
+      // The page's text changed while they loaded: they're found in its newest text.
+      if (page !== null && revision !== this.pageRevision) {
+        void this.load();
+      }
     }
   }
 
@@ -345,6 +396,40 @@ export class CommentsController {
     this.select(id, false);
   }
 
+  /** The text selected in the HTML page on screen changed: the Comment button follows it. */
+  pageSelectionChanged(): void {
+    this.adding.pageSelectionChanged();
+  }
+
+  /**
+   * Esc pressed inside an HTML page's frame, which nothing else took: as Esc in the window,
+   * re-attach mode ends, else the Comment button goes. False when neither was showing.
+   */
+  escape(): boolean {
+    return this.adding.escape();
+  }
+
+  /** The HTML page on screen scrolled, taking its selection away from the Comment button. */
+  pageScrolled(): void {
+    this.adding.pageScrolled();
+  }
+
+  /**
+   * The reader clicked text a comment marks in the HTML page on screen, at `offset`: its card
+   * shows, as a click on a note's highlight does.
+   */
+  pageCommentClicked(offset: number): void {
+    if (!this.shown || this.host.focusMode() || !this.host.isPage()) {
+      return;
+    }
+    for (const [id, span] of this.spans) {
+      if (span.start <= offset && offset <= span.end) {
+        this.reveal(id);
+        return;
+      }
+    }
+  }
+
   /**
    * Applies an operation and shows the review it leaves; a failure is toasted. True if applied.
    * It waits for the loads and operations before it, so answers never apply out of order; one
@@ -405,9 +490,14 @@ export class CommentsController {
     if (!this.showing(path)) {
       return "skipped";
     }
+    // A page that hasn't reported its text sends none, and Rust says why it can't be saved.
+    const page = this.pageText() ?? null;
     let payload: ReviewPayload;
     try {
-      payload = await this.host.backend.reviewOp(path, op);
+      payload =
+        page === null
+          ? await this.host.backend.reviewOp(path, op)
+          : await this.host.backend.reviewOp(path, op, page);
     } catch (e) {
       this.host.toast(String(e));
       return "failed";
@@ -436,6 +526,9 @@ export class CommentsController {
       CSS.highlights.delete("comment");
       CSS.highlights.delete("comment-focus");
     }
+    const page = this.readyPage();
+    page?.clear("comment");
+    page?.clear("comment-focus");
     this.host.panel.commentsPane.replaceChildren();
     this.host.setBadge(0);
     this.host.panel.setCount(0);
@@ -444,6 +537,40 @@ export class CommentsController {
   /** Whether the note at `path` is still the one on screen, for an answer about it. */
   private showing(path: string): boolean {
     return !this.disposed && this.host.docPath() === path;
+  }
+
+  /** The HTML page on screen once it has reported its text; null otherwise. */
+  private readyPage(): PageSurface | null {
+    const page = this.host.isPage() ? this.host.page() : null;
+    return page?.ready ? page : null;
+  }
+
+  /**
+   * What a load or an operation sends of the document on screen besides its path: an HTML page's
+   * text, as its blocks, once it has reported them (undefined until then); null for any other
+   * document, whose text Rust reads from its file.
+   */
+  private pageText(): PageBlock[] | null | undefined {
+    if (!this.host.isPage()) {
+      return null;
+    }
+    const page = this.readyPage();
+    return page ? [...page.blocks] : undefined;
+  }
+
+  /**
+   * The HTML page on screen reported its text, first or changed: the marks go on it, and its
+   * comments load against it when a load waited for it, or when they have text to find again.
+   */
+  private onPage(): void {
+    if (!this.host.isPage()) {
+      return;
+    }
+    this.pageRevision++;
+    this.decorate();
+    if (this.pageWaiting || (this.review?.comments.length ?? 0) > 0) {
+      void this.load();
+    }
   }
 
   /**
@@ -504,6 +631,13 @@ export class CommentsController {
     if (this.edit !== null && !this.editable(this.edit)) {
       this.edit = null;
     }
+    if (this.pageWaiting && this.host.isPage()) {
+      // A page's comments are found in its text, which hasn't come yet.
+      this.head.hidden = true;
+      this.banner.hidden = true;
+      this.list.replaceChildren(h("p", { class: "comments-empty" }, LOADING));
+      return;
+    }
     this.head.hidden = p === null;
     this.banner.hidden = p?.readOnly == null;
     this.banner.textContent = p?.readOnly ?? "";
@@ -536,8 +670,9 @@ export class CommentsController {
       );
     }
     if (items.length === 0) {
+      const empty = this.host.isPage() ? EMPTY_PAGE : EMPTY;
       items.push(
-        h("p", { class: "comments-empty" }, p.comments.length === 0 ? EMPTY : "No open comments."),
+        h("p", { class: "comments-empty" }, p.comments.length === 0 ? empty : "No open comments."),
       );
     }
     this.list.replaceChildren(...items);
@@ -1063,11 +1198,32 @@ export class CommentsController {
       this.scrollCardIntoView(card);
     }
     this.paint();
+    const page = this.readyPage();
+    if (page) {
+      this.goOnPage(page, c, jump);
+      return;
+    }
     if (c.jumpLine !== null && (jump || !this.onScreen(id))) {
       this.host.jumpToLine(c.jumpLine);
     }
     if (jump) {
       this.flash(c);
+    }
+  }
+
+  /**
+   * Takes the HTML page on screen to a comment's text: to the top when `jump` (its card asked),
+   * else into view when it's out of sight. One the page doesn't mark goes, when asked, where core
+   * placed it: the heading it is pinned to (that one, of any with its text), else where it found
+   * the text, else the page's top.
+   */
+  private goOnPage(page: PageSurface, c: CommentView, jump: boolean): void {
+    const span = this.spans.get(c.id);
+    if (span) {
+      if (jump) page.scrollTo(span.start);
+      else page.reveal(span.start);
+    } else if (jump) {
+      page.scrollTo(c.pinnedAt ?? c.textStart ?? 0);
     }
   }
 
@@ -1117,13 +1273,26 @@ export class CommentsController {
     return r.bottom > view.top && r.top < view.bottom;
   }
 
-  /** Marks the comments the list shows in the note: highlights and dots, once each. */
+  /**
+   * Marks the comments the list shows in the note: highlights and dots, once each. In an HTML
+   * page, highlights only, which its bridge paints.
+   */
   private decorate(): void {
     this.unmark();
-    const doc = this.host.doc();
+    const doc = this.host.isPage() ? null : this.host.doc();
+    const page = this.readyPage();
     const path = this.host.docPath();
     const p = this.review;
-    if (this.shown && doc && p && path !== null && samePath(p.notePath, path)) {
+    const current = this.shown && p !== null && path !== null && samePath(p.notePath, path);
+    if (current && page) {
+      for (const c of orderComments(p.comments, this.filter).attached) {
+        const span = pageSpan(page.text, c);
+        if (span) {
+          this.spans.set(c.id, span);
+        }
+      }
+    }
+    if (current && doc) {
       const blocks = new Map<HTMLElement, number[]>();
       for (const c of orderComments(p.comments, this.filter).attached) {
         const range = this.rangeOf(c, doc);
@@ -1182,10 +1351,19 @@ export class CommentsController {
       el.classList.remove("lx-has-comment");
     }
     this.ranges.clear();
+    this.spans.clear();
   }
 
-  /** Paints the highlights: every marked comment, and the focused one above them. */
+  /**
+   * Paints the highlights: every marked comment, and the focused one above them. An HTML page's
+   * bridge paints them inside its frame.
+   */
   private paint(): void {
+    const page = this.readyPage();
+    if (page) {
+      this.paintPage(page);
+      return;
+    }
     if (!supported()) {
       return;
     }
@@ -1205,6 +1383,21 @@ export class CommentsController {
     } else {
       CSS.highlights.delete("comment-focus");
     }
+  }
+
+  /** Has the HTML page paint the marked comments, and the focused one above them. */
+  private paintPage(page: PageSurface): void {
+    if (supported()) {
+      // The note's highlights went with it.
+      CSS.highlights.delete("comment");
+      CSS.highlights.delete("comment-focus");
+    }
+    const all = [...this.spans.values()];
+    if (all.length > 0) page.paint("comment", all);
+    else page.clear("comment");
+    const focus = this.focused === null ? undefined : this.spans.get(this.focused);
+    if (focus) page.paint("comment-focus", [focus]);
+    else page.clear("comment-focus");
   }
 }
 

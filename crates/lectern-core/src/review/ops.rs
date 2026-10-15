@@ -103,7 +103,7 @@ pub fn apply(review: &mut Review, op: &ReviewOp, ctx: &OpContext) -> Result<u32,
     match op {
         ReviewOp::Add { anchor, text } => {
             let text = clean(text)?;
-            let parts = make_anchor(ctx.text, anchor, ctx.fingerprint, ctx.now);
+            let parts = make_anchor(ctx.text, anchor, None, ctx.fingerprint, ctx.now);
             let id = review.next_id();
             let mut c = Comment {
                 id,
@@ -140,7 +140,7 @@ pub fn apply(review: &mut Review, op: &ReviewOp, ctx: &OpContext) -> Result<u32,
         }
         ReviewOp::Reattach { id, anchor } => {
             let c = comment(review, *id)?;
-            let parts = make_anchor(ctx.text, anchor, ctx.fingerprint, ctx.now);
+            let parts = make_anchor(ctx.text, anchor, Some(c), ctx.fingerprint, ctx.now);
             Ok(change(c, |c| {
                 c.start_line = parts.start_line;
                 c.end_line = parts.end_line;

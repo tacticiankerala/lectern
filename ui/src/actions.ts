@@ -19,6 +19,7 @@ import {
 import type { CrumbChooser } from "./crumb-chooser";
 import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
+import type { DocPayload } from "./generated/DocPayload";
 import type { PathForms } from "./generated/PathForms";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
@@ -42,6 +43,8 @@ const WIDTHS = {
 const SLIDE_MS = 200;
 /** How long the comments badge pulses when Claude writes while the panel is closed. */
 const PULSE_MS = 2000;
+/** Where find is, for a PDF in its frame: the viewer has its own. */
+const PDF_FIND = "Click into the PDF and press Ctrl+F to search it.";
 
 export class Actions {
   /** Loaded on first use. */
@@ -117,6 +120,10 @@ export class Actions {
     app.on("workspaces", () => {
       this.preferences?.syncWorkspaces();
     });
+    // The find bar searches Lectern's own document or an HTML page's text, never a PDF.
+    app.on("doc", () => {
+      if (this.onPdf()) this.find?.close();
+    });
     app.layout.app.addEventListener("contextmenu", (e) => {
       this.linkMenu(e);
     });
@@ -155,7 +162,9 @@ export class Actions {
       case "find-next":
       case "find-prev":
         // F3 is also WebView2's own find shortcut, so it is always handled.
-        if (this.find?.isOpen) {
+        if (this.onPdf()) {
+          this.app.toast(PDF_FIND);
+        } else if (this.find?.isOpen) {
           if (action === "find-next") this.find.next();
           else this.find.prev();
         } else {
@@ -313,18 +322,34 @@ export class Actions {
     }
   }
 
-  /** The find bar, searching for `prefill` when given, from `near` (see `FindBar.open`). */
+  /**
+   * The find bar, searching for `prefill` when given, from `near` (see `FindBar.open`): over the
+   * document, or an HTML page's text. With a PDF, which the viewer searches, it says where find
+   * is instead. A navigation while its module loads drops it, as a followed link is dropped: it
+   * was asked for in the document left.
+   */
   async showFind(prefill?: string, near?: Element): Promise<void> {
     this.menu?.close(false);
+    if (this.onPdf()) {
+      this.app.toast(PDF_FIND);
+      return;
+    }
+    const navigation = this.app.navigation;
     const { FindBar } = await import("./find.js");
+    if (navigation !== this.app.navigation || this.onPdf()) {
+      return;
+    }
     this.find ??= new FindBar(this.app.layout.docPane, {
       doc: () => (this.app.state.doc ? this.app.layout.doc : null),
+      page: () => this.app.view.page,
       scroller: this.app.scroller,
       placeAt: (el, at) => {
         this.app.view.placeAt(el, at);
       },
+      // Again when the document renders, and when an HTML page's text changes.
       onRender: (cb) => {
         this.app.on("doc", cb);
+        this.app.on("page", cb);
       },
     });
     this.closeOverlays(this.find);
@@ -489,9 +514,25 @@ export class Actions {
     }
     const doc = this.app.state.doc;
     const path = this.app.nav.currentPath();
+    // A text file, a page or a PDF can also go to its default app; a note would come back here.
+    const defaultApp: MenuEntry[] =
+      doc && doc.kind !== "markdown"
+        ? [
+            {
+              label: "Open in default app",
+              run: () => void this.app.openWithDefaultApp(doc.path),
+            },
+          ]
+        : [];
     await this.openMenu(
       [
-        { label: "Open in editor", keys: "Ctrl+E", disabled: !doc, run: () => this.openInEditor() },
+        {
+          label: "Open in editor",
+          keys: "Ctrl+E",
+          disabled: !editable(doc),
+          run: () => this.openInEditor(),
+        },
+        ...defaultApp,
         {
           label: "Reveal in Explorer",
           disabled: path === null,
@@ -660,13 +701,13 @@ export class Actions {
     this.libraryButton.title = `${showing ? "Hide" : "Show"} library (Ctrl+B)`;
   }
 
-  /** Opens the document in the editor at the line being read; false without a document. */
+  /** Opens the document in the editor at the line being read; false without one an editor takes. */
   private openInEditor(): boolean {
     const doc = this.app.state.doc;
-    if (!doc) {
+    if (!editable(doc)) {
       return false;
     }
-    const line = this.app.view.captureAnchor().line ?? undefined;
+    const line = this.app.view.captureAnchor()?.line ?? undefined;
     this.app.backend.openInEditor(doc.path, line).catch((e: unknown) => {
       this.app.toast(String(e));
     });
@@ -697,6 +738,11 @@ export class Actions {
       return;
     }
     this.app.toast(COPIED[form], middleTruncate(path, TOAST_PATH_CHARS));
+  }
+
+  /** Whether the document is a PDF, which the find bar can't search: its viewer does. */
+  private onPdf(): boolean {
+    return this.app.state.doc?.kind === "pdf";
   }
 
   /** Reads the document again, keeping the place; a file that failed to open is retried. */
@@ -750,4 +796,9 @@ export class Actions {
       handle.addEventListener("pointercancel", end);
     });
   }
+}
+
+/** Whether `doc` is one an editor opens (Ctrl+E): any document but a PDF. */
+function editable(doc: DocPayload | null): doc is DocPayload {
+  return doc !== null && doc.kind !== "pdf";
 }

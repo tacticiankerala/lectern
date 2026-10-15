@@ -9,10 +9,12 @@
 // Release builds run without a console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accelerators;
 mod app;
 mod commands;
 mod events;
 mod logging;
+mod navigate;
 mod shell;
 mod state;
 mod updater;
@@ -24,7 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lectern_core::cli::Args;
-use lectern_core::library::is_markdown;
+use lectern_core::library::doc_kind;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
 
@@ -156,7 +158,8 @@ fn boot(
 
 /// The profile `load` reads, with the workspace the launch argument `arg` goes to picked
 /// (`Profile::route_launch`). Whether `arg` is a folder is probed (`probe`) on a thread of its own
-/// while the profile loads, so a slow share delays neither; a Markdown name is a file, unprobed.
+/// while the profile loads, so a slow share delays neither; a document's name (`page.html`,
+/// `plan.md`) is a file, unprobed.
 fn routed_profile(
     arg: Option<&Path>,
     load: impl FnOnce() -> Profile,
@@ -165,7 +168,7 @@ fn routed_profile(
     let Some(arg) = arg else {
         return load();
     };
-    let probing = (!is_markdown(&arg.to_string_lossy())).then(|| {
+    let probing = doc_kind(&arg.to_string_lossy()).is_none().then(|| {
         let path = arg.to_path_buf();
         thread::Builder::new()
             .name("lectern-launch-probe".to_owned())
@@ -236,5 +239,21 @@ mod tests {
         assert_eq!(routed.launch.as_deref(), Some("w1"));
         let unrouted = routed_profile(None, Profile::unloaded, |_| panic!("probed nothing"));
         assert_eq!(unrouted.launch, None);
+    }
+
+    /// Any document's name is a file, so `page.html` routes as one without a probe. The probe runs
+    /// on a thread of its own, where a panic would go unseen, so it reports instead.
+    #[test]
+    fn a_document_launch_argument_is_not_probed() {
+        for doc in ["page.html", "brief.PDF", "readme.txt", "old.htm", "plan.md"] {
+            let arg = Path::new(r"S:\Notes\My Vault").join(doc);
+            let (probing, probed) = mpsc::channel();
+            let routed = routed_profile(Some(&arg), Profile::unloaded, move |_| {
+                probing.send(()).unwrap();
+                false
+            });
+            assert!(probed.try_recv().is_err(), "probed {doc}");
+            assert_eq!(routed.launch.as_deref(), Some("w1"), "{doc}");
+        }
     }
 }

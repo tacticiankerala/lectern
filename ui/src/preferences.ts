@@ -1,13 +1,14 @@
 // Preferences (Ctrl+, or the ⋯ menu, spec §6), in two parts. This workspace: its name, its
 // libraries' folders (add, remove, retry) and its theme, the shared one ("Same as other windows")
 // or its own mode and light and dark themes. A blank window has no such part. All windows: folder
-// status badges, review comments on or off, path mappings (from/to rows, saved as a field loses
-// focus), the editor command, automatic update checks, and the workspaces, to rename or delete (not
-// one open in a window). Then the version. Settings changed elsewhere show at once in the switches,
-// the theme and the path mappings, unless the mappings were edited here: those are what closing
-// saves. Loaded on first use.
+// status badges, review comments on or off, what HTML pages may do, path mappings (from/to rows,
+// saved as a field loses focus), the editor command, automatic update checks, and the workspaces,
+// to rename or delete (not one open in a window). Then the version. Settings changed elsewhere
+// show at once in the switches, the theme and the path mappings, unless the mappings were edited
+// here: those are what closing saves. Loaded on first use.
 import { h } from "./dom";
 import type { EditorPref } from "./generated/EditorPref";
+import type { HtmlPages } from "./generated/HtmlPages";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { PathMapping } from "./generated/PathMapping";
 import type { Settings } from "./generated/Settings";
@@ -43,6 +44,13 @@ const MODES: [ThemeMode, string][] = [
   ["dark", "Dark"],
 ];
 
+/** What HTML pages may do, as Preferences offers it. */
+const HTML_PAGES: [HtmlPages, string][] = [
+  ["full", "Run scripts and allow the internet"],
+  ["offline", "Run scripts offline"],
+  ["static", "No page scripts"],
+];
+
 interface MappingRow {
   el: HTMLElement;
   from: HTMLInputElement;
@@ -73,6 +81,7 @@ export class Preferences {
   private readonly autoUpdate: HTMLInputElement;
   private readonly badges: HTMLInputElement;
   private readonly reviewComments: HTMLInputElement;
+  private readonly htmlPages: HTMLInputElement[];
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
 
@@ -174,6 +183,13 @@ export class Preferences {
     this.reviewComments.addEventListener("change", () => {
       this.host.update({ reviewComments: this.reviewComments.checked });
     });
+    this.htmlPages = HTML_PAGES.map(([mode]) => {
+      const input = h("input", { type: "radio", name: "lx-html-pages", value: mode });
+      input.addEventListener("change", () => {
+        this.host.update({ htmlPages: mode });
+      });
+      return input;
+    });
     this.autoUpdate = h("input", { type: "checkbox", name: "lx-auto-update" });
     this.autoUpdate.addEventListener("change", () => {
       this.host.update({ autoUpdate: this.autoUpdate.checked });
@@ -222,6 +238,18 @@ export class Preferences {
           "p",
           { class: "prefs-hint" },
           "Comments are saved next to each note as <note>.review.md, a Markdown file Claude, Codex or another AI agent can read and reply in.",
+        ),
+      ),
+      section(
+        "HTML pages",
+        null,
+        ...HTML_PAGES.map(([, label], i) =>
+          h("label", { class: "prefs-check" }, this.htmlPages[i] ?? "", label),
+        ),
+        h(
+          "p",
+          { class: "prefs-hint" },
+          "Pages always run in a sandbox, away from your files and from Lectern. Lectern tells you when a page loads anything from the internet.",
         ),
       ),
       section(
@@ -309,6 +337,9 @@ export class Preferences {
     this.autoUpdate.checked = s.autoUpdate;
     this.badges.checked = s.showStatusBadges;
     this.reviewComments.checked = s.reviewComments;
+    for (const input of this.htmlPages) {
+      input.checked = input.value === s.htmlPages;
+    }
     const own = this.host.workspace()?.ownTheme ?? false;
     this.ownTheme.checked = own;
     this.sharedThemeHint.hidden = own;

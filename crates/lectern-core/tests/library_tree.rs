@@ -6,6 +6,7 @@ use std::path::Path;
 
 use lectern_core::library::scan::{read_heads, scan_root, ScanOptions};
 use lectern_core::library::tree::{build_tree, natural_cmp, TreeNode};
+use lectern_core::library::DocKind;
 
 fn tree_of(vault: &Path) -> TreeNode {
     let mut r = scan_root(vault, &ScanOptions::default()).unwrap();
@@ -32,7 +33,7 @@ fn abs(vault: &Path, rel: &str) -> String {
 }
 
 #[test]
-fn tree_md_only_folders_first_natural() {
+fn tree_documents_only_folders_first_natural() {
     let (_tmp, vault) = common::vault_copy();
     let tree = tree_of(&vault);
     assert!(tree.is_dir);
@@ -42,6 +43,7 @@ fn tree_md_only_folders_first_natural() {
         names(&tree),
         [
             "archive",
+            "artifacts",
             "friends",
             "memory",
             "notes",
@@ -61,6 +63,43 @@ fn tree_md_only_folders_first_natural() {
     let readme = child(alpha, "README.md");
     assert!(!readme.is_dir && readme.children.is_empty());
     assert_eq!(readme.path, abs(&vault, "work/alpha/README.md"));
+}
+
+#[test]
+fn tree_shows_text_html_and_pdf_files_with_their_kinds() {
+    let (_tmp, vault) = common::vault_copy();
+    let tree = tree_of(&vault);
+    let artifacts = child(&tree, "artifacts");
+    // Its style sheet is no document; the chart's folder holds a page.
+    assert_eq!(
+        names(artifacts),
+        [
+            "chart",
+            "brief.pdf",
+            "faking.html",
+            "late-leaving.html",
+            "leaving.html",
+            "other.html",
+            "redirect.html",
+            "refresh.html",
+            "remote.html",
+            "report.html",
+            "self-refresh.html"
+        ]
+    );
+    assert_eq!(artifacts.kind, None);
+    assert_eq!(child(artifacts, "brief.pdf").kind, Some(DocKind::Pdf));
+    assert_eq!(child(artifacts, "report.html").kind, Some(DocKind::Html));
+    let notes = child(&tree, "notes");
+    assert_eq!(names(notes), ["readme.txt", "résumé notes.md"]);
+    assert_eq!(child(notes, "readme.txt").kind, Some(DocKind::Text));
+    assert_eq!(
+        child(notes, "résumé notes.md").kind,
+        Some(DocKind::Markdown)
+    );
+    assert_eq!(tree.kind, None);
+    let json = serde_json::to_value(child(artifacts, "report.html")).unwrap();
+    assert_eq!(json["kind"], "html");
 }
 
 #[test]

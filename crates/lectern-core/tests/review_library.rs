@@ -115,9 +115,9 @@ fn sidecar_hidden_from_tree_quick_open_search_and_wikilinks() {
         ["code.review.md", "orphan.review.md", "tide.md"]
     );
 
-    // Quick open lists `md_files`.
+    // Quick open lists `documents`.
     assert_eq!(
-        md_rels(&root),
+        doc_rels(&root),
         [
             "plans/code.review.md",
             "plans/orphan.review.md",
@@ -324,9 +324,10 @@ fn a_sidecar_sits_beside_its_note() {
     assert_eq!(root.comment_count("plans/sub/tide.md"), None);
 }
 
-/// Only Markdown files are notes, so a sidecar naming anything else is an ordinary note itself.
+/// Only notes that take comments have sidecars, so a sidecar naming anything else is an ordinary
+/// note itself.
 #[test]
-fn a_sidecar_belongs_to_a_markdown_note() {
+fn a_sidecar_belongs_to_a_note_that_takes_comments() {
     let sidecar = TIDE_REVIEW.replace("note: tide.md", "note: photo.png");
     let (_tmp, root) = root_of(&[
         ("plans/photo.png", "not really a picture"),
@@ -336,4 +337,94 @@ fn a_sidecar_belongs_to_a_markdown_note() {
     let tree = build_tree(&root);
     assert_eq!(names(child(&tree, "plans")), ["photo.png.review.md"]);
     assert_eq!(root.comment_count("plans/photo.png"), None);
+}
+
+/// The sidecar of `report.html` is `report.html.review.md`.
+const REPORT_REVIEW: &str = "---
+lectern-review: 1
+note: report.html
+---
+# Review: report.html
+
+## C1 · open · L11 · Results
+<!-- anchor prefix=\"rose steadily, but \" suffix=\" before recovering\" fp=\"fnv1a64:0123456789abcdef\" n=1 created=\"2026-10-01T09:00:00Z\" -->
+> conversion dipped in week 3
+
+**You:** Weekly, not daily?
+";
+
+const REPORT: &str = "<!doctype html>\n<h1>Report</h1>\n<p>Conversion dipped in week 3.</p>\n";
+
+fn doc_rels(root: &RootIndex) -> Vec<&str> {
+    root.documents().map(|f| f.rel.as_str()).collect()
+}
+
+/// An HTML page or a text file takes comments as a note does: its sidecar is hidden from the
+/// tree and quick open, by name until the heads are read and by its frontmatter after, and its
+/// open comments are counted on the page.
+#[test]
+fn an_html_page_has_its_sidecar_hidden_and_counted() {
+    let files = [
+        ("artifacts/report.html", REPORT),
+        ("artifacts/report.html.review.md", REPORT_REVIEW),
+    ];
+    let (_tmp, walked) = walked(&files);
+    assert_eq!(doc_rels(&walked), ["artifacts/report.html"]);
+    let (_tmp, root) = root_of(&files);
+    assert_eq!(doc_rels(&root), ["artifacts/report.html"]);
+    let tree = build_tree(&root);
+    assert_eq!(names(child(&tree, "artifacts")), ["report.html"]);
+    assert_eq!(
+        child(child(&tree, "artifacts"), "report.html").comments,
+        Some(1)
+    );
+    assert_eq!(root.comment_count("artifacts/report.html"), Some(1));
+}
+
+/// `notes.md` and `notes.txt` side by side each own their sidecar: `notes.review.md` and
+/// `notes.txt.review.md`.
+#[test]
+fn a_note_and_a_text_file_of_the_same_stem_each_own_their_sidecar() {
+    let text_review = TIDE_REVIEW.replace("note: tide.md", "note: notes.txt");
+    let md_review = TIDE_REVIEW.replace("note: tide.md", "note: notes.md");
+    let files = [
+        ("notes.md", TIDE),
+        ("notes.txt", "The spring tide peaks at noon.\n"),
+        ("notes.review.md", md_review.as_str()),
+        ("notes.txt.review.md", text_review.as_str()),
+    ];
+    let (_tmp, walked) = walked(&files);
+    assert_eq!(doc_rels(&walked), ["notes.md", "notes.txt"]);
+    let (_tmp, root) = root_of(&files);
+    assert_eq!(doc_rels(&root), ["notes.md", "notes.txt"]);
+    assert_eq!(names(&build_tree(&root)), ["notes.md", "notes.txt"]);
+    assert_eq!(root.comment_count("notes.md"), Some(1));
+    assert_eq!(root.comment_count("notes.txt"), Some(1));
+    // The sidecars aren't swapped: a text file's sidecar naming the note is no sidecar.
+    let swapped = TIDE_REVIEW.replace("note: tide.md", "note: notes.md");
+    let (_tmp, root) = root_of(&[
+        ("notes.md", TIDE),
+        ("notes.txt", "The spring tide peaks at noon.\n"),
+        ("notes.txt.review.md", &swapped),
+    ]);
+    assert_eq!(
+        doc_rels(&root),
+        ["notes.md", "notes.txt", "notes.txt.review.md"]
+    );
+    assert_eq!(root.comment_count("notes.md"), None);
+}
+
+/// A PDF takes no comments, so a file named as its sidecar is a note of its own.
+#[test]
+fn a_pdf_has_no_sidecar() {
+    let sidecar = TIDE_REVIEW.replace("note: tide.md", "note: brief.pdf");
+    let files = [
+        ("brief.pdf", "%PDF-1.4\n"),
+        ("brief.pdf.review.md", sidecar.as_str()),
+    ];
+    let (_tmp, walked) = walked(&files);
+    assert_eq!(doc_rels(&walked), ["brief.pdf", "brief.pdf.review.md"]);
+    let (_tmp, root) = root_of(&files);
+    assert_eq!(doc_rels(&root), ["brief.pdf", "brief.pdf.review.md"]);
+    assert_eq!(root.comment_count("brief.pdf"), None);
 }

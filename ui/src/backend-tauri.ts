@@ -5,13 +5,15 @@ import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { Candidate } from "./generated/Candidate";
+import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { FrameFocus } from "./generated/FrameFocus";
 import type { LibraryPayload } from "./generated/LibraryPayload";
-import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
+import type { PageBlock } from "./generated/PageBlock";
 import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -125,12 +127,12 @@ export class TauriBackend implements Backend {
     return invoke("open_in_editor", { path, line: line ?? null });
   }
 
-  loadReview(path: string): Promise<ReviewPayload> {
-    return invoke("load_review", { path });
+  loadReview(path: string, page?: PageBlock[]): Promise<ReviewPayload> {
+    return invoke("load_review", { path, page: page ?? null });
   }
 
-  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
-    return invoke("review_op", { path, op });
+  reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload> {
+    return invoke("review_op", { path, op, page: page ?? null });
   }
 
   getSettings(): Promise<SettingsSnapshot> {
@@ -173,7 +175,7 @@ export class TauriBackend implements Backend {
     return open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Markdown", extensions: [...MARKDOWN_EXTENSIONS] }],
+      filters: [{ name: "Documents", extensions: [...DOCUMENT_EXTENSIONS] }],
     });
   }
 
@@ -223,6 +225,10 @@ export class TauriBackend implements Backend {
 
   setUnsaved(on: boolean): Promise<void> {
     return invoke("set_unsaved", { on });
+  }
+
+  setFrameFocus(focus: FrameFocus): Promise<void> {
+    return invoke("set_frame_focus", { focus });
   }
 
   closeWindow(): Promise<void> {

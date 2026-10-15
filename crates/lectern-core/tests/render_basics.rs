@@ -29,6 +29,27 @@ fn r(src: &str) -> RenderedDoc {
 }
 
 #[test]
+fn a_framed_document_is_empty_and_titled_by_its_file_name() {
+    let d = RenderedDoc::framed(Path::new(r"S:\Notes\My Vault\artifacts\Weekly report.HTML"));
+    assert_eq!(d.html, "");
+    assert!(d.outline.is_empty());
+    assert!(d.frontmatter.is_none());
+    assert_eq!((d.tasks.done, d.tasks.total), (0, 0));
+    assert_eq!(d.word_count, 0);
+    assert!(!d.has_unresolved_wikilinks);
+    let name = Path::new(r"S:\Notes\My Vault\artifacts\Weekly report.HTML")
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(d.title, name);
+    assert_eq!(
+        RenderedDoc::framed(Path::new("/home/me/brief.pdf")).title,
+        "brief.pdf"
+    );
+}
+
+#[test]
 fn headings_get_github_slugs_and_outline() {
     let d = r("# Hello World\n## Hello World\n### Café & Co.\n");
     assert!(d.html.contains(r#"id="hello-world""#) && d.html.contains(r#"id="hello-world-1""#));

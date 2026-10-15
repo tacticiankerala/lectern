@@ -4,9 +4,11 @@ import type { Candidate } from "./generated/Candidate";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { FrameFocus } from "./generated/FrameFocus";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
+import type { PageBlock } from "./generated/PageBlock";
 import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -29,7 +31,9 @@ export type BackendEvent =
   | "review-changed"
   | "settings-changed"
   | "workspaces-changed"
-  | "close-requested";
+  | "close-requested"
+  | "page-loads"
+  | "frame-key";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
@@ -53,12 +57,15 @@ export interface Backend {
   revealInExplorer(path: string): Promise<void>;
   openInEditor(path: string, line?: number): Promise<void>;
   /**
-   * The review comments of the open note `path`, from its sidecar. Rejects with a message for the
-   * reader.
+   * The review comments of the open note `path`, from its sidecar. An HTML page's are found in
+   * the text its bridge reported, `page`, which they need. Rejects with a message for the reader.
    */
-  loadReview(path: string): Promise<ReviewPayload>;
-  /** Changes the open note's sidecar; answers with its review as it now is. */
-  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload>;
+  loadReview(path: string, page?: PageBlock[]): Promise<ReviewPayload>;
+  /**
+   * Changes the open note's sidecar (an HTML page's with its text, `page`); answers with its
+   * review as it now is.
+   */
+  reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload>;
   /** This window's settings, with their revision (`SettingsSnapshot`). */
   getSettings(): Promise<SettingsSnapshot>;
   /**
@@ -129,6 +136,11 @@ export interface Backend {
   quit(force: boolean): Promise<string[]>;
   /** Tells Rust whether this window holds comment text that isn't saved yet. */
   setUnsaved(on: boolean): Promise<void>;
+  /**
+   * Tells Rust where the keyboard focus is: in this page, or inside an HTML page's or a PDF's
+   * frame, where only Rust sees the keys and sends Lectern's shortcuts back as `frame-key`.
+   */
+  setFrameFocus(focus: FrameFocus): Promise<void>;
   /**
    * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
    * asked again.

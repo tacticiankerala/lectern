@@ -6,11 +6,12 @@
 use std::sync::Arc;
 
 use lectern_core::ipc::{
-    Candidate, FollowResult, FollowTarget, LibraryPayload, OpenResult, OpenWhere, PathForms,
-    RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload, UpdateInfo,
-    UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
+    PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload,
+    UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::review::ops::ReviewOp;
+use lectern_core::review::text::PageBlock;
 use lectern_core::review::view::ReviewPayload;
 use lectern_core::search::FileHits;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
@@ -174,29 +175,32 @@ pub async fn open_in_editor(
     .await?
 }
 
-/// The open note's review comments.
+/// The open note's review comments; an HTML page's against the text its bridge reported (`page`).
 #[tauri::command]
 pub async fn load_review(
     path: String,
+    page: Option<Vec<PageBlock>>,
     window: WebviewWindow,
     state: Shared<'_>,
 ) -> Result<ReviewPayload, String> {
     blocking(window_state(&window, &state)?, move |s| {
-        s.load_review(&path)
+        s.load_review(&path, page)
     })
     .await?
 }
 
-/// Saves a change to the open note's review comments; returns them as saved.
+/// Saves a change to the open note's review comments; returns them as saved. An HTML page's go
+/// against the text its bridge reported (`page`).
 #[tauri::command]
 pub async fn review_op(
     path: String,
     op: ReviewOp,
+    page: Option<Vec<PageBlock>>,
     window: WebviewWindow,
     state: Shared<'_>,
 ) -> Result<ReviewPayload, String> {
     blocking(window_state(&window, &state)?, move |s| {
-        s.review_op(&path, op)
+        s.review_op(&path, op, page)
     })
     .await?
 }
@@ -415,6 +419,18 @@ pub fn quit(force: bool, window: WebviewWindow, app: AppHandle, state: Shared<'_
 #[tauri::command]
 pub fn set_unsaved(on: bool, window: WebviewWindow, state: Shared<'_>) -> Result<(), String> {
     window_state(&window, &state)?.set_unsaved(on);
+    Ok(())
+}
+
+/// Records where the calling window's keyboard focus is: in its own page, or inside a page's or a
+/// PDF's frame, whose keys only Rust sees (`WindowState::frame_key`).
+#[tauri::command]
+pub fn set_frame_focus(
+    focus: FrameFocus,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<(), String> {
+    window_state(&window, &state)?.set_frame_focus(focus);
     Ok(())
 }
 

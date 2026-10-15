@@ -180,7 +180,7 @@ impl WindowState {
         let mut candidates = Vec::new();
         for root in &index.roots {
             let root_text = path_string(&root.root);
-            for file in root.md_files() {
+            for file in root.documents() {
                 let abs = root.abs(&file.rel);
                 if !seen.insert(path_key(&abs)) {
                     continue;
@@ -437,6 +437,44 @@ mod tests {
         assert!(indexed(&f, &doc));
         assert_eq!(f.state.library_payload().roots.len(), 1);
     }
+
+    /// Quick open offers every document, not only notes, and never a sidecar.
+    #[test]
+    fn quick_open_offers_every_document() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        for (rel, text) in [
+            ("vault/plan.md", "# Plan"),
+            ("vault/readme.txt", "Plain"),
+            ("vault/artifacts/report.html", "<h1>Report</h1>"),
+            ("vault/artifacts/report.html.review.md", REPORT_REVIEW),
+            ("vault/artifacts/brief.pdf", "%PDF-1.4\n"),
+            ("vault/artifacts/chart.png", "png"),
+        ] {
+            dir.file(rel, text);
+        }
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        wait_until("the root is indexed", || settled(&f, &root));
+        let mut rels: Vec<String> = f
+            .state
+            .quick_open_candidates()
+            .into_iter()
+            .map(|c| c.rel)
+            .collect();
+        rels.sort();
+        assert_eq!(
+            rels,
+            [
+                "artifacts/brief.pdf",
+                "artifacts/report.html",
+                "plan.md",
+                "readme.txt"
+            ]
+        );
+    }
+
+    const REPORT_REVIEW: &str =
+        "---\nlectern-review: 1\nnote: report.html\n---\n# Review: report.html\n";
 
     #[test]
     fn retrying_a_root_that_came_back_watches_it_again() {

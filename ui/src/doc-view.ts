@@ -1,25 +1,36 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
 // buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
-// after the text for its last heading to reach the top.
+// after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
+// instead (frame-view.ts): a page keeps its scroll fraction as its reading position, its headings
+// are its anchors, and its links go through Lectern's link rules; a PDF keeps no reading position.
+// A page whose frame another page fills is opened again, with a toast; one that keeps doing so is
+// let go, the document area saying so.
 //
 // Anchor contract (ruling R16): links carry the fragment as written (`href="#Frag"` in-page,
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
 import { HEADINGS, findById, samePath } from "./dom";
+import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
+import type { PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
 import { placeAt } from "./reflow";
+import { effectiveTheme } from "./themes";
+import { renderNavigatingAway } from "./welcome";
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
 const COPIED_MS = 1200;
 /** Links to a local place: a note, a file the index holds, or a path checked when followed. */
 export const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
+/** The toast when a page navigates its own frame. */
+const NAVIGATED_AWAY = "This page tried to open another page; open it from Lectern instead.";
 
 export class DocView {
   private readonly copyTimers = new WeakMap<HTMLElement, number>();
@@ -29,11 +40,47 @@ export class DocView {
   private lastHeading: HTMLElement | null = null;
   /** The room after the text, in pixels, as last set. */
   private room = -1;
+  /** The frame a page or a PDF shows in, in the pane. */
+  private readonly frame: FrameView;
 
   constructor(
     private readonly host: HTMLElement,
     private readonly app: App,
   ) {
+    this.frame = new FrameView(app.layout.docPane, {
+      dark: () => effectiveTheme(app.state.settings, app.systemDark()).mode === "dark",
+      focusMoved: () => {
+        app.checkFrameFocus();
+      },
+      headings: (items) => {
+        app.showPageOutline(items);
+      },
+      text: () => {
+        app.emit("page");
+      },
+      scrolled: () => {
+        app.schedulePositionSave();
+        app.pageScrolled();
+      },
+      follow: (target) => void this.followTarget(target, undefined),
+      preferences: () => {
+        app.actions.run("preferences");
+      },
+      selection: () => {
+        app.pageSelectionChanged();
+      },
+      commentClicked: (offset) => {
+        app.pageCommentClicked(offset);
+      },
+      navigatedAway: (path) => {
+        app.toast(NAVIGATED_AWAY);
+        // Through the navigation queue, so a navigation the reader started wins.
+        app.nav.changed(path);
+      },
+      keepsNavigatingAway: (path) => {
+        renderNavigatingAway(this.host, () => void app.openWithDefaultApp(path));
+      },
+    });
     host.addEventListener("click", (e) => {
       this.onClick(e);
     });
@@ -64,6 +111,15 @@ export class DocView {
   }
 
   render(doc: DocPayload): void {
+    if (doc.frameUrl !== null) {
+      // A page or a PDF shows in a frame, in place of the document.
+      this.host.replaceChildren();
+      this.frame.show(doc, doc.frameUrl);
+      this.lastHeading = null;
+      this.fitRoom();
+      return;
+    }
+    this.frame.close();
     this.host.innerHTML = doc.html;
     // A blocked image has no src to fail: it shows its placeholder straight away.
     for (const img of this.host.querySelectorAll<HTMLImageElement>("img.img-blocked")) {
@@ -102,13 +158,32 @@ export class DocView {
     );
   }
 
-  /** Scrolls the anchor to the top of the pane; false when the document has no such anchor. */
+  /**
+   * Scrolls the anchor to the top of the pane; false when the document has no such anchor. In an
+   * HTML page, its headings are the anchors, scrolled to once it is ready.
+   */
   scrollToAnchor(id: string, slug?: string): boolean {
+    if (this.frame.shown) {
+      return this.frame.scrollToAnchor(id);
+    }
     const target = this.findAnchor(id, slug);
     if (target) {
       placeAt(this.app.scroller, target, TOP_GAP);
     }
     return target !== null;
+  }
+
+  /**
+   * Scrolls to the heading the outline lists `index`th, whose id is `id`: in an HTML page by where
+   * it is, as two of its headings may share an id; elsewhere by its id.
+   */
+  scrollToOutlineItem(id: string, index: number): void {
+    const page = this.frame.page;
+    if (page?.ready) {
+      page.scrollToHeadingAt(index);
+    } else {
+      this.scrollToAnchor(id);
+    }
   }
 
   /** Scrolls the block holding source line `line` to the top of the pane. */
@@ -120,14 +195,51 @@ export class DocView {
     return block !== null;
   }
 
-  /** Where the reader is in the document (position.ts). */
-  captureAnchor(): SavedPosition {
-    return capture(this.host, this.app.scroller);
+  /**
+   * Takes the frame of a page or a PDF away, for what shows in the document's place instead (the
+   * welcome screen, an error).
+   */
+  closeFrame(): void {
+    this.frame.close();
   }
 
-  /** Scrolls back to a captured position (position.ts). */
+  /**
+   * The HTML page showing, once its session has started: find searches its text, and comments go
+   * on it. Null for anything else.
+   */
+  get page(): PageFrame | null {
+    return this.frame.page;
+  }
+
+  /**
+   * Where the reader is in the document (position.ts). In an HTML page, how far down it is, once
+   * it has said; null for a PDF.
+   */
+  captureAnchor(): SavedPosition | null {
+    if (!this.frame.shown) {
+      return capture(this.host, this.app.scroller);
+    }
+    const page = this.frame.page;
+    return page?.ready ? { headingId: null, offset: 0, line: null, fraction: page.fraction } : null;
+  }
+
+  /** Scrolls back to a captured position (position.ts); in an HTML page, once it is ready. */
   restore(p: SavedPosition): void {
+    if (this.frame.shown) {
+      this.frame.restore(p.fraction);
+      return;
+    }
     restore(this.host, this.app.scroller, p);
+  }
+
+  /** What the HTML page showing has loaded from the web, for its notice (`page-loads`). */
+  pageLoads(loads: PageLoads): void {
+    this.frame.loads(loads);
+  }
+
+  /** The theme changed: an HTML page follows it. */
+  syncFrameTheme(): void {
+    this.frame.syncTheme();
   }
 
   /**

@@ -289,6 +289,84 @@ button.crumb:focus-visible {
   scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
 }
 
+/* An HTML page or a PDF (frame-view.ts): its frame fills the pane in place of the document, below
+   the banner and the properties strip, in focus mode too. */
+#lx-doc-pane.framed {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+body.focus #lx-doc-pane.framed {
+  padding-top: 0;
+}
+
+#lx-doc-pane.framed > #lx-doc {
+  display: none;
+}
+
+.lx-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+}
+
+/* What an HTML page loads from the web, or was blocked from (page-frame.ts): a slim bar above its
+   frame, gone in focus mode. */
+.page-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 8px 3px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  color: var(--fg-muted);
+  font: var(--ui-size) / 1.45 var(--ui-font);
+}
+
+.page-notice[hidden],
+body.focus .page-notice {
+  display: none;
+}
+
+.page-notice-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.page-notice-prefs {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.page-notice-dismiss {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.page-notice-dismiss:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
 /* The banner and the properties strip share the document's column: their width is measured in the
    reading font, their content set in the chrome's. */
 #lx-banner,
@@ -537,6 +615,13 @@ button.crumb:focus-visible {
   list-style: none;
 }
 
+/* In place of an outline Lectern can't list (a PDF's). */
+.outline-note {
+  margin: 0;
+  padding: 0 8px 0 14px;
+  color: var(--fg-muted);
+}
+
 .outline-list a,
 .outline-list span {
   display: block;
@@ -683,6 +768,17 @@ button.crumb:focus-visible {
 .cc-item .badge::before {
   width: 5px;
   height: 5px;
+}
+
+/* The type of a document that isn't a note (TXT, HTML, PDF): small and muted after its name. */
+.tree-kind {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: 0.731em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  cursor: pointer;
 }
 
 .lib-root-head {

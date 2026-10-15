@@ -172,6 +172,34 @@ fn name_match_ranks_first() {
 }
 
 #[test]
+fn text_files_are_searched_and_html_and_pdf_are_not() {
+    let (_tmp, vault) = vault_copy();
+    let index = index_of(&vault);
+    // The word is in `notes/readme.txt` and in `artifacts/report.html`.
+    let results = search(&index, "lanternfish");
+    let rels: Vec<&str> = results.iter().map(|f| f.rel.as_str()).collect();
+    assert_eq!(rels, ["notes/readme.txt"]);
+    assert_eq!(line_numbers(&results[0]), [4]);
+    // The PDF's text is never searched either.
+    assert!(search(&index, "Project brief").is_empty());
+}
+
+/// A text file is titled by its file name, as the reader titles it: a first line that looks like a
+/// heading, or frontmatter, is only text.
+#[test]
+fn a_text_file_is_titled_by_its_file_name() {
+    let (_tmp, index) = library(&[
+        ("plan.txt", b"# Not a heading\nmarker\n"),
+        ("front.TXT", b"---\ntitle: Not a title\n---\nmarker\n"),
+        ("plan.md", b"# Plan\nmarker\n"),
+    ]);
+    let results = search(&index, "marker");
+    assert_eq!(result(&results, "plan.txt").title, "plan.txt");
+    assert_eq!(result(&results, "front.TXT").title, "front.TXT");
+    assert_eq!(result(&results, "plan.md").title, "Plan");
+}
+
+#[test]
 fn name_match_beats_hit_count() {
     let (_tmp, index) = library(&[
         ("other.md", b"alpha\nalpha\nalpha\nAlpha\n"),
@@ -340,7 +368,7 @@ fn skips_binary_and_searches_lossy() {
     let (_tmp, index) = library(&[
         ("bin.md", b"marker\0\x01\x02"),
         ("lossy.md", b"bad \xff\xfe bytes, marker\n"),
-        ("not-markdown.txt", b"marker\n"),
+        ("not-a-document.csv", b"marker\n"),
     ]);
     let results = search(&index, "marker");
     assert_eq!(results.len(), 1);

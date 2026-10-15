@@ -2,9 +2,11 @@
 
 pub mod cache;
 pub mod cli;
+pub mod frame_keys;
 pub mod frontmatter;
 pub mod ipc;
 pub mod library;
+pub mod page;
 pub mod perf;
 pub mod render;
 pub mod review;
@@ -25,6 +27,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_workspace_manifest() {
-        assert_eq!(version(), "0.3.1");
+        assert_eq!(version(), "0.4.0");
     }
 }

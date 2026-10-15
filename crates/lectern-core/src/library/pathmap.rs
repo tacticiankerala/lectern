@@ -1,8 +1,9 @@
-//! Mapping paths written in notes to files on this machine, and local files to asset URLs.
+//! Mapping paths written in notes to files on this machine, and local files to asset and page
+//! URLs.
 
 use std::path::{Path, PathBuf};
 
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use super::resolve::{library_suffix_match, moved_file_match};
 use super::LibraryIndex;
@@ -427,4 +428,90 @@ pub fn asset_url(asset_base: &str, path: &Path) -> String {
         "{asset_base}{}",
         utf8_percent_encode(&path.to_string_lossy(), URI_COMPONENT)
     )
+}
+
+/// The origin of Lectern's page protocol (`lxpage`), which serves HTML pages, PDFs and what a page
+/// loads into a frame.
+pub const PAGE_ORIGIN: &str = "http://lxpage.localhost";
+
+/// RFC 3986's unreserved characters are the only ones a page URL keeps as they are.
+const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// The page-protocol URL of the page at `page`, opened as the open `token`:
+/// `http://lxpage.localhost/o/<token>/<file name>`, the file name percent-encoded. The page's
+/// relative links resolve under `/o/<token>/`, which names the page's folder (`page_path`), so a
+/// page reaches its own folder and the folders below it, and nothing else. `None` for a file name
+/// `page_path` would refuse (see `page_segment`), so `page_path` always gives the page back.
+pub fn page_url(token: &str, page: &Path) -> Option<String> {
+    let name = page_name(page)?;
+    Some(format!(
+        "{PAGE_ORIGIN}/o/{token}/{}",
+        utf8_percent_encode(name, UNRESERVED)
+    ))
+}
+
+/// The file name of the page at `page` (either separator), as an open's URL names it
+/// (`page_url`); `None` for one `page_path` would refuse (see `page_segment`).
+pub fn page_name(page: &Path) -> Option<&str> {
+    let name = page.to_str()?.rsplit(['\\', '/']).next()?;
+    page_segment(name).then_some(name)
+}
+
+/// The open a page-protocol URL path names, and the rest of the path below it, still encoded:
+/// `/o/<token>/<rest>`, its query and fragment dropped. `None` for any other path, and for an empty
+/// token or rest.
+pub fn page_token(url_path: &str) -> Option<(&str, &str)> {
+    let end = url_path.find(['?', '#']).unwrap_or(url_path.len());
+    let (token, rest) = url_path[..end].strip_prefix("/o/")?.split_once('/')?;
+    (!token.is_empty() && !rest.is_empty()).then_some((token, rest))
+}
+
+/// The local path the URL path `rest`, below an open's `/o/<token>/` (`page_token`), names in the
+/// open's folder `folder`: `folder\a\b c.html` for `a/b%20c.html`. Each segment is percent-decoded
+/// once and then checked (`page_segment`), so an encoded `..%2F` or `%3A%5C` is refused rather than
+/// climbing or switching drive. `None` for an empty segment and for one that isn't UTF-8 once
+/// decoded.
+pub fn page_path(folder: &str, rest: &str) -> Option<String> {
+    let mut out = folder.trim_end_matches(['\\', '/']).to_owned();
+    for segment in rest.split('/') {
+        let decoded = percent_decode_str(segment).decode_utf8().ok()?;
+        if !page_segment(&decoded) {
+            return None;
+        }
+        out.push('\\');
+        out.push_str(&decoded);
+    }
+    Some(out)
+}
+
+/// Whether a decoded segment names one file or folder as written: not empty, `.` or `..`; without
+/// a separator, `:`, a control character (NUL among them) or one of `<>"|?*`; not ending in `.` or
+/// a space, which Windows drops (`.. ` is `..` to it); and not a device's name.
+fn page_segment(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && !segment.ends_with(['.', ' '])
+        && !is_device_name(segment)
+        && !segment.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+}
+
+/// Whether a file name (extensions and all) names a DOS device (`CON`, `NUL`, `COM1`, …), which
+/// Windows opens instead of a file of that name.
+pub fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.chars().count() == 4
+        && upper
+            .chars()
+            .nth(3)
+            .is_some_and(|c| c.is_ascii_digit() || matches!(c, '¹' | '²' | '³')))
 }

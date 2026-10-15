@@ -1,0 +1,54 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1224 >>
+stream
+BT /F2 26 Tf 0.15 g 72 712 Td (Pocket Ledger) Tj ET
+BT /F1 13 Tf 0.4 g 72 688 Td (Shared budgets for a household, without the spreadsheet) Tj ET
+BT /F1 11 Tf 0.15 g 72 648 Td (Two people add expenses from their phones and see the month at a glance.) Tj ET
+BT /F1 11 Tf 0.15 g 72 632 Td (This page is for the beta testers: what works today, and what comes next.) Tj ET
+BT /F2 13 Tf 0.15 g 72 596 Td (What the beta does) Tj ET
+BT /F1 11 Tf 0.15 g 84 576 Td (-  Split an expense evenly, 60/40, or item by item) Tj ET
+BT /F1 11 Tf 0.15 g 84 560 Td (-  Recurring bills, added on the day they fall due) Tj ET
+BT /F1 11 Tf 0.15 g 84 544 Td (-  Amounts in whole cents, with the currency beside them) Tj ET
+BT /F1 11 Tf 0.15 g 84 528 Td (-  The month at a glance, by category and by person) Tj ET
+BT /F2 13 Tf 0.15 g 72 492 Td (Coming next) Tj ET
+BT /F1 11 Tf 0.15 g 84 472 Td (-  Import a bank's CSV export) Tj ET
+BT /F1 11 Tf 0.15 g 84 456 Td (-  A gentle nudge when a category runs over) Tj ET
+BT /F2 13 Tf 0.15 g 72 420 Td (Join the beta) Tj ET
+BT /F1 11 Tf 0.15 g 72 400 Td (Ask either of us at Friday's demo and bring your phone. Lunch is focaccia.) Tj ET
+BT /F1 9 Tf 0.45 g 72 72 Td (Pocket Ledger beta, September 2026) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+7 0 obj
+<< /Title (Pocket Ledger beta) >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000251 00000 n 
+0000001526 00000 n 
+0000001596 00000 n 
+0000001671 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R /Info 7 0 R >>
+startxref
+1720
+%%EOF

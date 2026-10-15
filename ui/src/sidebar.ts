@@ -1,12 +1,13 @@
 // The library sidebar (spec §6): a section per root with its name and state, and a lazily built
 // tree. A folder's rows exist only while it is expanded; which folders are expanded is kept in
 // localStorage. Clicking a folder's name opens its README (and expands it) when it has one, else
-// toggles it; README folders carry their `status:` badge when the setting asks for them, and notes
-// with review comments their count of open ones while the feature is on. The open document is
-// highlighted, its folders expanded and its row scrolled into view. With no roots it offers to add
-// a folder instead; in a blank window, which has no workspace, to choose one (back on its list,
-// from a loose file too) or start one.
+// toggles it; README folders carry their `status:` badge when the setting asks for them, text
+// files, HTML pages and PDFs a muted mark of their type, and notes with review comments their count
+// of open ones while the feature is on. The open document is highlighted, its folders expanded and
+// its row scrolled into view. With no roots it offers to add a folder instead; in a blank window,
+// which has no workspace, to choose one (back on its list, from a loose file too) or start one.
 import { h, samePath } from "./dom";
+import type { DocKind } from "./generated/DocKind";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { RootView } from "./generated/RootView";
 import type { TreeNode } from "./generated/TreeNode";
@@ -36,6 +37,14 @@ interface Row {
   /** The root it belongs to, when it is the root's own row. */
   root: RootView | null;
 }
+
+/** The mark after the name of a document that isn't a note. */
+const KIND_MARKS: Record<DocKind, string | null> = {
+  markdown: null,
+  text: "TXT",
+  html: "HTML",
+  pdf: "PDF",
+};
 
 const EXPANDED_KEY = "lx-expanded";
 const COLLAPSED_ROOTS_KEY = "lx-collapsed-roots";
@@ -242,6 +251,7 @@ export class Sidebar {
       name: root.name,
       path: root.path,
       isDir: true,
+      kind: null,
       children: [],
       readme: null,
       status: null,
@@ -294,8 +304,8 @@ export class Sidebar {
   }
 
   /**
-   * A row: chevron for a folder, the name, a README folder's badge when badges show, and a note's
-   * count of open review comments when counts show.
+   * A row: chevron for a folder, the name, a README folder's badge when badges show, the mark of a
+   * document that isn't a note, and a note's count of open review comments when counts show.
    */
   private rowElement(node: TreeNode, depth: number, expandable: boolean): HTMLElement {
     const el = h("div", {
@@ -320,6 +330,11 @@ export class Sidebar {
     el.append(h("button", { type: "button", class: "tree-name", title: node.name }, node.name));
     if (this.badges && node.isDir && node.status !== null) {
       el.append(badge(node.status));
+    }
+    const mark = node.kind === null ? null : KIND_MARKS[node.kind];
+    if (mark !== null) {
+      // The name says it already.
+      el.append(h("span", { class: "tree-kind", "aria-hidden": "true" }, mark));
     }
     const open = node.comments ?? 0;
     if (this.counts && !node.isDir && open > 0) {
@@ -454,7 +469,7 @@ export class Sidebar {
       this.toggle(row);
       return;
     }
-    if (!target.closest(".tree-name")) {
+    if (!target.closest(".tree-name, .tree-kind")) {
       return;
     }
     const { node } = row;

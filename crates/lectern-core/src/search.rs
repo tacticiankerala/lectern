@@ -1,5 +1,5 @@
 //! Full-text search across the library (Ctrl+Shift+F): smart-case substring search over the text
-//! of every Markdown file.
+//! of every Markdown note and text file. HTML pages and PDFs are found by name in quick open only.
 //!
 //! File contents are cached by path and checked against a fresh stat, so only new and changed
 //! files are read again. A search within 3 s of the last full check trusts the cache without
@@ -22,7 +22,8 @@ use ts_rs::TS;
 
 use crate::frontmatter::{parse_frontmatter, Frontmatter, PropValue};
 use crate::library::scan::frontmatter_yaml;
-use crate::library::{path_key, LibraryIndex};
+use crate::library::{doc_kind, path_key, DocKind, LibraryIndex};
+use crate::render::file_title;
 use crate::text::decode;
 
 /// Matching lines returned for one file.
@@ -34,7 +35,7 @@ const CONTEXT_CHARS: usize = 60;
 const ELLIPSIS: &str = "…";
 /// The most threads reading files for a search. Reads mostly wait on the disk or the network.
 const MAX_THREADS: usize = 8;
-/// Larger Markdown files are not searched, nor read.
+/// Larger files are not searched, nor read.
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// How long after a search has checked every file's stamp the cache is trusted without a stat.
 const VALIDATION_WINDOW: Duration = Duration::from_secs(3);
@@ -112,7 +113,7 @@ struct Doc {
     title: OnceLock<String>,
 }
 
-/// A Markdown file to search.
+/// A note or text file to search.
 struct Candidate<'a> {
     path: PathBuf,
     rel: &'a str,
@@ -167,9 +168,9 @@ impl ContentCache {
         }
     }
 
-    /// The Markdown files in `index` whose text holds `query`, best first: file name matches, then
-    /// the most matching lines, then by path. At most 5 lines are returned per file and 500 in
-    /// all; files past that are left out.
+    /// The notes and text files in `index` whose text holds `query`, best first: file name
+    /// matches, then the most matching lines, then by path. At most 5 lines are returned per file
+    /// and 500 in all; files past that are left out.
     ///
     /// Smart case: a query without uppercase letters ignores case. A blank query finds nothing,
     /// and so does one with a line break, since lines are matched one at a time. Files that can't
@@ -329,14 +330,18 @@ fn matcher(query: &str) -> Option<Regex> {
         .ok()
 }
 
-/// Every Markdown file in `index`. A file under nested roots is searched once, under the deepest.
+/// Every note and text file in `index`. A file under nested roots is searched once, under the
+/// deepest.
 fn candidates(index: &LibraryIndex) -> Vec<Candidate<'_>> {
     let mut roots: Vec<_> = index.roots.iter().collect();
     roots.sort_by_cached_key(|r| Reverse(path_key(&r.root).len()));
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     for root in roots {
-        for file in root.md_files() {
+        let searched = root
+            .documents()
+            .filter(|f| matches!(f.kind(), Some(DocKind::Markdown | DocKind::Text)));
+        for file in searched {
             let path = root.abs(&file.rel);
             if seen.insert(path_key(&path)) {
                 files.push(Candidate {
@@ -487,10 +492,14 @@ fn name_matches(re: &Regex, rel: &str, root: &Path) -> bool {
     }
 }
 
-/// A cheap stand-in for the rendered title, since documents are never rendered to search them:
-/// the frontmatter `title`, else the first `# ` line outside code fences, else the file name
-/// without its extension. Only files in the results get a title, once per version.
+/// A cheap stand-in for the rendered title, since documents are never rendered to search them: a
+/// text file's is its file name, as the reader's is; a note's is the frontmatter `title`, else the
+/// first `# ` line outside code fences, else the file name without its extension. Only files in
+/// the results get a title, once per version.
 fn title_of(text: &str, path: &Path) -> String {
+    if doc_kind(&path.to_string_lossy()) == Some(DocKind::Text) {
+        return file_title(path);
+    }
     let (yaml, body) = split_frontmatter(text);
     yaml.and_then(frontmatter_title)
         .or_else(|| first_heading(body))

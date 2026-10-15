@@ -1,0 +1,17 @@
+Call with the weather API's sales team, 24 September
+
+Frost forecasts are in their agriculture tier, not the standard one.
+The standard tier has daily lows, but only five days ahead.
+Agriculture adds the risk of ground frost, ten days ahead, by postcode.
+
+They charge per request, with the first 10,000 a month free.
+One request per garden per day is about 3,000 a day once the beta opens,
+well past the free allowance.
+
+What we talked through:
+- Cache forecasts by postcode, not by garden. Most allotments share one.
+- Check twice a day, not every hour. The forecast barely moves.
+- Ask for their small-business rate. They'll send it by Friday.
+
+If nothing arrives by Friday, the planting rules ship without alerts,
+as the weekly review says.

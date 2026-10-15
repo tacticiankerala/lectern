@@ -21,7 +21,7 @@ use std::time::Duration;
 use lectern_core::ipc::{
     OpenRequest, OpenWhere, SettingsSnapshot, WorkspaceOutcome, WorkspaceSummary,
 };
-use lectern_core::library::is_markdown;
+use lectern_core::library::doc_kind;
 use lectern_core::library::scan::probe_with;
 use lectern_core::workspace::{
     route_open, OpenWindow, Route, WindowPlacement, WorkspaceTheme, Workspaces,
@@ -384,7 +384,8 @@ impl App {
             return;
         };
         let path = PathBuf::from(&request.path);
-        let is_dir = !is_markdown(&request.path) && is_folder(&path, self.timings.probe);
+        // A document's name is a file, unprobed, as at launch.
+        let is_dir = doc_kind(&request.path).is_none() && is_folder(&path, self.timings.probe);
         let (label, reopened) = {
             let _life = lock(&self.lifecycle);
             let (label, reopened) = match self.route(&path, is_dir) {
@@ -673,6 +674,8 @@ impl WindowState {
         }
         let watch = lock(&self.watch).take();
         drop(watch);
+        // Its pages' opens go with it: their URLs serve nothing, and their reports go nowhere.
+        lock(&self.app.page_opens).forget(&self.label);
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -1474,6 +1477,24 @@ mod tests {
             f.host.targets(|e| matches!(e, UiEvent::OpenRequest(_))),
             [Target::Window("win-1".to_owned())]
         );
+    }
+
+    /// Any document's name routes as a file, unprobed, as a Markdown name always has, so a page
+    /// in a closed workspace reopens it. Even a folder so named is taken for a file (the accepted
+    /// limit for `*.md`): that tells the skipped probe apart here.
+    #[test]
+    fn a_document_name_routes_as_a_file_without_a_probe() {
+        let dir = TempDir::new();
+        let work = dir.folder("work");
+        let personal_root = dir.folder("personal");
+        let site = dir.folder("personal/site.html");
+        let mut profile = profile(&[&work]);
+        let personal = add(&mut profile, "Personal", &[&personal_root], false);
+        let f = fixture_in(dir, profile, FakeHost::default());
+        f.state.startup();
+        f.app.launched(Some(request(&site)));
+        assert_eq!(*lock(&f.host.opened), [("win-1".to_owned(), true)]);
+        assert_eq!(window(&f, "win-1").workspace_id(), Some(personal));
     }
 
     /// A second launch while the first window is still before its startup waits for it, and

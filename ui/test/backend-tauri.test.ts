@@ -34,6 +34,22 @@ beforeEach(() => {
 });
 
 describe("TauriBackend", () => {
+  it("sends an HTML page's text with its review commands, and none for a note", async () => {
+    const backend = new TauriBackend();
+    const page = [{ text: "Results", headingLevel: 2 }, { text: "Conversion dipped." }];
+    const op = { op: "reply", id: 1, text: "Weekly." } as const;
+    await backend.loadReview("C:\\V\\a.md");
+    await backend.loadReview("C:\\V\\report.html", page);
+    await backend.reviewOp("C:\\V\\report.html", op, page);
+    await backend.reviewOp("C:\\V\\a.md", op);
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["load_review", { path: "C:\\V\\a.md", page: null }],
+      ["load_review", { path: "C:\\V\\report.html", page }],
+      ["review_op", { path: "C:\\V\\report.html", op, page }],
+      ["review_op", { path: "C:\\V\\a.md", op, page: null }],
+    ]);
+  });
+
   it("listens on its own window only", () => {
     const backend = new TauriBackend();
     backend.on("settings-changed", () => undefined);
@@ -68,6 +84,22 @@ describe("TauriBackend", () => {
     ]);
   });
 
+  it("tells Rust where the keyboard focus is, and hears the keys and loads of frames", async () => {
+    const backend = new TauriBackend();
+    await backend.setFrameFocus("page");
+    await backend.setFrameFocus("none");
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["set_frame_focus", { focus: "page" }],
+      ["set_frame_focus", { focus: "none" }],
+    ]);
+    backend.on("frame-key", () => undefined);
+    backend.on("page-loads", () => undefined);
+    expect(tauri.listen.mock.calls.map(([event, , options]) => [event, options])).toEqual([
+      ["frame-key", { target: TARGET }],
+      ["page-loads", { target: TARGET }],
+    ]);
+  });
+
   it("asks for a path's forms with the path as written, and whether it is an exact path", async () => {
     const backend = new TauriBackend();
     await backend.pathForms("`/home/me/a.md:12`", false);
@@ -90,5 +122,24 @@ describe("TauriBackend", () => {
     });
     await backend.stopListening();
     expect(tauri.stops.map((stop) => stop.mock.calls.length)).toEqual([1, 1, 1]);
+  });
+
+  it("offers every kind of document in the file picker", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    await new TauriBackend().pickFile();
+    expect(vi.mocked(open).mock.calls).toEqual([
+      [
+        {
+          multiple: false,
+          directory: false,
+          filters: [
+            {
+              name: "Documents",
+              extensions: ["md", "markdown", "mdown", "mkd", "txt", "html", "htm", "pdf"],
+            },
+          ],
+        },
+      ],
+    ]);
   });
 });

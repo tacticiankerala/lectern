@@ -8,11 +8,12 @@ import { LANDING_PX, LANDING_SLACK_PX, fixturePath, headingOffset, openFixture }
 
 const ALPHA = "work/alpha/README.md";
 const PLAN = "work/alpha/plans/2026-01-01-big-plan.md";
+const TEXT_FILE = "notes/readme.txt";
 
 /**
  * The fixtures whose visible text must match core's. Together they hold a code block, a footnote,
- * an alert, a wikilink with an alias, a task list, a table, a tag, and raw HTML both shown as text
- * and passed through; the test checks they still do.
+ * an alert, a wikilink with an alias, a task list, a table, a tag, raw HTML both shown as text
+ * and passed through, and a text file's paragraphs; the test checks they still do.
  */
 const TEXT_DOCS = [
   // A code block (with a note), a footnote, alerts, a table, and a raw HTML block.
@@ -27,6 +28,8 @@ const TEXT_DOCS = [
   "stress/long-lines.md",
   // Code in list items, a quote, front matter.
   "work/alpha/plans/2026-01-01-big-plan.md",
+  // A text file: paragraphs of lines, a script and Markdown as text, a 300-character line.
+  TEXT_FILE,
 ];
 
 function comment(over: Partial<CommentView> & { id: number }): CommentView {
@@ -38,6 +41,7 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     headingPath: [],
     jumpLine: 1,
     pinnedHeading: null,
+    pinnedAt: null,
     quote: "",
     textStart: null,
     textEnd: null,
@@ -535,6 +539,7 @@ test("UI text matches core text on real fixtures", async ({ page }) => {
           tag: found(".tag"),
           "raw HTML shown as text": doc?.textContent.includes("<script>") === true,
           "raw HTML passed through": found("details, kbd"),
+          "text file paragraphs": found("p.lx-plain"),
         },
       };
     }, fixturePath(rel));
@@ -561,8 +566,44 @@ test("UI text matches core text on real fixtures", async ({ page }) => {
       "table",
       "tag",
       "task list",
+      "text file paragraphs",
       "wikilink with an alias",
     ].sort(),
+  );
+});
+
+test("a text file takes comments from a selection and on a paragraph", async ({ page }) => {
+  await openFixture(page, TEXT_FILE);
+  await dragSelect(page, "lanternfish survey");
+  await page.locator("#lx-doc-pane button.lx-sel-comment").click();
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Which survey?");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 1)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 1).locator(".comment-place")).toHaveText("L4–L5");
+  await expect(card(page, 1).locator(".comment-quote")).toHaveText("lanternfish survey");
+  // Painted from core's offsets into its text, so on the words selected.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        [...(CSS.highlights.get("comment") ?? [])].map((r) =>
+          r instanceof Range ? r.toString() : "",
+        ),
+      ),
+    )
+    .toEqual(["lanternfish survey"]);
+  await expect(page.locator('#lx-doc .lx-cdot[data-comments="1"]')).toHaveCount(1);
+
+  // A whole paragraph, by its +: all its lines, as written.
+  await page.locator("#lx-doc p.lx-plain").nth(2).hover();
+  await page.locator("#lx-doc-pane button.lx-block-plus").click();
+  await expect(editor(page)).toBeVisible();
+  await page.keyboard.type("Is the code real?");
+  await page.keyboard.press("Control+Enter");
+  await expect(card(page, 2)).toHaveAttribute("data-state", "anchored");
+  await expect(card(page, 2).locator(".comment-place")).toHaveText("L7–L9");
+  await expect(card(page, 2).locator(".comment-quote")).toHaveText(
+    /^A third paragraph, with no Markdown in it: \*these stars stay stars\*\. <script>/,
   );
 });
 

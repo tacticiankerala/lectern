@@ -11,13 +11,73 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::review;
 
 /// The extensions of the files Lectern treats as Markdown notes, the ones its installer
-/// registers. Scanning, link routing and the app's file kinds read this list, and the UI's file
-/// picker gets it from `ui/src/generated/markdown-extensions.ts`, which the core tests write.
+/// registers. Scanning, link routing and the app's file kinds read this list, and the UI gets it
+/// from `ui/src/generated/markdown-extensions.ts`, which the core tests write.
 pub const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+
+/// The extensions of the other files Lectern opens, with the kind each opens as.
+const OTHER_EXTENSIONS: &[(&str, DocKind)] = &[
+    ("txt", DocKind::Text),
+    ("html", DocKind::Html),
+    ("htm", DocKind::Html),
+    ("pdf", DocKind::Pdf),
+];
+
+/// What a file Lectern opens is, which decides how it shows, whether it takes comments and
+/// whether search reads it. Kinds come from core only (`doc_kind`).
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum DocKind {
+    Markdown,
+    Text,
+    Html,
+    Pdf,
+}
+
+impl DocKind {
+    /// Whether a file of this kind can have review comments, in a sidecar beside it: notes, text
+    /// files and HTML pages, not PDFs.
+    pub fn takes_comments(self) -> bool {
+        !matches!(self, Self::Pdf)
+    }
+
+    /// Whether a file of this kind shows in a frame, as itself, rather than rendered by Lectern:
+    /// HTML pages and PDFs. Lectern never reads one to open it.
+    pub fn framed(self) -> bool {
+        matches!(self, Self::Html | Self::Pdf)
+    }
+}
+
+/// The kind of the file at `path`, from its extension in any letter case; `None` for a file Lectern
+/// doesn't open.
+pub fn doc_kind(path: &str) -> Option<DocKind> {
+    let ext = Path::new(path).extension()?.to_str()?;
+    if MARKDOWN_EXTENSIONS
+        .iter()
+        .any(|md| ext.eq_ignore_ascii_case(md))
+    {
+        return Some(DocKind::Markdown);
+    }
+    OTHER_EXTENSIONS
+        .iter()
+        .find(|(other, _)| ext.eq_ignore_ascii_case(other))
+        .map(|&(_, kind)| kind)
+}
+
+/// Every extension Lectern opens, Markdown's first. The UI gets the list from
+/// `ui/src/generated/document-extensions.ts`, which the core tests write.
+pub fn document_extensions() -> impl Iterator<Item = &'static str> {
+    MARKDOWN_EXTENSIONS
+        .iter()
+        .copied()
+        .chain(OTHER_EXTENSIONS.iter().map(|&(ext, _)| ext))
+}
 
 /// Whether `path` names a Markdown file: its extension is one of `MARKDOWN_EXTENSIONS`, in any
 /// letter case.
@@ -79,6 +139,18 @@ pub struct RootIndex {
     lookup: Lookup,
 }
 
+impl FileEntry {
+    /// The file's kind; `None` for a file Lectern doesn't open.
+    pub fn kind(&self) -> Option<DocKind> {
+        doc_kind(&self.rel)
+    }
+
+    /// Whether the file can have a review sidecar beside it.
+    fn takes_comments(&self) -> bool {
+        self.kind().is_some_and(DocKind::takes_comments)
+    }
+}
+
 /// Case-insensitive indexes into `RootIndex::files`.
 #[derive(Debug, Clone, Default)]
 struct Lookup {
@@ -137,8 +209,9 @@ impl RootIndex {
     }
 
     /// Marks the sidecars and rebuilds the lookup maps from `files`. Call after changing `files`
-    /// or their heads. Until the heads are read, a file named as the sidecar of a Markdown note
-    /// beside it is taken for one, so a sidecar never shows while a slow share is being read.
+    /// or their heads. Until the heads are read, a file named as the sidecar of a note beside it
+    /// that takes comments is taken for one, so a sidecar never shows while a slow share is being
+    /// read.
     pub fn finalize(&mut self) {
         let mut lookup = Lookup::default();
         for (idx, file) in self.files.iter().enumerate() {
@@ -176,9 +249,17 @@ impl RootIndex {
         self.lookup = lookup;
     }
 
-    /// The notes: Markdown files that aren't review sidecars.
+    /// The notes: Markdown files that aren't review sidecars. Wikilinks reach these only.
     pub fn md_files(&self) -> impl Iterator<Item = &FileEntry> {
         self.files.iter().filter(|f| f.is_md && !f.is_sidecar)
+    }
+
+    /// Every file Lectern opens (one with a kind) that isn't a review sidecar: what the tree and
+    /// quick open list.
+    pub fn documents(&self) -> impl Iterator<Item = &FileEntry> {
+        self.files
+            .iter()
+            .filter(|f| f.kind().is_some() && !f.is_sidecar)
     }
 
     /// The open comments in the review sidecar of the note at `note_rel`. `None` when the note has
@@ -198,9 +279,10 @@ impl RootIndex {
     }
 }
 
-/// Whether `file` is the review sidecar of a note beside it: its frontmatter names a Markdown file
-/// in its own folder that the index holds, and that file's sidecar name is this file's name. A
-/// file that is merely named like a sidecar (`code.review.md`) stays a note.
+/// Whether `file` is the review sidecar of a note beside it: its frontmatter names a file that
+/// takes comments (Markdown, text or HTML) in its own folder that the index holds, and that file's
+/// sidecar name is this file's name. A file that is merely named like a sidecar
+/// (`code.review.md`) stays a note.
 fn is_sidecar(file: &FileEntry, files: &[FileEntry], by_rel: &HashMap<String, usize>) -> bool {
     let Some(note) = file.review_of.as_deref() else {
         return false;
@@ -210,13 +292,13 @@ fn is_sidecar(file: &FileEntry, files: &[FileEntry], by_rel: &HashMap<String, us
         return false;
     }
     let (dir, name) = split_rel(&file.rel);
-    let note_is_md = sibling(files, by_rel, dir, note).is_some_and(|note| note.is_md);
-    note_is_md && same_name(&sidecar_name(note), name)
+    let takes_comments = sibling(files, by_rel, dir, note).is_some_and(FileEntry::takes_comments);
+    takes_comments && same_name(&sidecar_name(note), name)
 }
 
-/// Whether `file` is named as the sidecar of a Markdown note beside it, frontmatter unseen: what
-/// stands in for `is_sidecar` until the heads are read. An ordinary `code.review.md` beside a
-/// `code.md` is taken for a sidecar until then.
+/// Whether `file` is named as the sidecar of a note beside it that takes comments, frontmatter
+/// unseen: what stands in for `is_sidecar` until the heads are read. An ordinary `code.review.md`
+/// beside a `code.md` is taken for a sidecar until then.
 fn named_as_sidecar(
     file: &FileEntry,
     files: &[FileEntry],
@@ -229,13 +311,13 @@ fn named_as_sidecar(
     // The suffix is ASCII, so this cut falls on a character boundary.
     let base = &name[..name.len() - review::SIDECAR_SUFFIX.len()];
     // `<base>.review.md` is the sidecar name of `<base>.md`, and of `<base>` itself when that is a
-    // Markdown file with another extension (`x.markdown`).
+    // note with another extension (`x.markdown`, `page.html`, `notes.txt`).
     [format!("{base}.md"), base.to_owned()]
         .iter()
         .any(|candidate| {
             sibling(files, by_rel, dir, candidate).is_some_and(|note| {
                 let (_, note_name) = split_rel(&note.rel);
-                note.is_md && same_name(&sidecar_name(note_name), name)
+                note.takes_comments() && same_name(&sidecar_name(note_name), name)
             })
         })
 }

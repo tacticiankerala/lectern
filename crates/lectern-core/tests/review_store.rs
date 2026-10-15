@@ -8,10 +8,13 @@ use std::sync::Barrier;
 use std::thread;
 
 use lectern_core::review::{
-    format,
+    anchor::{resolve_all, AnchorState},
+    fingerprint, format,
     ops::{NewAnchor, ReviewOp},
     sidecar_path,
     store::{self, StoreError},
+    text::{NoteText, PageBlock},
+    view::{build_payload, PayloadInput},
     CommentStatus, EntryAuthor, HARD_READ_CAP, MAX_SIDECAR_BYTES,
 };
 use tempfile::TempDir;
@@ -545,4 +548,377 @@ fn instructions_block_is_refreshed_on_save() {
     let after = fs::read_to_string(&sidecar).unwrap();
     assert!(after.starts_with(plain), "{after}");
     assert!(!after.contains("<!-- lectern:"), "{after}");
+}
+
+/// A text file's comments anchor against its paragraphs, where a `#` line is text, not a heading.
+#[test]
+fn a_text_files_comment_anchors_against_its_paragraphs() {
+    let dir = tempfile::tempdir().unwrap();
+    let note = dir.path().join("tide.txt");
+    let source = "# Tide sync\n\nThe client uploads readings\nin batches of at most 50.\n";
+    fs::write(&note, source).unwrap();
+    let sidecar = sidecar_path(&note);
+    assert_eq!(sidecar.file_name().unwrap(), "tide.txt.review.md");
+    let op = ReviewOp::Add {
+        anchor: NewAnchor {
+            start_line: 1,
+            end_line: 1,
+            quote: "# Tide sync".into(),
+            prefix: String::new(),
+        },
+        text: "Rename it?".into(),
+    };
+
+    let (review, _) = store::apply_op(&sidecar, "tide.txt", source, &op, NOW).unwrap();
+
+    let comment = review.comments().next().unwrap();
+    assert_eq!((comment.start_line, comment.end_line), (1, 1));
+    assert!(comment.heading_path.is_empty());
+    let anchor = comment.anchor.as_ref().unwrap();
+    assert_eq!(anchor.fp, fingerprint(source), "the quote was found");
+    assert_eq!(anchor.suffix, " The client uploads readings in ");
+    let content = fs::read_to_string(&sidecar).unwrap();
+    assert!(content.contains("note: tide.txt\n"), "{content}");
+    assert!(content.contains("\n> # Tide sync\n"), "{content}");
+}
+
+/// An HTML page's comments go on the text its bridge reported (`apply_op_on`): its source alone is
+/// refused, before anything is written, rather than read as a note.
+#[test]
+fn a_page_without_the_text_its_bridge_reported_takes_no_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("report.html");
+    fs::write(&page, PAGE).unwrap();
+    let sidecar = sidecar_path(&page);
+    for name in ["report.html", "REPORT.HTM"] {
+        let Err(err) = store::apply_op(&sidecar, name, PAGE, &add_op(), NOW) else {
+            panic!("{name}: a page took a comment on its source");
+        };
+        assert!(matches!(err, StoreError::NoPageText), "{name}: {err:?}");
+    }
+    assert!(!sidecar.exists());
+    assert!(NoteText::of_note("report.html", PAGE).is_none());
+}
+
+/// An invented page, its sidecar's path in a temporary folder, and the page's text as its bridge
+/// reports it: a heading on line 4, and the same phrase on lines 6 and 8.
+const PAGE: &str = "<!doctype html>\n<title>Weekly report</title>\n<body>\n<h1>Weekly report</h1>\n<h2>Results</h2>\n<p>Sign-ups rose, but conversion dipped in week 3.</p>\n<h2>Next steps</h2>\n<p>Ask why conversion dipped in week 3.</p>\n";
+
+fn report_page() -> (TempDir, PathBuf, NoteText) {
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("report.html");
+    fs::write(&page, PAGE).unwrap();
+    let sidecar = sidecar_path(&page);
+    assert_eq!(sidecar.file_name().unwrap(), "report.html.review.md");
+    let block = |text: &str, level: Option<u8>| PageBlock {
+        text: text.into(),
+        heading_level: level,
+    };
+    let blocks = [
+        block("Weekly report", Some(1)),
+        block("Results", Some(2)),
+        block("Sign-ups rose, but conversion dipped in week 3.", None),
+        block("Next steps", Some(2)),
+        block("Ask why conversion dipped in week 3.", None),
+    ];
+    (dir, sidecar, NoteText::of_page(&blocks, PAGE))
+}
+
+/// A comment on `quote` selected in a page, as the UI sends it: no lines, and the text before it.
+fn add_on_page(quote: &str, prefix: &str) -> ReviewOp {
+    ReviewOp::Add {
+        anchor: NewAnchor {
+            start_line: 0,
+            end_line: 0,
+            quote: quote.into(),
+            prefix: prefix.into(),
+        },
+        text: "Weekly, not daily.".into(),
+    }
+}
+
+/// An HTML page's comments anchor against the text its bridge reported: a selection carries no
+/// lines, so the text before it tells a phrase found twice apart, and the lines are the page
+/// source's, where each block was found.
+#[test]
+fn a_pages_comment_anchors_against_the_text_its_bridge_reported() {
+    let (dir, sidecar, text) = report_page();
+    let page = dir.path().join("report.html");
+    let source = PAGE;
+    let add = |prefix: &str| add_on_page("conversion dipped in week 3", prefix);
+
+    let fp = text.fingerprint.clone();
+    let save = |op: &ReviewOp| store::apply_op_on(&sidecar, "report.html", &text, op, NOW);
+    let (review, _) = save(&add("Results Sign-ups rose, but ")).unwrap();
+    let (review2, _) = save(&add("Next steps Ask why ")).unwrap();
+
+    let first = review.comments().next().unwrap();
+    assert_eq!((first.start_line, first.end_line), (6, 6));
+    assert_eq!(first.heading_path, ["Weekly report", "Results"]);
+    assert_eq!(first.anchor.as_ref().unwrap().fp, fp, "the quote was found");
+    let second = review2.comments().nth(1).unwrap();
+    assert_eq!((second.start_line, second.end_line), (8, 8));
+    assert_eq!(second.heading_path, ["Weekly report", "Next steps"]);
+    let content = fs::read_to_string(&sidecar).unwrap();
+    assert!(content.contains("note: report.html\n"), "{content}");
+    assert!(
+        content.contains("\n## C1 · open · L6 · Weekly report › Results\n"),
+        "{content}"
+    );
+    assert!(
+        content.contains("\n> conversion dipped in week 3\n"),
+        "{content}"
+    );
+    assert!(
+        content.contains("\n## C2 · open · L8 · Weekly report › Next steps\n"),
+        "{content}"
+    );
+    assert_eq!(
+        fs::read_to_string(&page).unwrap(),
+        source,
+        "the page changed"
+    );
+}
+
+/// A page's selection carries no lines, so a quote that isn't in the page's text (the page changed
+/// under the reader) is pinned as a detached comment is: to the deepest heading of its path still
+/// there, else to the page's first block, else to line 1. Never to line 0.
+#[test]
+fn a_page_comment_whose_quote_isnt_there_is_never_on_line_0() {
+    let (_dir, sidecar, text) = report_page();
+    let save = |op: &ReviewOp| store::apply_op_on(&sidecar, "report.html", &text, op, NOW);
+    save(&add_on_page("words the page no longer has", "")).unwrap();
+    save(&add_on_page("Ask why", "Next steps ")).unwrap();
+    let reattach = ReviewOp::Reattach {
+        id: 2,
+        anchor: NewAnchor {
+            start_line: 0,
+            end_line: 0,
+            quote: "gone from the page".into(),
+            prefix: String::new(),
+        },
+    };
+    let (review, _) = save(&reattach).unwrap();
+
+    let content = fs::read_to_string(&sidecar).unwrap();
+    assert!(
+        content.contains("\n## C1 · open · L4 · Weekly report\n"),
+        "{content}"
+    );
+    assert!(
+        content.contains("\n## C2 · open · L7 · Weekly report › Next steps\n"),
+        "{content}"
+    );
+    assert!(!content.contains(" · L0"), "{content}");
+    // Not found, so never trusted: looked for by their quote again on every load.
+    for c in review.comments() {
+        assert_eq!(c.anchor.as_ref().unwrap().fp, "", "C{}", c.id);
+    }
+
+    // A page with no text at all: line 1.
+    let empty = NoteText::of_page(&[], PAGE);
+    let (review, _) =
+        store::apply_op_on(&sidecar, "report.html", &empty, &add_on_page("x", ""), NOW).unwrap();
+    let c3 = review.comments().nth(2).unwrap();
+    assert_eq!((c3.start_line, c3.end_line), (1, 1));
+}
+
+/// A minified page has its headings on one line, so a page's heading paths go by the order of its
+/// blocks, not by source lines: a paragraph is under the heading before it.
+#[test]
+fn a_minified_pages_headings_go_by_block_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("min.html");
+    let source = "<body>\n<h2>Results</h2><p>First paragraph here.</p><h2>Next steps</h2><p>Second paragraph here.</p>\n";
+    fs::write(&page, source).unwrap();
+    let sidecar = sidecar_path(&page);
+    let block = |text: &str, level: Option<u8>| PageBlock {
+        text: text.into(),
+        heading_level: level,
+    };
+    let blocks = [
+        block("Results", Some(2)),
+        block("First paragraph here.", None),
+        block("Next steps", Some(2)),
+        block("Second paragraph here.", None),
+    ];
+    let note = NoteText::of_page(&blocks, source);
+    let save = |quote: &str| {
+        store::apply_op_on(&sidecar, "min.html", &note, &add_on_page(quote, ""), NOW).unwrap()
+    };
+    save("First paragraph");
+    let (review, _) = save("Second paragraph");
+    let paths: Vec<(u32, Vec<String>)> = review
+        .comments()
+        .map(|c| (c.start_line, c.heading_path.clone()))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            (2, vec!["Results".to_owned()]),
+            (2, vec!["Next steps".to_owned()])
+        ]
+    );
+    // As the payload shows them, found in the page again.
+    let resolved = resolve_all(&review, &note.text, &note.fingerprint);
+    let payload = build_payload(
+        PayloadInput {
+            note: &page,
+            sidecar: &sidecar,
+            review: Some(&review),
+            resolved: &resolved,
+            text: Some(&note.text),
+            read_only: None,
+            note_wsl: None,
+            sidecar_wsl: None,
+        },
+        &|md: &str| md.to_owned(),
+    );
+    let shown: Vec<&[String]> = payload
+        .comments
+        .iter()
+        .map(|c| c.heading_path.as_slice())
+        .collect();
+    assert_eq!(shown, [["Results"], ["Next steps"]]);
+}
+
+/// A page's comments record the fingerprint of the text its bridge reported as well as of its file:
+/// the same HTML shows other text when a script writes something else or scripts are off, so a
+/// quote gone from what it shows is looked for, not kept where it was.
+#[test]
+fn a_pages_comments_record_the_fingerprint_of_its_text() {
+    let (_dir, sidecar, page) = report_page();
+    let (review, _) = store::apply_op_on(
+        &sidecar,
+        "report.html",
+        &page,
+        &add_on_page("Ask why", "Next steps "),
+        NOW,
+    )
+    .unwrap();
+    let fp = &review
+        .comments()
+        .next()
+        .unwrap()
+        .anchor
+        .as_ref()
+        .unwrap()
+        .fp;
+    // The text it showed, then its HTML.
+    assert_eq!(fp, &fingerprint(&format!("{}\0{PAGE}", page.text.text())));
+    assert_eq!(
+        resolve_all(&review, &page.text, &page.fingerprint)[0].state,
+        AnchorState::Anchored
+    );
+    // The same file, showing only its heading.
+    let heading = PageBlock {
+        text: "Weekly report".into(),
+        heading_level: Some(1),
+    };
+    let other = NoteText::of_page(&[heading], PAGE);
+    assert_eq!(
+        resolve_all(&review, &other.text, &other.fingerprint)[0].state,
+        AnchorState::Detached
+    );
+}
+
+/// The blocks of a page, as its bridge reports them: `(text, heading level)`.
+fn blocks_of(blocks: &[(&str, Option<u8>)]) -> Vec<PageBlock> {
+    blocks
+        .iter()
+        .map(|&(text, heading_level)| PageBlock {
+            text: text.into(),
+            heading_level,
+        })
+        .collect()
+}
+
+/// A page's fingerprint covers its HTML as well as its text: an edit that moves its lines but not
+/// its text has its comments found again by their quote and its context, not left on lines that
+/// now hold another copy of their quote.
+#[test]
+fn a_page_edited_without_changing_its_text_finds_its_comments_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_path(&dir.path().join("twice.html"));
+    let source = "<body>\n<h1>Report</h1>\n<p>Conversion dipped in week 3.</p>\n<p>Conversion dipped in week 3.</p>\n<p>The end.</p>\n";
+    let blocks = blocks_of(&[
+        ("Report", Some(1)),
+        ("Conversion dipped in week 3.", None),
+        ("Conversion dipped in week 3.", None),
+        ("The end.", None),
+    ]);
+    let note = NoteText::of_page(&blocks, source);
+    let add = add_on_page(
+        "Conversion dipped in week 3.",
+        "Report Conversion dipped in week 3. ",
+    );
+    let (review, _) = store::apply_op_on(&sidecar, "twice.html", &note, &add, NOW).unwrap();
+    let c1 = review.comments().next().unwrap();
+    assert_eq!((c1.start_line, c1.end_line), (4, 4), "on the second copy");
+
+    // A blank line above both copies: the page shows the same text, its lines have moved.
+    let moved_source = source.replace("<h1>Report</h1>\n", "<h1>Report</h1>\n\n");
+    let moved = NoteText::of_page(&blocks, &moved_source);
+    let resolved = resolve_all(&review, &moved.text, &moved.fingerprint);
+    let second = moved.text.text().rfind("Conversion dipped").unwrap();
+    assert_eq!(resolved[0].state, AnchorState::Anchored);
+    assert_eq!((resolved[0].start_line, resolved[0].end_line), (5, 5));
+    assert_eq!(resolved[0].span.map(|(s, _)| s), Some(second));
+}
+
+/// A detached page comment is pinned to the deepest heading of its path still on the page, and
+/// the payload says which one by where it starts: a page can repeat a heading.
+#[test]
+fn a_detached_page_comment_is_pinned_to_its_own_heading_of_several() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("twice.html");
+    let sidecar = sidecar_path(&page);
+    let source = "<body>\n<h1>First</h1>\n<h2>Results</h2>\n<p>Early results here.</p>\n<h1>Second</h1>\n<h2>Results</h2>\n<p>Late figures came in.</p>\n";
+    let headings = [
+        ("First", Some(1)),
+        ("Results", Some(2)),
+        ("Early results here.", None),
+        ("Second", Some(1)),
+        ("Results", Some(2)),
+    ];
+    let mut blocks = blocks_of(&headings);
+    blocks.extend(blocks_of(&[("Late figures came in.", None)]));
+    let note = NoteText::of_page(&blocks, source);
+    let (review, _) = store::apply_op_on(
+        &sidecar,
+        "twice.html",
+        &note,
+        &add_on_page("Late figures came in", "Second Results "),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        review.comments().next().unwrap().heading_path,
+        ["Second", "Results"]
+    );
+
+    // The paragraph is gone: the comment is detached, pinned to the second Results.
+    let gone = NoteText::of_page(
+        &blocks_of(&headings),
+        &source.replace("<p>Late figures came in.</p>\n", ""),
+    );
+    let resolved = resolve_all(&review, &gone.text, &gone.fingerprint);
+    let payload = build_payload(
+        PayloadInput {
+            note: &page,
+            sidecar: &sidecar,
+            review: Some(&review),
+            resolved: &resolved,
+            text: Some(&gone.text),
+            read_only: None,
+            note_wsl: None,
+            sidecar_wsl: None,
+        },
+        &|md: &str| md.to_owned(),
+    );
+    let c1 = &payload.comments[0];
+    assert_eq!(c1.state, AnchorState::Detached);
+    assert_eq!(c1.pinned_heading.as_deref(), Some("Results"));
+    let second = gone.text.text().rfind("Results").unwrap();
+    assert_eq!(c1.pinned_at, Some(u32::try_from(second).unwrap()));
 }

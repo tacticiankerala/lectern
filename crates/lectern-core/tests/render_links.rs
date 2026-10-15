@@ -291,6 +291,45 @@ fn without_an_index_relative_markdown_links_join_the_doc_folder() {
 }
 
 #[test]
+fn links_to_text_html_and_pdf_files_open_in_lectern() {
+    let v = Vault::new();
+    let html = v.render_fixture("notes/résumé notes.md").html;
+    for (text, rel) in [
+        ("report", "artifacts/report.html"),
+        ("brief", "artifacts/brief.pdf"),
+        ("readme", "notes/readme.txt"),
+    ] {
+        assert_has(
+            &html,
+            &format!(
+                r#"class="link-doc" data-kind="doc" data-target="{}">{text}</a>"#,
+                v.abs(rel)
+            ),
+        );
+    }
+    // A path-like code span to one is a doc link too.
+    let html = v.render("README.md", "`artifacts/report.html`\n").html;
+    assert_has(
+        &html,
+        &format!(
+            r#"class="code-link" data-kind="doc" data-target="{}"><code"#,
+            v.abs("artifacts/report.html")
+        ),
+    );
+    // So is one the index can't confirm yet, as for a Markdown note.
+    let html = v
+        .render_unindexed("notes/x.md", "[page](../artifacts/new.htm)\n")
+        .html;
+    assert_has(
+        &html,
+        &format!(
+            r#"class="link-doc" data-kind="doc" data-target="{}">page</a>"#,
+            v.abs("artifacts/new.htm")
+        ),
+    );
+}
+
+#[test]
 fn link_to_another_file_is_a_file_link() {
     let v = Vault::new();
     let html = v

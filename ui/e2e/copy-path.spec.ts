@@ -80,6 +80,7 @@ test("a link in a review comment has the same menu", async ({ page, context }) =
         headingPath: [],
         jumpLine: 1,
         pinnedHeading: null,
+        pinnedAt: null,
         quote: "Memory index",
         textStart: null,
         textEnd: null,

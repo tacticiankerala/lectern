@@ -43,6 +43,9 @@ pub struct CommentView {
     pub jump_line: Option<u32>,
     /// When detached: the deepest heading of the comment's path still in the note.
     pub pinned_heading: Option<String>,
+    /// Where that heading starts in the note's visible text, counted as `text_start` is: which of
+    /// the headings with its text it is, for a page, which has no lines to go to.
+    pub pinned_at: Option<u32>,
     pub quote: String,
     /// Where the quote (or the passage it became, when it moved) is in the note's visible text,
     /// the text the UI builds from the page too: from `text_start` up to `text_end`, counted in
@@ -112,7 +115,7 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
         note_wsl,
         sidecar_wsl,
     } = input;
-    let (mut comments, spans): (Vec<CommentView>, Vec<Option<(usize, usize)>>) = review
+    let (mut comments, places): (Vec<CommentView>, Vec<Place>) = review
         .into_iter()
         .flat_map(Review::comments)
         .enumerate()
@@ -122,12 +125,18 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
         })
         .unzip();
     if let Some(text) = text {
-        let bytes: Vec<usize> = spans.iter().flatten().flat_map(|&(s, e)| [s, e]).collect();
+        let bytes: Vec<usize> = places
+            .iter()
+            .flat_map(|p| p.span.into_iter().flat_map(|(s, e)| [s, e]).chain(p.pinned))
+            .collect();
         let mut units = utf16_offsets(text.text(), &bytes).into_iter();
-        for (view, span) in comments.iter_mut().zip(&spans) {
-            if span.is_some() {
+        for (view, place) in comments.iter_mut().zip(&places) {
+            if place.span.is_some() {
                 view.text_start = units.next();
                 view.text_end = units.next();
+            }
+            if place.pinned.is_some() {
+                view.pinned_at = units.next();
             }
         }
     }
@@ -157,16 +166,23 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
     }
 }
 
+/// Where a comment is in the note's text, in bytes: the range of its quote (or of the passage it
+/// became), or the start of the heading it is pinned to.
+struct Place {
+    span: Option<(usize, usize)>,
+    pinned: Option<usize>,
+}
+
 /// A comment at the place `resolved` found for it: there when its quote was found, otherwise at
 /// its stored place, pinned to a heading when one survives, or else to the note's top (its first
-/// block, or line 1 without the note's text or any block). With it, the byte range of its quote
-/// (or of the passage it became) in `text`, when that's known.
+/// block, or line 1 without the note's text or any block). With it, where it is in `text`, when
+/// that's known.
 fn comment_view(
     c: &Comment,
     resolved: Option<&Resolved>,
     text: Option<&TextMap>,
     render: &dyn Fn(&str) -> String,
-) -> (CommentView, Option<(usize, usize)>) {
+) -> (CommentView, Place) {
     let mut view = CommentView {
         id: c.id,
         status: c.effective_status(),
@@ -174,11 +190,9 @@ fn comment_view(
         start_line: c.start_line,
         end_line: c.end_line,
         heading_path: c.heading_path.clone(),
-        jump_line: Some(
-            text.and_then(|t| t.blocks().iter().map(|b| b.start_line).min())
-                .unwrap_or(1),
-        ),
+        jump_line: Some(text.and_then(TextMap::top_line).unwrap_or(1)),
         pinned_heading: None,
+        pinned_at: None,
         quote: c.quote.clone(),
         text_start: None,
         text_end: None,
@@ -186,11 +200,13 @@ fn comment_view(
         entries: c.entries.iter().map(|e| entry_view(e, render)).collect(),
     };
     let mut span = None;
+    let mut pinned = None;
     match resolved {
         Some(r) if r.state == AnchorState::Detached => {
             if let Some((heading, line)) = &r.pinned_heading {
                 view.pinned_heading = Some(heading.clone());
                 view.jump_line = Some(*line);
+                pinned = r.pinned_at.filter(|_| text.is_some());
             }
         }
         Some(r) => {
@@ -198,16 +214,19 @@ fn comment_view(
             view.start_line = r.start_line;
             view.end_line = r.end_line;
             if let Some(text) = text {
-                view.heading_path = text.heading_path_at(r.start_line);
                 // Left where it was, the note unchanged, it wasn't looked for: look now.
                 span = r.span.or_else(|| stored_span(c, text));
+                view.heading_path = match span {
+                    Some((s, _)) => text.heading_path_of(s, r.start_line),
+                    None => text.heading_path_at(r.start_line),
+                };
             }
             view.jump_line = Some(r.start_line);
             view.current_text = r.current_text.clone();
         }
         None => {}
     }
-    (view, span)
+    (view, Place { span, pinned })
 }
 
 /// The UTF-16 code-unit offsets into `text` of the byte offsets `at`, each on a character

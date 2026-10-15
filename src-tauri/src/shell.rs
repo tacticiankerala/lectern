@@ -24,7 +24,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-/// Opened with the shell's default app: images, documents, office files, media, web pages.
+/// Opened with the shell's default app: images, documents, office files, media, web pages. Text
+/// files, HTML pages and PDFs open in Lectern from links, but stay here for "Open in default app".
 const VIEWABLE: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "pdf", "txt", "csv", "log", "docx",
     "xlsx", "pptx", "odt", "ods", "mp4", "mov", "mp3", "wav", "html", "htm",

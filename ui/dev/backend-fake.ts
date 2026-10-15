@@ -1,8 +1,16 @@
 // A Backend that serves the fixtures `export_fixtures` rendered (ui/dev/fixtures.json), so the
 // UI runs in a plain browser for Playwright. Tests drive it through `window.__fake`.
 //
-// Full-text search matches the fixtures' Markdown, which `build.mjs --fake` inlines, as Rust does:
-// smart case, line by line.
+// Full-text search matches the fixtures' notes and text files, which `build.mjs --fake` inlines, as
+// Rust does: smart case, line by line. Each document's kind comes from core, through the export. A
+// page or a PDF loads into its frame from the dev server (`/__page/o/<token>/…`, dev/serve.mjs), as
+// it would from `lxpage`: each open has a token, which reaches the page's folder and below, and a
+// page comes with the bridge in it, under the *HTML pages* setting's policy, which its frame URL
+// tells the server (`lxmode`). The dev server keeps nothing of the fake's, so a token carries the
+// page it opened (`openUrl`). A change of the setting has the page on screen open again, as Rust
+// does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
+// from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
+// which only Rust sees, come from `frameKey`.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -21,27 +29,33 @@
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
 // lines; one seeded as moved stays moved while its current text is there; anything else is
 // detached. Without text for a note, comments keep the state they were seeded with. Statuses,
-// `openCount` and the operations follow core's rules.
+// `openCount` and the operations follow core's rules. An HTML page's text is the one the UI sends
+// with each review command, as its bridge reported it, a block a line; a comment added on a page
+// takes the lines of where its quote is found, as core gives them.
 import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
 import { trimPath } from "../src/copy-path";
-import { MARKDOWN_PATH } from "../src/dom";
+import { DOCUMENT_PATH } from "../src/dom";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
 import type { ClaudeKind } from "../src/generated/ClaudeKind";
 import type { CommentStatus } from "../src/generated/CommentStatus";
 import type { Crumb } from "../src/generated/Crumb";
+import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
 import type { EntryAuthor } from "../src/generated/EntryAuthor";
 import type { EntryView } from "../src/generated/EntryView";
 import type { FileHits } from "../src/generated/FileHits";
 import type { FollowResult } from "../src/generated/FollowResult";
 import type { FollowTarget } from "../src/generated/FollowTarget";
+import type { FrameFocus } from "../src/generated/FrameFocus";
+import type { FrameKey } from "../src/generated/FrameKey";
 import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
+import type { PageBlock } from "../src/generated/PageBlock";
 import type { PathForms } from "../src/generated/PathForms";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
@@ -62,6 +76,7 @@ import type { UpdateInfo } from "../src/generated/UpdateInfo";
 import type { UserOpen } from "../src/generated/UserOpen";
 import type { WorkspaceOutcome } from "../src/generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "../src/generated/WorkspaceSummary";
+import { fakeBridgeKey } from "./page-serving.mjs";
 
 export interface Fixtures {
   /** The fake library root, `C:\Fixtures\vault`. */
@@ -70,10 +85,14 @@ export interface Fixtures {
   candidates: Candidate[];
   /** By path. */
   docs: Record<string, RenderedDoc>;
-  /** Each document's Markdown, by path; `build.mjs --fake` adds it. */
+  /** The kind of each document that isn't Markdown, by path. */
+  kinds?: Record<string, DocKind>;
+  /** The text of each note and text file, by path; `build.mjs --fake` adds it. */
   sources?: Record<string, string>;
   /** Core's review text for each document, by path: `[startLine, endLine, text]` per block. */
   textBlocks?: Record<string, [number, number, string][]>;
+  /** The hosts each HTML page loads from the web, by path; `build.mjs --fake` adds them. */
+  pageHosts?: Record<string, string[]>;
 }
 
 export interface FakeOptions {
@@ -148,6 +167,12 @@ const POSITIONS_KEY = "lx-fake-positions";
 const WORKSPACES_KEY = "lx-fake-workspaces";
 /** As Rust, a review asked for while review comments are off. */
 const FEATURE_OFF = "Review comments are turned off in Preferences.";
+/** As Rust, the reason a PDF shows no comments. */
+const NOT_ON_A_PDF = "PDFs don't take comments.";
+/** As Rust, a page's review asked for without the page's text. */
+const NO_PAGE_TEXT = "The page hasn't reported its text yet, so its comments can't be placed.";
+/** How long after a page opens the fake tells what it loads, as the browser's reports would. */
+const PAGE_LOADS_MS = 30;
 /** As core: a workspace's name is at most 60 characters. */
 const MAX_NAME_CHARS = 60;
 /**
@@ -253,6 +278,15 @@ export interface FakeControl {
    * not in the model, a new workspace is added with it), then `workspaces-changed` is sent.
    */
   workspacesElsewhere(id: string, change: Partial<Omit<FakeWorkspace, "id">>): void;
+  /**
+   * A key pressed inside a frame, as Rust reports one of Lectern's (`frame-key`); the modifiers not
+   * given aren't held.
+   */
+  frameKey(key: Pick<FrameKey, "key" | "code"> & Partial<FrameKey>): void;
+  /** Every `follow`, in order. */
+  readonly followed: FollowTarget[];
+  /** Where the UI said the keyboard focus was, each time it said, in order. */
+  readonly frameFocus: FrameFocus[];
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -289,6 +323,8 @@ interface StoredComment {
   movedTo: string | null;
   jumpLine: number | null;
   pinnedHeading: string | null;
+  /** Where the heading it was seeded as pinned to starts in the note's text. */
+  pinnedAt: number | null;
 }
 
 interface StoredReview {
@@ -490,6 +526,23 @@ function sidecarOf(path: string): string {
   return `${path.slice(0, path.length - name.length)}${base}.review.md`;
 }
 
+/**
+ * As core's `page_url`, but on the dev server (dev/serve.mjs): `/__page/o/<token>/<file name>`, the
+ * name encoded. The server keeps nothing, so the token, `t<n>-<hex>`, carries the page it opened,
+ * its UTF-8 in hex, from which the server takes the open's folder. Null for anything but a drive
+ * path.
+ */
+function openUrl(n: number, path: string): { token: string; url: string } | null {
+  if (!/^[A-Za-z]:\\/.test(path)) {
+    return null;
+  }
+  const hex = [...new TextEncoder().encode(path)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const token = `t${String(n)}-${hex}`;
+  return { token, url: `/__page/o/${token}/${encodeURIComponent(baseName(path))}` };
+}
+
 /** A drive path as WSL mounts it (`C:\x` → `/mnt/c/x`); null for anything else. */
 function wslPath(path: string): string | null {
   const drive = /^([A-Za-z]):\\(.*)$/.exec(path);
@@ -552,6 +605,8 @@ function pathForms(raw: string, literal: boolean): PathForms {
 
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
+  readonly followed: FollowTarget[] = [];
+  readonly frameFocus: FrameFocus[] = [];
   readonly windowCalls: WindowCall[] = [];
   unsavedElsewhere: string[] = [];
   readonly unsavedReports: boolean[] = [];
@@ -568,9 +623,11 @@ export class FakeBackend implements Backend, FakeControl {
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
+  /** The kind of each document that isn't Markdown, by path key. */
+  private readonly kinds = new Map<string, DocKind>();
   /** Saved reading positions, by path key. */
   private readonly positions = new Map<string, SavedPosition>();
-  /** Each document's Markdown, by path key, for full-text search. */
+  /** The text of each note and text file, by path key, for full-text search. */
   private readonly sources = new Map<string, string>();
   /** Stands in for modification times: bumped by every change. */
   private clock = 0;
@@ -582,6 +639,10 @@ export class FakeBackend implements Backend, FakeControl {
   private readonly textBlocks = new Map<string, [number, number, string][]>();
   private reviewCount = 0;
   private reviewFailure: string | null = null;
+  /** Numbers each page or PDF opened, for its token. */
+  private pageOpens = 0;
+  /** The document last opened, which a change of the *HTML pages* setting opens again. */
+  private onScreen: string | null = null;
   /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
   /** The settings revision: bumped by every change to the settings or a workspace's theme. */
@@ -597,6 +658,9 @@ export class FakeBackend implements Backend, FakeControl {
     this.recent = options.recent ?? [];
     for (const [path, doc] of Object.entries(fixtures.docs)) {
       this.docs.set(key(path), { path, doc, mtimeMs: 0 });
+    }
+    for (const [path, kind] of Object.entries(fixtures.kinds ?? {})) {
+      this.kinds.set(key(path), kind);
     }
     for (const [path, source] of Object.entries(fixtures.sources ?? {})) {
       this.sources.set(key(path), source);
@@ -688,12 +752,12 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   /**
-   * As Rust decides: a file (a Markdown name, or a document the fake has) opens; a folder joins
+   * As Rust decides: a file (a document's name, or a document the fake has) opens; a folder joins
    * the library unless it nests with a root. In a blank window a folder opens and joins nothing,
    * and the answer says it is one.
    */
   openUserPath(path: string): Promise<UserOpen> {
-    if (MARKDOWN_PATH.test(path) || this.docs.has(key(path))) {
+    if (DOCUMENT_PATH.test(path) || this.docs.has(key(path))) {
       return Promise.resolve({
         doc: this.open(path),
         library: structuredClone(this.library),
@@ -797,7 +861,7 @@ export class FakeBackend implements Backend, FakeControl {
         }
       });
       if (total === 0) return null;
-      const nameMatch = name.test(baseName(path).replace(MARKDOWN_PATH, ""));
+      const nameMatch = name.test(baseName(path).replace(DOCUMENT_PATH, ""));
       const rel = path.slice(this.fixtures.root.length + 1).replaceAll("\\", "/");
       return { path, title: doc.title, rel, nameMatch, hits: lines, total };
     });
@@ -819,15 +883,22 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(results);
   }
 
-  /** `doc` targets open, with the anchor passed through as written, as Rust does. */
+  /**
+   * `doc` targets open, and `path` targets the fake has, with the anchor passed through as written,
+   * as Rust does; web and mail links go out.
+   */
   follow(target: FollowTarget): Promise<FollowResult> {
-    if (target.kind === "doc") {
+    this.followed.push(structuredClone(target));
+    if (target.kind === "doc" || (target.kind === "path" && this.docs.has(key(target.target)))) {
       return Promise.resolve({
         action: "openDoc",
-        path: target.target,
+        path: this.docs.get(key(target.target))?.path ?? target.target,
         anchor: target.anchor,
         line: target.line,
       });
+    }
+    if (target.kind === "external" && /^(https?|mailto):/i.test(target.target)) {
+      return Promise.resolve({ action: "opened" });
     }
     return Promise.resolve({ action: "notFound", message: `Couldn't find ${target.target}` });
   }
@@ -844,21 +915,28 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
-  /** As Rust: refused while review comments are off. */
-  loadReview(path: string): Promise<ReviewPayload> {
+  /** As Rust: refused while review comments are off, and for a page without its text. */
+  loadReview(path: string, page?: PageBlock[]): Promise<ReviewPayload> {
     this.reviewCount++;
     if (!this.settings.reviewComments) {
       // Rust's commands fail with a message.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       return Promise.reject(FEATURE_OFF);
     }
+    try {
+      this.takePage(path, page);
+    } catch (e) {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(e instanceof Error ? e.message : String(e));
+    }
     return Promise.resolve(this.reviewPayload(path));
   }
 
   /** The five operations, on the store, as core applies them. */
-  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
+  reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload> {
     this.reviewCount++;
     try {
+      this.takePage(path, page);
       this.applyOp(path, op);
     } catch (e) {
       // Rust's commands fail with a message.
@@ -894,6 +972,7 @@ export class FakeBackend implements Backend, FakeControl {
         movedTo: c.state === "moved" ? c.currentText : null,
         jumpLine: c.jumpLine,
         pinnedHeading: c.pinnedHeading,
+        pinnedAt: c.pinnedAt,
       })),
     });
   }
@@ -924,6 +1003,7 @@ export class FakeBackend implements Backend, FakeControl {
       movedTo: null,
       jumpLine: comment.startLine,
       pinnedHeading: null,
+      pinnedAt: null,
     });
     this.reviews.set(key(path), review);
   }
@@ -948,11 +1028,57 @@ export class FakeBackend implements Backend, FakeControl {
     this.reviewFailure = message;
   }
 
+  /**
+   * As Rust: an HTML page's review needs its text, which becomes the page's core text, a block a
+   * line; any other document's text is its own.
+   */
+  private takePage(path: string, page: PageBlock[] | undefined): void {
+    if (this.kinds.get(key(path)) !== "html") {
+      return;
+    }
+    if (page === undefined) {
+      throw new Error(NO_PAGE_TEXT);
+    }
+    this.textBlocks.set(
+      key(path),
+      page.map((b, i): [number, number, string] => [i + 1, i + 1, normalize(b.text)]),
+    );
+  }
+
+  /**
+   * As core places a comment anchored on a page, whose selection carries no lines: on the lines
+   * of where its quote is found in the page's text, or, not found, on the page's first line (core
+   * would take the heading a re-attached comment was under), never line 0.
+   */
+  private placeOnPage(path: string, c: StoredComment): void {
+    const blocks = this.textBlocks.get(key(path));
+    if (!blocks || this.kinds.get(key(path)) !== "html") {
+      return;
+    }
+    const span = quoteSpan(c, blocks);
+    if (!span) {
+      c.startLine = c.endLine = c.jumpLine = blocks[0]?.[0] ?? 1;
+      return;
+    }
+    let at = 0;
+    const lines: number[] = [];
+    for (const [start, end, text] of blocks) {
+      if (at < span[1] && span[0] < at + text.length) lines.push(start, end);
+      at += text.length + 1;
+    }
+    c.startLine = Math.min(...lines);
+    c.endLine = Math.max(...lines);
+    c.jumpLine = c.startLine;
+  }
+
   private applyOp(path: string, op: ReviewOp): void {
     const failure = this.reviewFailure;
     this.reviewFailure = null;
     if (failure !== null) {
       throw new Error(failure);
+    }
+    if (this.kinds.get(key(path)) === "pdf") {
+      throw new Error(NOT_ON_A_PDF);
     }
     const existing = this.reviews.get(key(path));
     if (existing?.readOnly) {
@@ -961,7 +1087,7 @@ export class FakeBackend implements Backend, FakeControl {
     const review = existing ?? this.newReview(path);
     if (op.op === "add") {
       const text = cleanText(op.text);
-      review.comments.push({
+      const added: StoredComment = {
         id: nextId(review),
         status: "open",
         seen: 1,
@@ -977,7 +1103,10 @@ export class FakeBackend implements Backend, FakeControl {
         movedTo: null,
         jumpLine: op.anchor.startLine,
         pinnedHeading: null,
-      });
+        pinnedAt: null,
+      };
+      this.placeOnPage(path, added);
+      review.comments.push(added);
       this.reviews.set(key(path), review);
       return;
     }
@@ -1004,6 +1133,8 @@ export class FakeBackend implements Backend, FakeControl {
         c.movedTo = null;
         c.jumpLine = op.anchor.startLine;
         c.pinnedHeading = null;
+        c.pinnedAt = null;
+        this.placeOnPage(path, c);
         break;
       case "edit": {
         const target = c.entries[op.entry];
@@ -1066,6 +1197,7 @@ export class FakeBackend implements Backend, FakeControl {
         // Detached by an edit, as core with no heading left: the note's top, its first block.
         jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : c.startLine,
         pinnedHeading: detached && c.state === "detached" ? c.pinnedHeading : null,
+        pinnedAt: detached && c.state === "detached" ? c.pinnedAt : null,
         quote: c.quote,
         textStart: span?.[0] ?? null,
         textEnd: span?.[1] ?? null,
@@ -1079,11 +1211,16 @@ export class FakeBackend implements Backend, FakeControl {
       noteWslPath: review ? review.noteWslPath : wslPath(path),
       sidecarWslPath: review ? review.sidecarWslPath : wslPath(sidecarOf(path)),
       exists: review !== undefined,
-      readOnly: review?.readOnly ?? null,
+      readOnly: this.refusal(path) ?? review?.readOnly ?? null,
       comments,
       unreadable: structuredClone(review?.unreadable ?? []),
       openCount: comments.filter((c) => c.status !== "resolved" && c.status !== "dismissed").length,
     };
+  }
+
+  /** As Rust, why `path` shows no comments: a PDF. */
+  private refusal(path: string): string | null {
+    return this.kinds.get(key(path)) === "pdf" ? NOT_ON_A_PDF : null;
   }
 
   getSettings(): Promise<SettingsSnapshot> {
@@ -1097,6 +1234,7 @@ export class FakeBackend implements Backend, FakeControl {
    */
   setSettings(patch: SettingsPatch): Promise<SettingsSnapshot> {
     const before = JSON.stringify(this.windowSettings());
+    const pages = this.settings.htmlPages;
     const theme = new Set(["themeMode", "lightTheme", "darkTheme"]);
     const own = this.currentWorkspace()?.theme;
     const defined = Object.entries(patch).filter(([, v]) => v != null);
@@ -1111,6 +1249,7 @@ export class FakeBackend implements Backend, FakeControl {
       this.rev++;
       this.emit("settings-changed", this.snapshot());
     }
+    this.reloadPage(pages);
     return Promise.resolve(this.snapshot());
   }
 
@@ -1119,11 +1258,13 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   settingsElsewhere(patch: SettingsPatch): void {
+    const pages = this.settings.htmlPages;
     const defined = Object.entries(patch).filter(([, v]) => v != null);
     this.settings = { ...this.settings, ...Object.fromEntries(defined) };
     this.saveSettings();
     this.rev++;
     this.emit("settings-changed", this.snapshot());
+    this.reloadPage(pages);
   }
 
   /** This window's settings: the shared ones under its workspace's own theme. */
@@ -1311,6 +1452,15 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  setFrameFocus(focus: FrameFocus): Promise<void> {
+    this.frameFocus.push(focus);
+    return Promise.resolve();
+  }
+
+  frameKey(pressed: Pick<FrameKey, "key" | "code"> & Partial<FrameKey>): void {
+    this.emit("frame-key", { ctrl: false, shift: false, alt: false, ...pressed });
+  }
+
   closeWindow(): Promise<void> {
     this.windowCalls.push({ call: "closeWindow" });
     return Promise.resolve();
@@ -1426,7 +1576,7 @@ export class FakeBackend implements Backend, FakeControl {
           outline: [],
           frontmatter: null,
           tasks: { done: 0, total: 0 },
-          title: baseName(path).replace(MARKDOWN_PATH, ""),
+          title: baseName(path).replace(DOCUMENT_PATH, ""),
           wordCount: 0,
           hasUnresolvedWikilinks: false,
         };
@@ -1443,15 +1593,67 @@ export class FakeBackend implements Backend, FakeControl {
 
   private open(path: string): OpenResult {
     const found = this.docs.get(key(path));
+    this.onScreen = path;
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };
     }
     return { status: "ok", doc: this.payload(found.path, found.doc, found.mtimeMs) };
   }
 
+  /**
+   * Where a page or a PDF loads into its frame from: an open of its own, and for a page the *HTML
+   * pages* setting, for the dev server, and its bridge's key. A page whose fixture loads from the
+   * web tells it a moment later, as Rust tells what the browser reports: loaded, or, without the
+   * web, blocked.
+   */
+  private frameOf(path: string, kind: DocKind): { url: string | null; key: string | null } {
+    const none = { url: null, key: null };
+    if (kind !== "html" && kind !== "pdf") {
+      return none;
+    }
+    const open = openUrl(++this.pageOpens, path);
+    if (open === null || kind === "pdf") {
+      return open === null ? none : { url: open.url, key: null };
+    }
+    const mode = this.settings.htmlPages;
+    const hosts =
+      Object.entries(this.fixtures.pageHosts ?? {}).find(([p]) => key(p) === key(path))?.[1] ?? [];
+    if (hosts.length > 0) {
+      const offline = mode !== "full";
+      setTimeout(() => {
+        this.emit("page-loads", {
+          token: open.token,
+          hosts: offline ? [] : [...hosts],
+          count: offline ? 0 : hosts.length,
+          blockedHosts: offline ? [...hosts] : [],
+          blockedCount: offline ? hosts.length : 0,
+          offline,
+        });
+      }, PAGE_LOADS_MS);
+    }
+    return { url: `${open.url}?lxmode=${mode}`, key: fakeBridgeKey(open.token) };
+  }
+
+  /** As Rust, once the *HTML pages* setting changed: the page on screen opens again. */
+  private reloadPage(before: Settings["htmlPages"]): void {
+    const path = this.onScreen;
+    if (
+      this.settings.htmlPages !== before &&
+      path !== null &&
+      this.kinds.get(key(path)) === "html"
+    ) {
+      this.emit("doc-changed", { path });
+    }
+  }
+
   private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
+    const kind = this.kinds.get(key(path)) ?? "markdown";
+    const frame = this.frameOf(path, kind);
     return {
       path,
+      kind,
+      frameUrl: frame.url,
+      bridgeKey: frame.key,
       title: doc.title,
       html: doc.html,
       outline: doc.outline,

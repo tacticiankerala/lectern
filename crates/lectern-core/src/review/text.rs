@@ -8,12 +8,98 @@
 //! raw HTML and footnote references are left out. Raw HTML the HTML policy shows as text (a tag
 //! not on its allowlist) is text like any other. Every block's text is [`normalize`]d, and empty
 //! blocks are dropped.
+//!
+//! A text file's blocks are its paragraphs, as `render_plain` shows them, with no headings.
+//!
+//! An HTML page's blocks are those its bridge (`assets/page-bridge.js`) reads from the page as it
+//! runs, script output included, and the UI hands over ([`PageBlock`]): the text is theirs, and
+//! their source lines are a best effort (see [`TextMap::from_blocks`]).
 
 use comrak::arena_tree::NodeEdge;
 use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::Arena;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
+use super::fingerprint;
+use crate::library::{doc_kind, DocKind};
 use crate::render::parse_for_text;
+use crate::render::plain::paragraphs;
+
+/// The most text an HTML page's blocks may hold for comments, as [`page_text_len`] measures it:
+/// what the bridge reports at most.
+pub const MAX_PAGE_TEXT: usize = 2 * 1024 * 1024;
+
+/// The longest and the shortest leading text a page's block is looked for by in its HTML, in
+/// characters (see [`leading_cuts`]).
+const LEAD_MAX_CHARS: usize = 40;
+const LEAD_MIN_CHARS: usize = 8;
+
+/// How far past the first place a block's shortest leading text is a longer one is looked for, in
+/// bytes: a block isn't sought across the whole page for a few more words.
+const LOOK_AHEAD: usize = 64 * 1024;
+
+/// The most bytes of a page's HTML that placing its blocks searches, all searches together: a
+/// block not in the HTML (a script made it) searches the rest of it, so a page of many such blocks
+/// would otherwise cost blocks × HTML. Past it, the blocks left take the line of the last one
+/// found. A few milliseconds of searching.
+const SEARCH_BUDGET: usize = 32 * 1024 * 1024;
+
+/// A block of an HTML page's text, as the page's bridge reports it: its text, whitespace
+/// collapsed, and a heading's level.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PageBlock {
+    pub text: String,
+    /// 1 to 6 for a heading; none for any other block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub heading_level: Option<u8>,
+}
+
+/// A note's visible text, which its comments are anchored against, and the fingerprint they record
+/// of it.
+#[derive(Clone, Debug)]
+pub struct NoteText {
+    pub text: TextMap,
+    /// A note's or a text file's: its source's [`fingerprint`]. An HTML page's: its text's, a NUL,
+    /// then its source's, as the same file shows other text when a script writes something else
+    /// or scripts are off, and an edit can move the page's lines but not its text. Either change
+    /// has its comments looked for again by their quote and its context.
+    pub fingerprint: String,
+}
+
+impl NoteText {
+    /// The text of the note named `note`, read as `source` ([`TextMap::of_note`]); `None` for an
+    /// HTML page, whose text is what its bridge reports ([`NoteText::of_page`]).
+    pub fn of_note(note: &str, source: &str) -> Option<NoteText> {
+        Some(NoteText {
+            text: TextMap::of_note(note, source)?,
+            fingerprint: fingerprint(source),
+        })
+    }
+
+    /// The text of an HTML page whose bridge reported `blocks`, its HTML being `source`
+    /// ([`TextMap::from_blocks`]), fingerprinted by that text and its HTML.
+    pub fn of_page(blocks: &[PageBlock], source: &str) -> NoteText {
+        let text = TextMap::from_blocks(blocks, source);
+        NoteText {
+            fingerprint: fingerprint(&format!("{}\0{source}", text.text())),
+            text,
+        }
+    }
+}
+
+/// The length of a page's text, its blocks joined by single spaces, in UTF-16 code units, as the
+/// bridge and the UI count it.
+pub fn page_text_len(blocks: &[PageBlock]) -> usize {
+    blocks
+        .iter()
+        .map(|b| b.text.encode_utf16().count() + 1)
+        .sum::<usize>()
+        .saturating_sub(1)
+}
 
 /// `s` with every run of Unicode whitespace turned into one space, and trimmed.
 pub fn normalize(s: &str) -> String {
@@ -62,6 +148,9 @@ pub struct TextMap {
     text: String,
     blocks: Vec<Block>,
     headings: Vec<HeadingLine>,
+    /// A page's: its headings go by the order of its blocks, not by source lines (see
+    /// [`TextMap::heading_path_of`]).
+    by_order: bool,
 }
 
 impl TextMap {
@@ -102,6 +191,74 @@ impl TextMap {
         map
     }
 
+    /// The text of a text file: its paragraphs, as `render_plain` renders them, with no headings.
+    pub fn from_plain(source: &str) -> TextMap {
+        let mut map = TextMap {
+            text: String::with_capacity(source.len()),
+            ..TextMap::default()
+        };
+        for p in paragraphs(source) {
+            map.push_lines(&p.text, p.start_line, p.end_line);
+        }
+        map
+    }
+
+    /// The text of an HTML page: the blocks its bridge reported, in order, each [`normalize`]d
+    /// and joined by single spaces as the bridge joins them, so offsets into it are offsets into
+    /// the page. A block with a heading level from 1 to 6 is a heading, and an empty block is
+    /// dropped.
+    ///
+    /// The lines are a best effort, as the page's text needn't be in its HTML as written (see
+    /// `SourceLines`): each block is on the line of `source`, the page's HTML, where its leading
+    /// text is first found after where the block before it was. One that isn't found takes the
+    /// line of the block before it, or line 1. Each block is under the heading before it in block
+    /// order, whatever the lines say, as minified HTML has many headings on one line.
+    pub fn from_blocks(blocks: &[PageBlock], source: &str) -> TextMap {
+        let mut map = TextMap {
+            text: String::with_capacity(blocks.iter().map(|b| b.text.len() + 1).sum()),
+            by_order: true,
+            ..TextMap::default()
+        };
+        let mut lines = SourceLines::new(source);
+        let mut line = 1;
+        let mut text = String::new();
+        for block in blocks {
+            text.clear();
+            push_normalized(&mut text, &block.text);
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(found) = lines.find(&text, block.heading_level.is_some()) {
+                line = found;
+            }
+            if let Some(level) = block.heading_level.filter(|l| (1..=6).contains(l)) {
+                map.headings.push(HeadingLine {
+                    level,
+                    text: text.clone(),
+                    line,
+                });
+            }
+            map.push_lines(&text, line, line);
+            // Pushed in block order, and lines never go back up: already in source order.
+            if let Some(block) = map.blocks.last_mut() {
+                block.heading = map.headings.len().checked_sub(1);
+            }
+        }
+        map
+    }
+
+    /// The text of the note named `note` (its file name or path), read as `source`, by its kind:
+    /// a text file's paragraphs ([`TextMap::from_plain`]), else a note's blocks
+    /// ([`TextMap::build`]). `None` for an HTML page: its text is what its bridge reports, which
+    /// `source` doesn't hold, so it takes [`TextMap::from_blocks`] instead.
+    pub fn of_note(note: &str, source: &str) -> Option<TextMap> {
+        match doc_kind(note) {
+            Some(DocKind::Html) => None,
+            Some(DocKind::Text) => Some(Self::from_plain(source)),
+            _ => Some(Self::build(source)),
+        }
+    }
+
     /// Puts the headings in source order and points each block at the last heading above it.
     ///
     /// The blocks and the text stay in document order, which is the page's: comrak moves footnote
@@ -117,8 +274,21 @@ impl TextMap {
         }
     }
 
-    /// Appends a block with the text `raw`, normalised, unless that's empty.
+    /// Appends a block with the text `raw`, normalised, from the source at `pos`, unless that's
+    /// empty.
     fn push_block(&mut self, raw: &str, pos: Sourcepos) {
+        let start_line = line_number(pos.start.line);
+        // An end at column 0 is the end of the line before.
+        let end_line = match pos.end.column {
+            0 => line_number(pos.end.line.saturating_sub(1)),
+            _ => line_number(pos.end.line),
+        };
+        self.push_lines(raw, start_line, end_line);
+    }
+
+    /// Appends a block with the text `raw`, normalised, on source lines `start_line` to
+    /// `end_line`, unless that's empty.
+    fn push_lines(&mut self, raw: &str, start_line: u32, end_line: u32) {
         let before = self.text.len();
         if before > 0 {
             self.text.push(' ');
@@ -129,12 +299,6 @@ impl TextMap {
             self.text.truncate(before);
             return;
         }
-        let start_line = line_number(pos.start.line);
-        // An end at column 0 is the end of the line before.
-        let end_line = match pos.end.column {
-            0 => line_number(pos.end.line.saturating_sub(1)),
-            _ => line_number(pos.end.line),
-        };
         self.blocks.push(Block {
             start,
             end: self.text.len(),
@@ -157,6 +321,11 @@ impl TextMap {
     /// The headings, in source order.
     pub fn headings(&self) -> &[HeadingLine] {
         &self.headings
+    }
+
+    /// The first source line with text: the lowest first line of any block. `None` without text.
+    pub fn top_line(&self) -> Option<u32> {
+        self.blocks.iter().map(|b| b.start_line).min()
     }
 
     pub fn block_text(&self, b: &Block) -> &str {
@@ -197,6 +366,34 @@ impl TextMap {
             push_heading(&mut stack, h);
         }
         path_of(&stack)
+    }
+
+    /// The headings a reader is under at the text's byte `at`, on source line `line`: a note's by
+    /// [`TextMap::heading_path_at`] the line; a page's by the order of its blocks, from the heading
+    /// the block holding `at` is under.
+    pub fn heading_path_of(&self, at: usize, line: u32) -> Vec<String> {
+        if !self.by_order {
+            return self.heading_path_at(line);
+        }
+        let under = self
+            .blocks
+            .get(self.block_at(at))
+            .and_then(|b| b.heading)
+            .map_or(0, |h| h + 1);
+        let mut stack = Vec::new();
+        for h in &self.headings[..under] {
+            push_heading(&mut stack, h);
+        }
+        path_of(&stack)
+    }
+
+    /// Where heading `h` is in the text: the start of its own block, the first under it. `None`
+    /// for a heading without text, which has none.
+    pub(crate) fn heading_start(&self, h: usize) -> Option<usize> {
+        self.blocks
+            .iter()
+            .find(|b| b.heading == Some(h))
+            .map(|b| b.start)
     }
 
     /// The heading path of every heading, by index: `heading_path_at(headings[i].line)` for each
@@ -276,4 +473,280 @@ fn inline_text<'a>(node: &'a AstNode<'a>, out: &mut String) {
 
 fn line_number(line: usize) -> u32 {
     u32::try_from(line).unwrap_or(u32::MAX)
+}
+
+/// Where an HTML page's blocks are in its source, looked for one after another, in the blocks'
+/// order (see [`TextMap::from_blocks`]). The page's text is its body's, so the search starts at
+/// the `<body` tag when there is one; `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;` count as the
+/// characters they stand for. Text a script makes, or that markup or a line break splits, isn't
+/// found as it shows.
+struct SourceLines {
+    /// The source from its `<body` tag, or all of it, entities decoded. Decoding keeps every line
+    /// break, so lines are counted in it.
+    html: String,
+    /// Where the next block is looked for from: just after the last one found.
+    from: usize,
+    /// How far into `html` lines have been counted, and the line there.
+    counted: usize,
+    line: u32,
+    /// The bytes of `html` searched so far, never more than [`SEARCH_BUDGET`].
+    scanned: usize,
+}
+
+impl SourceLines {
+    fn new(source: &str) -> Self {
+        let body = body_start(source);
+        SourceLines {
+            html: decode_entities(&source[body..]),
+            from: 0,
+            counted: 0,
+            line: line_number(newlines(&source[..body]).saturating_add(1)),
+            scanned: 0,
+        }
+    }
+
+    /// The line where the block with the (normalised) text `text`, a heading or not, is, after the
+    /// last block found: where the longest of its leading texts (see [`leading_cuts`]) first is,
+    /// so a shorter one found earlier, where the rest of the block doesn't follow, never wins.
+    /// `None` when none is found within what's left of [`SEARCH_BUDGET`], or the text is too short
+    /// to look for.
+    ///
+    /// One pass finds them all: each place the shortest leading text is, in order, holds the
+    /// longest that matches there. The pass stops at the first place the longest of all is, else
+    /// [`LOOK_AHEAD`] past the first place the shortest is.
+    fn find(&mut self, text: &str, heading: bool) -> Option<u32> {
+        let cuts = leading_cuts(text, heading);
+        let (&shortest, &longest) = (cuts.first()?, cuts.last()?);
+        let left = SEARCH_BUDGET.saturating_sub(self.scanned);
+        let end = self
+            .html
+            .floor_char_boundary(self.from.saturating_add(left).min(self.html.len()));
+        let rest = self.html.get(self.from..end)?;
+        let needle = &text[..shortest];
+        // The best place so far, and the leading text there.
+        let mut best: Option<(usize, usize)> = None;
+        let mut searched = rest.len();
+        let mut next = 0;
+        let mut window = rest;
+        while let Some(found) = window[next..].find(needle) {
+            let at = next + found;
+            if best.is_none() {
+                // Past the first place, a longer one is looked for only so far.
+                let end = rest.floor_char_boundary(at.saturating_add(LOOK_AHEAD).min(rest.len()));
+                window = &rest[..end];
+                searched = end;
+            }
+            let same = common_prefix_bytes(&rest[at..], &text[..longest]);
+            let cut = cuts
+                .iter()
+                .rev()
+                .copied()
+                .find(|&cut| cut <= same)
+                .unwrap_or(shortest);
+            if best.is_none_or(|(_, best)| cut > best) {
+                best = Some((at, cut));
+            }
+            if cut == longest {
+                searched = at + longest;
+                break;
+            }
+            next = at + rest[at..].chars().next().map_or(1, char::len_utf8);
+        }
+        self.scanned += searched;
+        let (found, cut) = best?;
+        let at = self.from + found;
+        self.from = at + cut;
+        self.line = self
+            .line
+            .saturating_add(line_number(newlines(&self.html[self.counted..at])));
+        self.counted = at;
+        Some(self.line)
+    }
+}
+
+/// Where the page's `<body` tag starts in `source` (in any letter case), or 0 without one.
+fn body_start(source: &str) -> usize {
+    let bytes = source.as_bytes();
+    source
+        .match_indices('<')
+        .map(|(at, _)| at)
+        .find(|&at| {
+            bytes
+                .get(at + 1..at + 5)
+                .is_some_and(|name| name.eq_ignore_ascii_case(b"body"))
+                && matches!(
+                    bytes.get(at + 5),
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'/' | b'>')
+                )
+        })
+        .unwrap_or(0)
+}
+
+/// `html` with `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;` read as the characters they stand
+/// for, once: `&amp;lt;` is `&lt;`.
+fn decode_entities(html: &str) -> String {
+    const ENTITIES: [(&str, char); 5] = [
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+    ];
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        match ENTITIES.iter().find(|(name, _)| tail.starts_with(name)) {
+            Some(&(name, ch)) => {
+                out.push(ch);
+                rest = &tail[name.len()..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The prefixes of a page block's (normalised) text that it's looked for by in the page's HTML,
+/// as byte lengths, shortest first: those of 8 to 40 characters ending at a word boundary (before a
+/// space, or at the end of the text). Text with no word boundary from its 8th to its 40th
+/// character (one long word, or a language written without spaces) is looked for by its first 40
+/// characters. Text under 8 characters has none, as it says too little to be found by, unless it
+/// is a `heading`, which is looked for by all of it.
+fn leading_cuts(text: &str, heading: bool) -> Vec<usize> {
+    let mut cuts = Vec::new();
+    for (chars, (at, c)) in text.char_indices().enumerate() {
+        if c == ' ' && chars >= LEAD_MIN_CHARS {
+            cuts.push(at);
+        }
+        if chars == LEAD_MAX_CHARS {
+            // Longer than 40 characters: the whole text is too long to look for.
+            if cuts.is_empty() {
+                cuts.push(at);
+            }
+            return cuts;
+        }
+    }
+    if heading || text.chars().count() >= LEAD_MIN_CHARS {
+        cuts.push(text.len());
+    }
+    cuts
+}
+
+/// How many bytes `a` and `b` share at their starts.
+fn common_prefix_bytes(a: &str, b: &str) -> usize {
+    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
+}
+
+/// The line breaks in `s`.
+fn newlines(s: &str) -> usize {
+    s.bytes().filter(|&b| b == b'\n').count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SourceLines, SEARCH_BUDGET};
+
+    /// Each block a script made is nowhere in the page's HTML, and looking for it searches the rest
+    /// of the HTML. All the searching for one page stays within a budget, however many such blocks
+    /// there are; past it, the blocks left take the line of the last one found.
+    #[test]
+    fn searching_a_page_stays_within_its_budget() {
+        // About 2 MiB of HTML, nearly all a script; then 5,000 blocks the script made.
+        let mut source = String::from("<body>\n<p>Intro paragraph.</p>\n<script>\n");
+        while source.len() < 2 * 1024 * 1024 {
+            source.push_str("var data = 'abcdefghijklmnopqrstuvwxyz0123456789';\n");
+        }
+        source.push_str("</script>\n<p>Closing paragraph.</p>\n");
+        let mut lines = SourceLines::new(&source);
+        assert_eq!(lines.find("Intro paragraph.", false), Some(2));
+        for i in 0..5000 {
+            assert_eq!(
+                lines.find(&format!("Row {i} made by the script"), false),
+                None
+            );
+        }
+        assert!(lines.scanned <= SEARCH_BUDGET, "{} bytes", lines.scanned);
+        // Spent: nothing more is searched, even what is there.
+        assert_eq!(lines.find("Closing paragraph.", false), None);
+        assert!(lines.scanned <= SEARCH_BUDGET, "{} bytes", lines.scanned);
+    }
+
+    /// A block is placed where its longest leading text is: a shorter one found earlier, where the
+    /// rest of the block doesn't follow, isn't where the block is.
+    #[test]
+    fn a_blocks_longest_leading_text_is_looked_for_first() {
+        let source = "<body>\n<nav>Conversion rates</nav>\n<p>Conversion dipped in week 3.</p>\n\
+                      <p>Conversion dipped in <em>week 4</em>.</p>\n";
+        let mut lines = SourceLines::new(source);
+        assert_eq!(lines.find("Conversion dipped in week 3.", false), Some(3));
+        // Markup splits this one: its longest leading text found whole is at a word boundary.
+        assert_eq!(lines.find("Conversion dipped in week 4.", false), Some(4));
+    }
+
+    /// A block shorter than 8 characters says too little to be looked for: it isn't, and nothing
+    /// is searched for it, unless it is a heading, which is looked for by all of its text.
+    #[test]
+    fn a_block_under_8_characters_is_not_looked_for_unless_a_heading() {
+        let source = "<body>\n<p>Intro paragraph.</p>\n<td>Results</td>\n<h2>Results</h2>\n";
+        let mut lines = SourceLines::new(source);
+        assert_eq!(lines.find("Intro paragraph.", false), Some(2));
+        let scanned = lines.scanned;
+        assert_eq!(lines.find("Results", false), None);
+        assert_eq!(lines.scanned, scanned);
+        let block = |text: &str, heading_level: Option<u8>| super::PageBlock {
+            text: text.to_owned(),
+            heading_level,
+        };
+        let map = super::TextMap::from_blocks(
+            &[
+                block("Intro paragraph.", None),
+                block("3", None),
+                block("Results", Some(2)),
+            ],
+            "<body>\n<p>Intro paragraph.</p>\n<td>3</td>\n<h2>Results</h2>\n",
+        );
+        // The cell takes the line of the block before it; the heading finds its own.
+        let lines: Vec<u32> = map.blocks.iter().map(|b| b.start_line).collect();
+        assert_eq!(lines, [2, 2, 4]);
+    }
+
+    /// Past the first place a block's shortest leading text is, a longer one is looked for no
+    /// further than 64 KiB: a block whose longer text is only far beyond goes where the shorter
+    /// was.
+    #[test]
+    fn a_longer_leading_text_is_looked_for_64_kib_past_the_shortest() {
+        let near = format!(
+            "<body>\n<p>Conversion rates</p>\n{}<p>Conversion dipped in week 3.</p>\n",
+            "<p>Filler.</p>\n".repeat(1000)
+        );
+        let mut lines = SourceLines::new(&near);
+        assert_eq!(
+            lines.find("Conversion dipped in week 3.", false),
+            Some(1003)
+        );
+        let far = format!(
+            "<body>\n<p>Conversion rates</p>\n{}<p>Conversion dipped in week 3.</p>\n",
+            "<p>Filler.</p>\n".repeat(10_000)
+        );
+        let mut lines = SourceLines::new(&far);
+        assert_eq!(lines.find("Conversion dipped in week 3.", false), Some(2));
+        assert!(lines.scanned <= 80 * 1024, "{} bytes", lines.scanned);
+    }
+
+    /// Within the budget, a block is found wherever it is.
+    #[test]
+    fn a_page_within_the_budget_is_searched_to_its_end() {
+        let mut source = String::from("<body>\n<p>Intro paragraph.</p>\n");
+        source.push_str(&"<p>Filler.</p>\n".repeat(10_000));
+        source.push_str("<p>Closing paragraph.</p>\n");
+        let mut lines = SourceLines::new(&source);
+        assert_eq!(lines.find("Missing paragraph.", false), None);
+        assert_eq!(lines.find("Closing paragraph.", false), Some(10_003));
+    }
 }

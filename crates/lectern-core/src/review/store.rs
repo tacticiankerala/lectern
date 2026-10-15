@@ -18,8 +18,8 @@ use std::time::Duration;
 use super::anchor::{refresh_anchored, resolve_all};
 use super::format::{new_review, parse, refresh_instructions, serialize};
 use super::ops::{self, OpContext, OpError, ReviewOp};
-use super::text::TextMap;
-use super::{fingerprint, Item, Review, HARD_READ_CAP, MAX_SIDECAR_BYTES};
+use super::text::NoteText;
+use super::{Item, Review, HARD_READ_CAP, MAX_SIDECAR_BYTES};
 
 /// How many times a save starts over because the sidecar changed under it.
 pub(crate) const WRITE_RETRIES: usize = 3;
@@ -81,6 +81,8 @@ pub enum StoreError {
     Conflict,
     /// Lectern won't change this sidecar; the text says why.
     ReadOnly(String),
+    /// The note is an HTML page, and the text its bridge reported didn't come with the change.
+    NoPageText,
     Io(io::Error),
 }
 
@@ -90,6 +92,9 @@ impl fmt::Display for StoreError {
             Self::Op(e) => e.fmt(f),
             Self::Conflict => f.write_str("Couldn't save the comment: the file kept changing."),
             Self::ReadOnly(message) => f.write_str(message),
+            Self::NoPageText => f.write_str(
+                "The page hasn't reported its text yet, so its comments can't be placed.",
+            ),
             Self::Io(e) => write!(f, "Couldn't save the comment: {e}"),
         }
     }
@@ -99,7 +104,24 @@ impl std::error::Error for StoreError {}
 
 /// Applies `op` to the sidecar at `sidecar` and saves it, creating the sidecar if there's none: a
 /// file that is already there is changed only when [`load`] would show it writable.
-/// `source` is the note's text and `now` the time to record on a new comment.
+/// `source` is the note's text, read as its kind's (see [`NoteText::of_note`]), and `now` the time
+/// to record on a new comment. See [`apply_op_on`], which this calls with that text. An HTML page's
+/// text is what its bridge reported, not its source: it is refused here, untouched, and takes
+/// [`apply_op_on`].
+pub fn apply_op(
+    sidecar: &Path,
+    note_name: &str,
+    source: &str,
+    op: &ReviewOp,
+    now: &str,
+) -> Result<(Review, u32), StoreError> {
+    let note = NoteText::of_note(note_name, source).ok_or(StoreError::NoPageText)?;
+    apply_op_on(sidecar, note_name, &note, op, now)
+}
+
+/// Applies `op` to the sidecar at `sidecar` and saves it, as [`apply_op`] does, against `note`,
+/// the note's visible text and its fingerprint (an HTML page's from its bridge,
+/// [`NoteText::of_page`]).
 ///
 /// The sidecar is read, `op` applied, anchor lines it gained dated `now`, the instructions block
 /// brought up to date (see [`refresh_instructions`]), and the result written to a temporary file
@@ -109,44 +131,36 @@ impl std::error::Error for StoreError {}
 /// is written.
 /// The temporary file is removed again whenever the save fails.
 /// Returns the review as saved and the id of the comment `op` changed.
-pub fn apply_op(
+pub fn apply_op_on(
     sidecar: &Path,
     note_name: &str,
-    source: &str,
+    note: &NoteText,
     op: &ReviewOp,
     now: &str,
 ) -> Result<(Review, u32), StoreError> {
-    apply_op_with_hooks(
-        sidecar,
-        note_name,
-        source,
-        op,
+    let ctx = OpContext {
+        text: &note.text,
+        fingerprint: &note.fingerprint,
         now,
-        &mut || {},
-        &mut |from, to| fs::rename(from, to),
-    )
+    };
+    apply_op_with_hooks(sidecar, note_name, &ctx, op, &mut || {}, &mut |from, to| {
+        fs::rename(from, to)
+    })
 }
 
-/// [`apply_op`] with the places the tests step in: `before_rename` is called once the temporary
+/// [`apply_op_on`] with the places the tests step in: `before_rename` is called once the temporary
 /// file is written and before the sidecar is read again, and `rename` replaces the sidecar.
 pub(crate) fn apply_op_with_hooks(
     sidecar: &Path,
     note_name: &str,
-    source: &str,
+    ctx: &OpContext,
     op: &ReviewOp,
-    now: &str,
     before_rename: &mut dyn FnMut(),
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
 ) -> Result<(Review, u32), StoreError> {
     // The lock guards no data, so a save that panicked holding it left nothing this one needs.
     let _turn = SAVE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let text = TextMap::build(source);
-    let fp = fingerprint(source);
-    let ctx = OpContext {
-        text: &text,
-        fingerprint: &fp,
-        now,
-    };
+    let (text, fp, now) = (ctx.text, ctx.fingerprint, ctx.now);
     let tmp = temp_path(sidecar);
     for _ in 0..=WRITE_RETRIES {
         let before = read_capped(sidecar, MAX_SIDECAR_BYTES).map_err(StoreError::Io)?;
@@ -158,9 +172,9 @@ pub(crate) fn apply_op_with_hooks(
                 (_, Some(reason)) => return Err(StoreError::ReadOnly(reason)),
             },
         };
-        let resolved = resolve_all(&review, &text, &fp);
-        refresh_anchored(&mut review, &resolved, &text, &fp);
-        let id = ops::apply(&mut review, op, &ctx).map_err(StoreError::Op)?;
+        let resolved = resolve_all(&review, text, fp);
+        refresh_anchored(&mut review, &resolved, text, fp);
+        let id = ops::apply(&mut review, op, ctx).map_err(StoreError::Op)?;
         date_new_anchors(&mut review, now);
         refresh_instructions(&mut review);
         let out = serialize(&review);
@@ -328,8 +342,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{apply_op, apply_op_with_hooks, transient, StoreError, WRITE_RETRIES};
-    use crate::review::ops::{NewAnchor, ReviewOp};
-    use crate::review::{sidecar_path, EntryAuthor};
+    use crate::review::ops::{NewAnchor, OpContext, ReviewOp};
+    use crate::review::text::TextMap;
+    use crate::review::{fingerprint, sidecar_path, EntryAuthor, Review};
 
     const NOTE: &str =
         "# Tide sync\n\n## Batching\n\nThe client uploads readings in batches of at most 50.\n";
@@ -367,6 +382,22 @@ mod tests {
         }
     }
 
+    /// `reply()` saved to `tide.md`'s sidecar, as `NOTE` reads, with the tests' hooks.
+    fn reply_with_hooks(
+        sidecar: &Path,
+        before_rename: &mut dyn FnMut(),
+        rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
+    ) -> Result<(Review, u32), StoreError> {
+        let text = TextMap::build(NOTE);
+        let fp = fingerprint(NOTE);
+        let ctx = OpContext {
+            text: &text,
+            fingerprint: &fp,
+            now: NOW,
+        };
+        apply_op_with_hooks(sidecar, "tide.md", &ctx, &reply(), before_rename, rename)
+    }
+
     #[test]
     fn a_concurrent_claude_append_is_merged_not_overwritten() {
         let (dir, sidecar) = tide_with_one_comment();
@@ -379,16 +410,7 @@ mod tests {
             }
         };
 
-        let (review, id) = apply_op_with_hooks(
-            &sidecar,
-            "tide.md",
-            NOTE,
-            &reply(),
-            NOW,
-            &mut claude_writes,
-            &mut fs_rename,
-        )
-        .unwrap();
+        let (review, id) = reply_with_hooks(&sidecar, &mut claude_writes, &mut fs_rename).unwrap();
 
         assert_eq!(id, 1);
         assert_eq!(calls, 2, "the save started over once");
@@ -418,16 +440,7 @@ mod tests {
             append(&sidecar, CLAUDE);
         };
 
-        let err = apply_op_with_hooks(
-            &sidecar,
-            "tide.md",
-            NOTE,
-            &reply(),
-            NOW,
-            &mut claude_writes,
-            &mut fs_rename,
-        )
-        .unwrap_err();
+        let err = reply_with_hooks(&sidecar, &mut claude_writes, &mut fs_rename).unwrap_err();
 
         assert!(matches!(err, StoreError::Conflict), "{err:?}");
         assert_eq!(
@@ -473,16 +486,7 @@ mod tests {
             fs::rename(from, to)
         };
 
-        let (review, id) = apply_op_with_hooks(
-            &sidecar,
-            "tide.md",
-            NOTE,
-            &reply(),
-            NOW,
-            &mut || {},
-            &mut refused_once,
-        )
-        .unwrap();
+        let (review, id) = reply_with_hooks(&sidecar, &mut || {}, &mut refused_once).unwrap();
 
         assert_eq!(id, 1);
         assert_eq!(renames, 2, "the save started over and renamed once more");

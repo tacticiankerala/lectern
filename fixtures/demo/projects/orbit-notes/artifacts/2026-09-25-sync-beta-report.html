@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync beta: the first week</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #fbfaf7;
+    --card: #ffffff;
+    --ink: #26251f;
+    --muted: #6b6a63;
+    --rule: #e2dfd6;
+    --accent: #3b6db3;
+    --good: #2f7d4f;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #1b1c20;
+      --card: #23252a;
+      --ink: #e7e5de;
+      --muted: #a09e95;
+      --rule: #393b41;
+      --accent: #82a9e6;
+      --good: #6cc08f;
+    }
+  }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.6 system-ui, "Segoe UI", sans-serif;
+  }
+
+  main {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+  }
+
+  h1 {
+    font-size: 1.9rem;
+    line-height: 1.2;
+    margin: 0 0 0.25rem;
+  }
+
+  h2 {
+    font-size: 1.2rem;
+    margin: 2.25rem 0 0.75rem;
+  }
+
+  .dateline {
+    color: var(--muted);
+    margin: 0 0 1.75rem;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 0.75rem;
+    margin: 0;
+  }
+
+  .stats div {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+  }
+
+  .stats dt {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .stats dd {
+    margin: 0;
+    font-size: 1.6rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stats .good {
+    color: var(--good);
+  }
+
+  figure {
+    margin: 0;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1rem 1rem 0.75rem;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 240px;
+  }
+
+  figcaption {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th,
+  td {
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid var(--rule);
+    text-align: left;
+  }
+
+  th {
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .num {
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sync beta: the first week</h1>
+  <p class="dateline">Orbit Notes · 21 to 25 September</p>
+
+  <p>Offline sync went to twelve testers on Monday. Every edit synced through the change log, no note lost text, and catching up stayed well under half a second, even after two weeks offline.</p>
+
+  <dl class="stats">
+    <div><dt>Testers</dt><dd>12</dd></div>
+    <div><dt>Changes synced</dt><dd>9,400</dd></div>
+    <div><dt>Conflicts</dt><dd>6</dd></div>
+    <div><dt>Text lost</dt><dd class="good">0</dd></div>
+  </dl>
+
+  <h2>Catching up</h2>
+  <p>The time to catch up grows with the time spent offline, but slowly. A week offline costs 180&nbsp;ms, as the spike predicted.</p>
+  <figure>
+    <canvas id="catch-up" role="img" aria-label="Bar chart of the median catch-up time by days offline: 40 ms after one day, 180 ms after seven, 390 ms after fourteen."></canvas>
+    <figcaption>Median time to catch up on a mid-range phone, in milliseconds, by days offline.</figcaption>
+  </figure>
+
+  <h2>By device</h2>
+  <table>
+    <thead>
+      <tr><th>Device</th><th class="num">Testers</th><th class="num">Changes</th><th class="num">Median catch-up</th><th class="num">Conflicts</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>iPhone</td><td class="num">7</td><td class="num">3,900</td><td class="num">120 ms</td><td class="num">2</td></tr>
+      <tr><td>Android</td><td class="num">5</td><td class="num">2,800</td><td class="num">150 ms</td><td class="num">3</td></tr>
+      <tr><td>Web</td><td class="num">9</td><td class="num">2,700</td><td class="num">70 ms</td><td class="num">1</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Conflicts</h2>
+  <p>Each of the six was one note edited on two devices while both were offline. Every one kept both versions, side by side, as the plan says it should. Two testers thought the second copy was a bug.</p>
+
+  <h2>Next week</h2>
+  <ul>
+    <li>Show a conflict as one note with the two edits marked, not as two copies.</li>
+    <li>Widen the beta to forty testers, half of them on Android.</li>
+    <li>Measure the battery over a weekend offline.</li>
+  </ul>
+</main>
+
+<script>
+  (function () {
+    // Median catch-up time in milliseconds, by days offline.
+    var data = [
+      [1, 40],
+      [2, 60],
+      [3, 85],
+      [5, 130],
+      [7, 180],
+      [10, 260],
+      [14, 390],
+    ];
+    var max = 400;
+    var canvas = document.getElementById("catch-up");
+    var dark = window.matchMedia("(prefers-color-scheme: dark)");
+
+    function draw() {
+      var style = getComputedStyle(document.documentElement);
+      var color = function (name) {
+        return style.getPropertyValue(name).trim();
+      };
+      var ratio = window.devicePixelRatio || 1;
+      var width = canvas.clientWidth;
+      var height = canvas.clientHeight;
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      var ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+
+      var left = 56;
+      var right = 8;
+      var top = 10;
+      var bottom = 26;
+      var plotWidth = width - left - right;
+      var plotHeight = height - top - bottom;
+      ctx.font = "12px system-ui, 'Segoe UI', sans-serif";
+
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (var value = 0; value <= max; value += 100) {
+        var y = Math.round(top + plotHeight - (value / max) * plotHeight) + 0.5;
+        ctx.strokeStyle = color("--rule");
+        ctx.beginPath();
+        ctx.moveTo(left, y);
+        ctx.lineTo(width - right, y);
+        ctx.stroke();
+        ctx.fillStyle = color("--muted");
+        ctx.fillText(value + " ms", left - 8, y);
+      }
+
+      var slot = plotWidth / data.length;
+      var bar = Math.min(36, slot * 0.6);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      data.forEach(function (point, i) {
+        var x = left + slot * i + (slot - bar) / 2;
+        var barHeight = (point[1] / max) * plotHeight;
+        ctx.fillStyle = color("--accent");
+        ctx.fillRect(x, top + plotHeight - barHeight, bar, barHeight);
+        ctx.fillStyle = color("--muted");
+        ctx.fillText(point[0] + (point[0] === 1 ? " day" : " days"), x + bar / 2, top + plotHeight + 8);
+      });
+    }
+
+    draw();
+    window.addEventListener("resize", draw);
+    dark.addEventListener("change", draw);
+  })();
+</script>
+</body>
+</html>

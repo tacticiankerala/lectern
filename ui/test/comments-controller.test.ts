@@ -27,6 +27,7 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     headingPath: ["Tide sync"],
     jumpLine: 1,
     pinnedHeading: null,
+    pinnedAt: null,
     quote: "",
     textStart: null,
     textEnd: null,
@@ -125,6 +126,9 @@ function setup(
         docListeners.delete(cb);
       };
     },
+    isPage: () => false,
+    page: () => null,
+    onPage: () => () => undefined,
     visible: () => state.visible,
     panelOpen: () => opts.panelOpen ?? true,
     openPanel: vi.fn<() => void>(),

@@ -44,6 +44,7 @@ const ERROR_TITLES: Record<OpenError["kind"], string> = {
   notFound: "This file isn't there",
   permission: "Lectern can't open this file",
   binary: "This doesn't look like a text file",
+  tooLarge: "This file is too large",
   io: "This file couldn't be read",
 };
 
@@ -139,8 +140,9 @@ export function renderError(host: HTMLElement, error: OpenError, actions: ErrorA
     buttons.push(button("Search for it", actions.search));
   }
   buttons.push(button("Remove from recent", actions.forget));
-  if (error.kind === "binary") {
+  if (error.kind === "binary" || error.kind === "tooLarge") {
     // Rust would open a Markdown-named file in the reader again, so that one is revealed instead.
+    // Any other document (a text file, a page, a PDF) goes to its default app.
     buttons.push(
       MARKDOWN_PATH.test(error.path)
         ? button("Reveal in Explorer", actions.reveal)
@@ -155,6 +157,25 @@ export function renderError(host: HTMLElement, error: OpenError, actions: ErrorA
       h("p", { class: "state-detail" }, error.message),
       ...(error.message.includes(error.path) ? [] : [h("p", { class: "state-path" }, error.path)]),
       h("div", { class: "state-actions" }, ...buttons),
+    ),
+  );
+}
+
+/**
+ * In place of a page that keeps navigating its own frame (frame-view.ts): what happened, and its
+ * default app a click away.
+ */
+export function renderNavigatingAway(host: HTMLElement, openWithDefaultApp: () => void): void {
+  host.replaceChildren(
+    h(
+      "div",
+      { class: "state state-error", role: "alert" },
+      h("h1", { class: "state-title" }, "This page keeps navigating away."),
+      h(
+        "div",
+        { class: "state-actions" },
+        button("Open in default app", openWithDefaultApp, { primary: true }),
+      ),
     ),
   );
 }

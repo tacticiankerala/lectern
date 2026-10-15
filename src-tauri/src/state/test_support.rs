@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lectern_core::ipc::{OpenResult, RootState, Settings};
+use lectern_core::ipc::{FrameKey, OpenResult, PageLoads, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
@@ -133,6 +133,28 @@ impl FakeHost {
             .iter()
             .filter_map(|(_, e)| match e {
                 UiEvent::SettingsChanged(snapshot) => Some(snapshot.rev),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `page-loads` events sent, in order, with the windows they were for.
+    pub(super) fn page_loads(&self) -> Vec<(Target, PageLoads)> {
+        lock(&self.events)
+            .iter()
+            .filter_map(|(target, e)| match e {
+                UiEvent::PageLoads(loads) => Some((target.clone(), loads.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `frame-key` events sent, in order, with the windows they were for.
+    pub(super) fn frame_keys(&self) -> Vec<(Target, FrameKey)> {
+        lock(&self.events)
+            .iter()
+            .filter_map(|(target, e)| match e {
+                UiEvent::FrameKey(key) => Some((target.clone(), key.clone())),
                 _ => None,
             })
             .collect()
