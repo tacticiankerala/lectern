@@ -31,6 +31,7 @@ rspec spec/y
 </code></pre>
 <pre><code id="short">a/b
 </code></pre>
+<pre><code id="redirect">echo hello >/mnt/c/output.txt 2>/mnt/c/err.log</code></pre>
 <p><code id="line-ref">spec/a_spec.rb:12</code> <code id="ticked">\`S:\\Notes\\plan.md:12\`</code> <code id="quoted">"app/x y.rb"</code></p>
 <p id="prose">See plan.md for more.</p>
 <p id="inline">Run <code id="rel">${RELATIVE}</code> now.</p>
@@ -169,6 +170,22 @@ describe("a selection read as paths", () => {
       const found = pathTokens(vector.text).map(({ start, end }) => vector.text.slice(start, end));
       expect(found, JSON.stringify(vector.text)).toEqual(vector.tokens);
     }
+  });
+
+  it("skips the shell operators a word opens with, as core does", () => {
+    const found = (text: string): string[] =>
+      pathTokens(text).map(({ start, end }) => text.slice(start, end));
+    expect(found("echo hello >/mnt/c/output.txt")).toEqual(["/mnt/c/output.txt"]);
+    expect(found("cat <spec/a.txt")).toEqual(["spec/a.txt"]);
+    expect(found("cmd 2>/mnt/c/err.log")).toEqual(["/mnt/c/err.log"]);
+    // Only at the start of a word: inside one, an operator is part of it.
+    expect(found("a|b/c |b/c")).toEqual(["a|b/c", "b/c"]);
+    expect(
+      found('x &>/tmp/a.log >>logs/b.log |grep y ;(cd app/x && ls) >"/mnt/s/My Vault/x"'),
+    ).toEqual(["/tmp/a.log", "logs/b.log", "app/x", "/mnt/s/My Vault/x"]);
+    // Quoted, they're ordinary characters; alone, or before no path, they're no token.
+    expect(found('">/x"')).toEqual([">/x"]);
+    expect(found("2>&1 > | ;ls")).toEqual([]);
   });
 
   it("is one path when nothing but whitespace, quotes or backticks surround its only path", () => {
@@ -341,6 +358,16 @@ describe("the copy path shortcuts", () => {
       "\\\\wsl.localhost\\Ubuntu\\home\\me\\projects\\app\\run.sh\n.\\run.sh --fast",
     );
     expect(pathForms).not.toHaveBeenCalled();
+  });
+
+  it("keep a redirection before a path, converting the path alone", async () => {
+    await started();
+    selectAll("redirect");
+    expect(press("W")).toBe(true);
+    expect(await copied()).toBe("echo hello >C:\\output.txt 2>C:\\err.log");
+    await vi.waitFor(() => {
+      expect(lastToast().message).toBe("Copied with 2 Windows paths");
+    });
   });
 
   it("copy a selected absolute path with spaces as one path, so a mapping reaches it", async () => {

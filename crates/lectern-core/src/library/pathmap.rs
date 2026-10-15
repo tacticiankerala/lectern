@@ -291,18 +291,21 @@ fn is_relative(path: &str) -> bool {
 /// The paths in `text`, as byte ranges, for converting them where they are (see
 /// [`PathMapper::convert_paths`]). A token is a word (a run of anything but whitespace), or the
 /// inside of a `"…"` or `'…'` run that opens a word and closes on the same line, which may hold
-/// spaces. Of a flag's word (`--name=value`, `-n=value`) only the value counts. A token is a path
-/// when it holds `/` or `\` and isn't a URL (`scheme://…` or `mailto:…`).
+/// spaces. Of a flag's word (`--name=value`, `-n=value`) only the value counts, and so does what
+/// follows the unquoted shell operators a word may open with (`>/x`, `2>/x`, `|a/b`). A token is
+/// a path when it holds `/` or `\` and isn't a URL (`scheme://…` or `mailto:…`).
 ///
 /// Linear in `text`: every scan stops where the next one starts (a quoted run at its closing quote
-/// or line break, a flag's name at its `=`), so nothing is read twice, however long a line or a
-/// word is.
+/// or line break, a flag's name at its `=`, the operators at the first other character), so
+/// nothing is read twice, however long a line or a word is.
 pub fn path_tokens(text: &str) -> Vec<Range<usize>> {
     let mut tokens = Vec::new();
     let mut at = 0;
     while let Some(offset) = text[at..].find(|c: char| !c.is_whitespace()) {
         let word = at + offset;
-        let start = flag_value(text, word).unwrap_or(word);
+        let start = flag_value(text, word)
+            .or_else(|| operator_end(text, word))
+            .unwrap_or(word);
         // A quoted run may end before its word does, or run on past spaces; either way, what
         // follows its closing quote is read afresh.
         let token = match quoted_run(text, start) {
@@ -332,6 +335,27 @@ fn flag_value(text: &str, word: usize) -> Option<usize> {
     let (name, after) = rest.split_at(end);
     let flag = after.starts_with('=') && !name.contains(['/', '\\', '"', '\'']);
     flag.then_some(word + end + 1)
+}
+
+/// Where the path starts in a word at `word` that opens with unquoted shell operators: just after
+/// the run of them. They are a redirection (`>`, `>>`, `<`, and `2>`, `&>` or any other with a
+/// file descriptor's digits before it), a pipe, `&`, `;` or `(`, in any combination (`>>`, `|&`,
+/// `;(`). They stay as written; `None` for a word that opens with anything else.
+fn operator_end(text: &str, word: usize) -> Option<usize> {
+    let rest = text.get(word..)?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    // A file descriptor only counts before `<` or `>`.
+    let from = if rest[digits..].starts_with(['<', '>']) {
+        digits
+    } else {
+        0
+    };
+    let run = rest[from..]
+        .find(|c: char| !matches!(c, '>' | '<' | '|' | '&' | ';' | '('))
+        .unwrap_or(rest.len() - from);
+    (run > 0).then_some(word + from + run)
 }
 
 /// The inside of the quoted run that opens at `start` in `text`: from a `"` or `'` to the next

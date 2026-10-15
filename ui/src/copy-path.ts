@@ -67,9 +67,10 @@ function next(pattern: RegExp, text: string, from: number): number {
 /**
  * The paths in `text`, as core's `path_tokens` finds them: a token is a word (a run of anything
  * but whitespace), or the inside of a `"…"` or `'…'` run that opens a word and closes on the same
- * line. Of a flag's word (`--name=value`, `-n=value`) only the value counts. A token is a path
- * when it holds `/` or `\` and isn't a URL (`scheme://…` or `mailto:…`). Linear in `text`: every
- * scan stops where the next one starts, so nothing is read twice.
+ * line. Of a flag's word (`--name=value`, `-n=value`) only the value counts, and so does what
+ * follows the unquoted shell operators a word may open with (`>/x`, `2>/x`, `|a/b`). A token is a
+ * path when it holds `/` or `\` and isn't a URL (`scheme://…` or `mailto:…`). Linear in `text`:
+ * every scan stops where the next one starts, so nothing is read twice.
  */
 export function pathTokens(text: string): TokenSpan[] {
   const tokens: TokenSpan[] = [];
@@ -79,7 +80,7 @@ export function pathTokens(text: string): TokenSpan[] {
     if (word < 0) {
       return tokens;
     }
-    const start = flagValue(text, word) ?? word;
+    const start = flagValue(text, word) ?? operatorEnd(text, word) ?? word;
     // A quoted run may end before its word does, or run on past spaces; either way, what follows
     // its closing quote is read afresh.
     let token = quotedRun(text, start);
@@ -108,6 +109,23 @@ function flagValue(text: string, word: number): number | null {
   return end >= 0 && text.charAt(end) === "=" && !/[\\/"']/.test(text.slice(word, end))
     ? end + 1
     : null;
+}
+
+/**
+ * The unquoted shell operators a word may open with: a redirection (`>`, `>>`, `<`, and `2>`,
+ * `&>` or any other with a file descriptor's digits before it), a pipe, `&`, `;` or `(`, in any
+ * combination (`>>`, `|&`, `;(`). Sticky: it matches only where `lastIndex` is.
+ */
+const OPERATORS = /(?:[0-9]+(?=[<>]))?[><|&;(]+/y;
+
+/**
+ * Where the path starts in a word at `word` that opens with shell operators (`>/x`, `2>/x`,
+ * `|a/b`): just after the run of them, which stay as written.
+ */
+function operatorEnd(text: string, word: number): number | null {
+  OPERATORS.lastIndex = word;
+  const run = OPERATORS.exec(text);
+  return run === null ? null : word + run[0].length;
 }
 
 /**

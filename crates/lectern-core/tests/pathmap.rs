@@ -662,6 +662,27 @@ fn path_tokens_skip_urls() {
     assert_eq!(tokens("see (https://example.com/a) and a/b"), ["a/b"]);
 }
 
+/// A word may open with unquoted shell operators: a redirection (`>`, `>>`, `<`, `2>`, `&>`), a
+/// pipe, `&`, `;` or `(`. They're a boundary, as a flag's `=` is: only what follows is the path.
+#[test]
+fn path_tokens_skip_the_shell_operators_opening_a_word() {
+    assert_eq!(
+        tokens("echo hello >/mnt/c/output.txt"),
+        ["/mnt/c/output.txt"]
+    );
+    assert_eq!(tokens("cat <spec/a.txt"), ["spec/a.txt"]);
+    assert_eq!(tokens("cmd 2>/mnt/c/err.log"), ["/mnt/c/err.log"]);
+    // Only at the start of a word: inside one, an operator is part of it.
+    assert_eq!(tokens("a|b/c |b/c"), ["a|b/c", "b/c"]);
+    assert_eq!(
+        tokens(r#"x &>/tmp/a.log >>logs/b.log |grep y ;(cd app/x && ls) >"/mnt/s/My Vault/x""#),
+        ["/tmp/a.log", "logs/b.log", "app/x", "/mnt/s/My Vault/x"]
+    );
+    // Quoted, they're ordinary characters; alone, or before no path, they're no token.
+    assert_eq!(tokens(r#"">/x""#), [">/x"]);
+    assert!(tokens("2>&1 > | ;ls").is_empty());
+}
+
 /// Each quoted run is scanned to its closing quote, never on to the end of its line, and no word
 /// is read twice: a long line of them takes linear time. Scanning to the line's end made this
 /// 600 KB line take minutes.
@@ -763,6 +784,31 @@ fn convert_paths_converts_a_flags_value_only() {
             PathForm::Windows
         ),
         converted(r#"run -f=a\b.yml --out="S:\My Vault\x""#, 2, 0)
+    );
+}
+
+#[test]
+fn convert_paths_keeps_the_shell_operators_before_a_path() {
+    assert_eq!(
+        ubuntu().convert_paths("echo hello >/mnt/c/output.txt", PathForm::Windows),
+        converted(r"echo hello >C:\output.txt", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths("cat <spec/a.txt", PathForm::Windows),
+        converted(r"cat <spec\a.txt", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths("cmd 2>/mnt/c/err.log", PathForm::Windows),
+        converted(r"cmd 2>C:\err.log", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths("a|b/c", PathForm::Windows),
+        converted(r"a|b\c", 1, 0)
+    );
+    // Quoted, a `>` is part of the path, as before.
+    assert_eq!(
+        ubuntu().convert_paths(r#"">/x""#, PathForm::Windows),
+        converted(r#"">\x""#, 1, 0)
     );
 }
 

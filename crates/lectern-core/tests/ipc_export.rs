@@ -593,6 +593,8 @@ fn path_token_vectors_exported() {
         r#"it's 'not a/path' or "one" and/or v1.2 notes.md"#,
         r"-Iinclude/x C:notes\plan.md \root\x host:/srv/x",
         r#"see (https://example.com/a) and a/b, "S:\Notes\Meeting #3.md#agenda""#,
+        "echo hello >/mnt/c/output.txt 2>/mnt/c/err.log",
+        r#"cat <spec/a.txt |grep x &>/tmp/a.log >>logs/b.log ;(cd app/x && ls) >"/mnt/s/My Vault/x" ">/x" a|b/c 2>&1"#,
         "",
     ];
     let mapper = PathMapper {
