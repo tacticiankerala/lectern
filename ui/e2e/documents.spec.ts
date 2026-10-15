@@ -1,7 +1,13 @@
 // Text files, HTML pages and PDFs beside notes, in the fixture vault: the library marks them, quick
-// open and links open them in Lectern, and search reads text files only.
+// open and links open them in Lectern, search reads text files only, and pages and PDFs show in a
+// frame the fake loads from the dev server, as Lectern does from `lxpage`.
 import { expect, test, type Page } from "@playwright/test";
 import { fixturePath, launch, openFixture } from "./util";
+
+/** The frame a page or a PDF shows in. */
+function frame(page: Page) {
+  return page.locator("#lx-doc-pane > iframe.lx-frame");
+}
 
 /** A sidebar row by its fixture path. */
 function row(page: Page, rel: string) {
@@ -34,7 +40,11 @@ test("quick open finds a page by name", async ({ page }) => {
   await expect(first.locator(".qo-name")).toHaveText("report.html");
   await page.keyboard.press("Enter");
   await expect(page).toHaveTitle("report.html — Lectern");
-  await expect(page.locator("#lx-doc .state")).toHaveText("Coming in this branch");
+  await expect(frame(page)).toHaveAttribute("sandbox", "allow-scripts");
+  await expect(frame(page)).toHaveAttribute(
+    "src",
+    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/report\.html\?v=\d+$/,
+  );
 });
 
 test("a link to a page opens it in Lectern, and Back returns", async ({ page }) => {
@@ -43,9 +53,60 @@ test("a link to a page opens it in Lectern, and Back returns", async ({ page }) 
   await expect(link).toHaveAttribute("data-kind", "doc");
   await link.click();
   await expect(page).toHaveTitle("report.html — Lectern");
-  await expect(page.locator("#lx-doc .state")).toHaveText("Coming in this branch");
+  await expect(frame(page)).toHaveAttribute("sandbox", "allow-scripts");
   await page.keyboard.press("Alt+ArrowLeft");
   await expect(page).toHaveTitle("Résumé notes — Lectern");
+  await expect(frame(page)).toHaveCount(0);
+  await expect(page.locator("#lx-doc a", { hasText: "report" })).toBeVisible();
+});
+
+test("a PDF shows in an unsandboxed frame that fills the pane, and F5 loads it again", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/brief.pdf");
+  await expect(page).toHaveTitle("brief.pdf — Lectern");
+  await expect(frame(page)).toHaveCount(1);
+  expect(await frame(page).getAttribute("sandbox")).toBeNull();
+  await expect(frame(page)).toHaveAttribute(
+    "src",
+    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/brief\.pdf\?v=\d+#page=1$/,
+  );
+  const fit = await page.evaluate(() => {
+    const pane = document.getElementById("lx-doc-pane");
+    const box = pane?.querySelector("iframe")?.getBoundingClientRect();
+    const around = pane?.getBoundingClientRect();
+    if (!box || !around) return null;
+    return [box.left - around.left, box.right - around.right, box.bottom - around.bottom];
+  });
+  expect(fit?.map((d) => Math.abs(Math.round(d)))).toEqual([0, 0, 0]);
+  // What the frame loads is the PDF itself, without a sandbox, as Lectern serves it.
+  const src = (await frame(page).getAttribute("src")) ?? "";
+  const served = await page.request.get(src.slice(0, src.indexOf("#")));
+  expect(served.status()).toBe(200);
+  expect(served.headers()["content-type"]).toBe("application/pdf");
+  expect(served.headers()["content-security-policy"]).toBeUndefined();
+
+  const version = async () =>
+    Number(/\?v=(\d+)/.exec((await frame(page).getAttribute("src")) ?? "")?.[1]);
+  const first = await version();
+  await page.keyboard.press("F5");
+  await expect.poll(version).toBeGreaterThan(first);
+  await expect(frame(page)).toHaveCount(1);
+  await expect(frame(page)).toHaveAttribute("src", /#page=1$/);
+
+  // The viewer has the outline and search; Lectern has no comments for it.
+  await expect(page.locator("#lx-outline-pane")).toHaveText(
+    "PDFs show their own outline in the viewer.",
+  );
+  await page.keyboard.press("Control+f");
+  await expect(page.locator("#lx-toasts .toast")).toHaveText(
+    "Click into the PDF and press Ctrl+F to search it.",
+  );
+  await expect(page.getByRole("search", { name: "Find in page" })).toHaveCount(0);
+  await page.locator("#lx-tab-comments").click();
+  await expect(page.locator("#lx-comments-pane .comments-banner")).toHaveText(
+    "PDFs don't take comments.",
+  );
 });
 
 test("search reads text files, not pages", async ({ page }) => {

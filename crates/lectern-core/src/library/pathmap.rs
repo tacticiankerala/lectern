@@ -1,8 +1,9 @@
-//! Mapping paths written in notes to files on this machine, and local files to asset URLs.
+//! Mapping paths written in notes to files on this machine, and local files to asset and page
+//! URLs.
 
 use std::path::{Path, PathBuf};
 
-use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use super::resolve::{library_suffix_match, moved_file_match};
 use super::LibraryIndex;
@@ -427,4 +428,103 @@ pub fn asset_url(asset_base: &str, path: &Path) -> String {
         "{asset_base}{}",
         utf8_percent_encode(&path.to_string_lossy(), URI_COMPONENT)
     )
+}
+
+/// The origin of Lectern's page protocol (`lxpage`), which serves HTML pages, PDFs and what a page
+/// loads into a frame.
+pub const PAGE_ORIGIN: &str = "http://lxpage.localhost";
+
+/// RFC 3986's unreserved characters are the only ones a page URL keeps as they are.
+const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// The page-protocol URL for a local file, hierarchical so a page's relative links resolve beside
+/// it: `X:\a\b c.html` is `http://lxpage.localhost/d/x/a/b%20c.html` and `\\host\share\x.pdf` is
+/// `http://lxpage.localhost/u/host/share/x.pdf`, each segment percent-encoded. `None` for anything
+/// but a drive or UNC path, and for a path `page_path` would refuse (`.`, `..`, empty segments,
+/// characters Windows forbids), so `page_path` always gives the path back.
+pub fn page_url(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    let b = text.as_bytes();
+    let (mut url, rest) = if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        let drive = char::from(b[0].to_ascii_lowercase());
+        // `X:a` and `X:` are relative to the drive's current folder.
+        let rest = text[2..].strip_prefix(['\\', '/'])?;
+        (format!("{PAGE_ORIGIN}/d/{drive}"), rest)
+    } else {
+        let rest = text.strip_prefix(['\\', '/'])?.strip_prefix(['\\', '/'])?;
+        // A host and a share at least.
+        if rest.split(['\\', '/']).count() < 2 {
+            return None;
+        }
+        (format!("{PAGE_ORIGIN}/u"), rest)
+    };
+    if rest.is_empty() {
+        return Some(url);
+    }
+    for segment in rest.split(['\\', '/']) {
+        if !page_segment(segment) {
+            return None;
+        }
+        url.push('/');
+        url.extend(utf8_percent_encode(segment, UNRESERVED));
+    }
+    Some(url)
+}
+
+/// The local path a page-protocol URL path (`/d/x/a/b%20c.html`, its query and fragment ignored)
+/// names: `X:\a\b c.html` or `\\host\share\…`. Each segment is percent-decoded once and then
+/// checked, so an encoded `..%2F` or `%3A%5C` is refused rather than climbing or switching drive:
+/// `None` for an empty segment, `.` or `..`, a segment holding a separator, `:`, NUL, a control
+/// character or one of `<>"|?*`, one that isn't UTF-8, and a missing drive, host or share.
+pub fn page_path(url_path: &str) -> Option<String> {
+    let end = url_path.find(['?', '#']).unwrap_or(url_path.len());
+    let path = &url_path[..end];
+    let mut segments = path.strip_prefix('/').unwrap_or(path).split('/');
+    let mut out = match segments.next()? {
+        "d" => {
+            let drive = segments.next()?;
+            match drive.as_bytes() {
+                [letter] if letter.is_ascii_alphabetic() => {
+                    format!("{}:", char::from(letter.to_ascii_uppercase()))
+                }
+                _ => return None,
+            }
+        }
+        "u" => {
+            let host = page_decode(segments.next()?)?;
+            let share = page_decode(segments.next()?)?;
+            format!(r"\\{host}\{share}")
+        }
+        _ => return None,
+    };
+    let mut named = false;
+    for segment in segments {
+        out.push('\\');
+        out.push_str(&page_decode(segment)?);
+        named = true;
+    }
+    // A drive's root keeps its separator: `X:\`.
+    if !named && out.ends_with(':') {
+        out.push('\\');
+    }
+    Some(out)
+}
+
+/// One URL path segment, percent-decoded once, if it names a file or folder (`page_segment`).
+fn page_decode(encoded: &str) -> Option<String> {
+    let decoded = percent_decode_str(encoded).decode_utf8().ok()?;
+    page_segment(&decoded).then(|| decoded.into_owned())
+}
+
+/// Whether a decoded segment names one file or folder: not empty, `.` or `..`, and without a
+/// separator, `:`, a control character (NUL among them) or one of `<>"|?*`.
+fn page_segment(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && !segment.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
 }

@@ -289,6 +289,30 @@ button.crumb:focus-visible {
   scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
 }
 
+/* An HTML page or a PDF (frame-view.ts): its frame fills the pane in place of the document, below
+   the banner and the properties strip, in focus mode too. */
+#lx-doc-pane.framed {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+body.focus #lx-doc-pane.framed {
+  padding-top: 0;
+}
+
+#lx-doc-pane.framed > #lx-doc {
+  display: none;
+}
+
+.lx-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+}
+
 /* The banner and the properties strip share the document's column: their width is measured in the
    reading font, their content set in the chrome's. */
 #lx-banner,
@@ -535,6 +559,13 @@ button.crumb:focus-visible {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* In place of an outline Lectern can't list (a PDF's). */
+.outline-note {
+  margin: 0;
+  padding: 0 8px 0 14px;
+  color: var(--fg-muted);
 }
 
 .outline-list a,

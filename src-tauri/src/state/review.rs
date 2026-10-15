@@ -22,6 +22,7 @@ use super::{trust, WindowState};
 const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
 const NOT_A_NOTE: &str = "Comments can only be added to notes and text files.";
+const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -32,24 +33,25 @@ struct Target {
 }
 
 impl Target {
-    /// Whether the note can have comments: it's a Markdown note or a text file, and not a sidecar
-    /// itself (`plan.review.review.md` would be a sidecar's sidecar). A page takes none yet, and
-    /// a PDF never does.
-    fn takes_comments(&self) -> bool {
-        matches!(
-            doc_kind(&self.note_name),
-            Some(DocKind::Markdown | DocKind::Text)
-        ) && !is_sidecar_name(&self.note_name)
+    /// Why the note can't have comments, or `None` when it can: a Markdown note or a text file
+    /// can, unless it is a sidecar itself (`plan.review.review.md` would be a sidecar's sidecar). A
+    /// page takes none yet, and a PDF never does.
+    fn refusal(&self) -> Option<&'static str> {
+        match doc_kind(&self.note_name) {
+            Some(DocKind::Pdf) => Some(NOT_ON_A_PDF),
+            Some(DocKind::Markdown | DocKind::Text) if !is_sidecar_name(&self.note_name) => None,
+            _ => Some(NOT_A_NOTE),
+        }
     }
 }
 
 impl WindowState {
     /// The open note's comments. Without a sidecar the note isn't read. A file that can't take
-    /// comments (see `review_target`) shows none, read-only, and nothing is read.
+    /// comments (see `review_target`) shows none, read-only with the reason, and nothing is read.
     pub fn load_review(&self, path: &str) -> Result<ReviewPayload, String> {
         let target = self.open_target(path)?;
-        if !target.takes_comments() {
-            return Ok(self.review_payload(&target, None, Some(NOT_A_NOTE.to_owned())));
+        if let Some(refusal) = target.refusal() {
+            return Ok(self.review_payload(&target, None, Some(refusal.to_owned())));
         }
         if let Err(e) = fs::metadata(&target.sidecar) {
             if e.kind() == io::ErrorKind::NotFound {
@@ -88,11 +90,11 @@ impl WindowState {
     }
 
     /// `path` as a note a review command may change the sidecar of: the open note (see
-    /// `open_target`), and one that takes comments (`Target::takes_comments`).
+    /// `open_target`), and one that takes comments (`Target::refusal`).
     fn review_target(&self, path: &str) -> Result<Target, String> {
         let target = self.open_target(path)?;
-        if !target.takes_comments() {
-            return Err(NOT_A_NOTE.to_owned());
+        if let Some(refusal) = target.refusal() {
+            return Err(refusal.to_owned());
         }
         Ok(target)
     }
@@ -333,22 +335,24 @@ mod tests {
         );
     }
 
-    /// A page takes no comments yet, a PDF never does, and a sidecar takes none of its own.
+    /// A page takes no comments yet, a PDF never does (and says so), and a sidecar takes none of
+    /// its own.
     #[test]
     fn refuses_a_page_a_pdf_or_a_sidecar() {
         let f = fixture(profile(&[]), FakeHost::default());
-        for name in [
-            "a/tide.html",
-            "b/plan.review.md",
-            "c/PLAN.Review.MD",
-            "d/brief.pdf",
+        for (name, reason) in [
+            ("a/tide.html", NOT_A_NOTE),
+            ("b/plan.review.md", NOT_A_NOTE),
+            ("c/PLAN.Review.MD", NOT_A_NOTE),
+            ("d/brief.pdf", "PDFs don't take comments."),
+            ("e/BRIEF.PDF", "PDFs don't take comments."),
         ] {
             let doc = f.dir.file(name, NOTE);
             let path = path_string(&doc);
             opened_path(&f.state.open_document(&path));
             assert_eq!(
                 f.state.review_op(&path, add("Why 50?")).unwrap_err(),
-                NOT_A_NOTE,
+                reason,
                 "{name}"
             );
             assert!(!sidecar_path(&doc).exists(), "{name}");
@@ -356,7 +360,7 @@ mod tests {
             let loaded = f.state.load_review(&path).unwrap();
             assert!(!loaded.exists, "{name}");
             assert!(loaded.comments.is_empty(), "{name}");
-            assert_eq!(loaded.read_only.as_deref(), Some(NOT_A_NOTE), "{name}");
+            assert_eq!(loaded.read_only.as_deref(), Some(reason), "{name}");
         }
     }
 

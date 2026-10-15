@@ -8,11 +8,13 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lectern_core::ipc::{Crumb, OpenError, OpenErrorKind};
-use lectern_core::library::pathmap::PathMapper;
+use lectern_core::library::pathmap::{page_url, PathMapper};
 use lectern_core::library::{doc_kind, path_key, DocKind, LibraryIndex};
 use lectern_core::render::{render, render_plain, RenderContext, RenderedDoc};
 use lectern_core::text::{decode, DecodeError};
 
+use super::assets::normalize;
+use super::pages::{MAX_BYTES as MAX_PAGE_BYTES, MAX_PDF_BYTES};
 use super::paths::{is_under, path_string, root_name};
 
 /// The prefix of Lectern's image protocol (`lxasset`) for local images in rendered documents.
@@ -26,6 +28,8 @@ pub struct Rendered {
     pub kind: DocKind,
     /// Empty for an HTML page or a PDF, which shows in a frame (`RenderedDoc::framed`).
     pub doc: Arc<RenderedDoc>,
+    /// Where an HTML page or a PDF loads into its frame from; `None` for every other kind.
+    pub frame_url: Option<String>,
     pub mtime_ms: i64,
     pub lossy: bool,
     /// The index held the file's own root when it was rendered; without that, its wikilinks show
@@ -64,15 +68,16 @@ pub fn render_file(
 ) -> Result<Rendered, OpenError> {
     let kind = opened_kind(path);
     let stamp = stat_doc(path)?;
-    if kind.framed() {
-        return Ok(framed(path, kind, &stamp));
-    }
     check_size(path, kind, stamp.size)?;
+    if kind.framed() {
+        return framed(path, kind, &stamp);
+    }
     let text = read_text(path)?;
     let doc = render_doc(path, kind, &text.text, None, mapper, trusted_hosts);
     Ok(Rendered {
         kind,
         doc: Arc::new(doc),
+        frame_url: None,
         mtime_ms: stamp.mtime_ms,
         lossy: text.lossy,
         covered: false,
@@ -86,16 +91,28 @@ pub(super) fn opened_kind(path: &Path) -> DocKind {
 }
 
 /// An HTML page or a PDF of kind `kind`, stated as `stamp`, opened without reading it: it shows
-/// in a frame.
-pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Rendered {
-    Rendered {
+/// in a frame, from the page protocol's URL for where it is (`.` and `..` applied). A path that
+/// has no such URL is an error rather than an empty frame.
+pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Result<Rendered, OpenError> {
+    let frame_url = normalize(&path_string(path))
+        .and_then(|normal| page_url(Path::new(&normal)))
+        .ok_or_else(|| OpenError {
+            kind: OpenErrorKind::Io,
+            message: format!(
+                "Lectern can't show {}: it has no way to serve a file at that path",
+                path.display()
+            ),
+            path: path_string(path),
+        })?;
+    Ok(Rendered {
         kind,
         doc: Arc::new(RenderedDoc::framed(path)),
+        frame_url: Some(frame_url),
         mtime_ms: stamp.mtime_ms,
         lossy: false,
         covered: false,
         gen: 0,
-    }
+    })
 }
 
 /// Renders `text`, read from `path`, as its kind shows: a text file as its paragraphs, as written,
@@ -149,13 +166,28 @@ pub(super) fn stat_doc(path: &Path) -> Result<Stamp, OpenError> {
     })
 }
 
-/// Refuses a text file over `MAX_TEXT_BYTES`, before it is read. Any other kind opens whatever
-/// its size.
+/// Refuses a text file over `MAX_TEXT_BYTES` before it is read, and a page or a PDF the page
+/// protocol wouldn't serve (over its cap) before its frame loads. A note opens whatever its size.
 pub(super) fn check_size(path: &Path, kind: DocKind, size: u64) -> Result<(), OpenError> {
-    if kind == DocKind::Text && size > MAX_TEXT_BYTES {
+    let (cap, message) = match kind {
+        DocKind::Markdown => return Ok(()),
+        DocKind::Text => (
+            MAX_TEXT_BYTES,
+            "This file is too large to show (over 20 MB).",
+        ),
+        DocKind::Html => (
+            MAX_PAGE_BYTES,
+            "This page is too large to show (over 20 MB).",
+        ),
+        DocKind::Pdf => (
+            MAX_PDF_BYTES,
+            "This PDF is too large to show (over 100 MB).",
+        ),
+    };
+    if size > cap {
         return Err(OpenError {
             kind: OpenErrorKind::TooLarge,
-            message: "This file is too large to show (over 20 MB).".to_owned(),
+            message: message.to_owned(),
             path: path_string(path),
         });
     }
@@ -365,9 +397,8 @@ mod tests {
             "This file is too large to show (over 20 MB)."
         );
         assert_eq!(error.path, path_string(path));
-        for kind in [DocKind::Markdown, DocKind::Html, DocKind::Pdf] {
-            assert!(check_size(path, kind, 64 * LIMIT).is_ok(), "{kind:?}");
-        }
+        // A note opens whatever its size; a page or a PDF has the page protocol's caps (open.rs).
+        assert!(check_size(path, DocKind::Markdown, 64 * LIMIT).is_ok());
         // Refused before it is read.
         let dir = TempDir::new();
         let huge = dir.0.join("huge.txt");

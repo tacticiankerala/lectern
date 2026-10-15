@@ -19,7 +19,8 @@
 //   feature off), it stays, hidden, until that text is saved or let go. `#lx-app.no-comments`
 //   marks every comment surface hidden.
 // - The reading position is saved once scrolling stops for a moment and when the document is
-//   left; a document opened without an anchor or line goes back to its saved position.
+//   left; a document opened without an anchor or line goes back to its saved position. A page or
+//   a PDF in a frame keeps none.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -472,8 +473,9 @@ export class App {
     this.positionTimer = setTimeout(() => {
       this.positionTimer = null;
       const doc = this.state.doc;
-      if (doc) {
-        this.savePosition(doc.path, this.view.captureAnchor());
+      const position = doc ? this.view.captureAnchor() : null;
+      if (doc && position) {
+        this.savePosition(doc.path, position);
       }
     }, POSITION_SAVE_MS);
   }
@@ -616,13 +618,14 @@ export class App {
       }
     }
     const doc = this.state.doc;
+    const position = doc ? this.view.captureAnchor() : null;
     if (this.positionTimer !== null) {
       clearTimeout(this.positionTimer);
       this.positionTimer = null;
     }
     await Promise.all([
       this.saveSettings(),
-      doc ? this.backend.savePosition(doc.path, this.view.captureAnchor()).catch(warn) : null,
+      doc && position ? this.backend.savePosition(doc.path, position).catch(warn) : null,
     ]);
     return true;
   }
@@ -777,6 +780,7 @@ export class App {
       this.layout.properties.hidden = true;
       this.layout.banner.hidden = true;
       this.outline.clear();
+      this.view.closeFrame();
       if (result) {
         this.showError(result.error);
       } else {
@@ -794,7 +798,11 @@ export class App {
     this.view.render(doc);
     this.showMeta(doc);
     this.showBanner(doc.lossy);
-    this.outline.render(doc.outline, this.layout.doc);
+    if (doc.kind === "pdf") {
+      this.outline.note("PDFs show their own outline in the viewer.");
+    } else {
+      this.outline.render(doc.outline, this.layout.doc);
+    }
     if (position) {
       this.view.restore(position);
     } else if (opts.anchor !== undefined && this.view.scrollToAnchor(opts.anchor, opts.slug)) {

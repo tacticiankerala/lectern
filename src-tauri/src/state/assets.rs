@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use lectern_core::library::path_key;
 use percent_encoding::percent_decode_str;
 
+use super::paths::path_string;
 use super::trust::Trust;
 use crate::shell;
 
@@ -34,9 +35,12 @@ impl AssetScope {
         self.roots = roots.iter().map(|root| path_key(root.as_ref())).collect();
     }
 
-    /// Adds the folder of a document that has just opened.
+    /// Adds the folder of a document that has just opened, with `.` and `..` applied as they are
+    /// to the paths asked for.
     pub fn add_folder(&mut self, dir: &Path) {
-        self.opened.insert(path_key(dir));
+        let dir = path_string(dir);
+        let dir = normalize(&dir).unwrap_or(dir);
+        self.opened.insert(path_key(Path::new(&dir)));
     }
 
     /// Whether the (normalised) `path` is inside an allowed folder.
@@ -57,7 +61,8 @@ pub enum Refusal {
     /// Not an absolute local path, or one Windows would read differently from how it is written.
     NotLocal,
     UntrustedHost,
-    NotAnImage,
+    /// Not a type the protocol serves: an image, for this one.
+    WrongType,
     OutsideLibrary,
 }
 
@@ -71,26 +76,39 @@ pub struct AssetFile {
 /// Decides whether `raw` (a percent-decoded request path) may be served, without touching the
 /// file system.
 pub fn decide(raw: &str, trust: &Trust, scope: &AssetScope) -> Result<AssetFile, Refusal> {
-    let path = shell::local_path(raw).ok_or(Refusal::NotLocal)?;
-    if !trust.allows(path) {
-        return Err(Refusal::UntrustedHost);
-    }
-    let path = normalize(path).ok_or(Refusal::NotLocal)?;
-    let content_type = content_type(&path).ok_or(Refusal::NotAnImage)?;
-    if !scope.allows(&path) {
-        return Err(Refusal::OutsideLibrary);
-    }
+    let (path, content_type) = admit(raw, trust, scope, content_type)?;
     Ok(AssetFile {
         path: PathBuf::from(path),
         content_type,
     })
 }
 
+/// The checks every protocol that serves local files makes on `raw` (a decoded path), in order and
+/// without touching the file system: an absolute local path, on a trusted host, normalised, of a
+/// type `type_of` serves, and inside an allowed folder. The normalised path and its type.
+pub(super) fn admit<T>(
+    raw: &str,
+    trust: &Trust,
+    scope: &AssetScope,
+    type_of: impl FnOnce(&str) -> Option<T>,
+) -> Result<(String, T), Refusal> {
+    let path = shell::local_path(raw).ok_or(Refusal::NotLocal)?;
+    if !trust.allows(path) {
+        return Err(Refusal::UntrustedHost);
+    }
+    let path = normalize(path).ok_or(Refusal::NotLocal)?;
+    let kind = type_of(&path).ok_or(Refusal::WrongType)?;
+    if !scope.allows(&path) {
+        return Err(Refusal::OutsideLibrary);
+    }
+    Ok((path, kind))
+}
+
 /// `path` with `.` and `..` applied and `\` separators: `X:\…` or `\\server\share\…`. `None`
 /// when `..` climbs above the drive or share, or when a segment is one Windows would read as
 /// something else: a name ending in `.` or a space (`.. ` is `..` to Windows), or a reserved
 /// device name (`CON`, `NUL`, `COM1`, …) that would open a device instead of a file.
-fn normalize(path: &str) -> Option<String> {
+pub(super) fn normalize(path: &str) -> Option<String> {
     let (prefix, rest) = if path.as_bytes().get(1) == Some(&b':') {
         (path[..2].to_owned(), &path[2..])
     } else {
@@ -225,18 +243,24 @@ pub fn serve(
 
 /// Reads a regular file of at most 20 MiB.
 pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+    read_at_most(path, MAX_IMAGE_BYTES)
+}
+
+/// Reads a regular file of at most `cap` bytes; a larger one is `FileTooLarge`, and anything but a
+/// file is `NotFound`.
+pub(super) fn read_at_most(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "not a file"));
     }
-    if meta.len() > MAX_IMAGE_BYTES {
-        return Err(io::Error::other("larger than 20 MiB"));
+    if meta.len() > cap {
+        return Err(io::ErrorKind::FileTooLarge.into());
     }
     let mut body = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    file.take(MAX_IMAGE_BYTES + 1).read_to_end(&mut body)?;
-    if body.len() as u64 > MAX_IMAGE_BYTES {
-        return Err(io::Error::other("larger than 20 MiB"));
+    file.take(cap + 1).read_to_end(&mut body)?;
+    if body.len() as u64 > cap {
+        return Err(io::ErrorKind::FileTooLarge.into());
     }
     Ok(body)
 }
@@ -353,7 +377,7 @@ mod tests {
             r"S:\Notes\My Vault\dev\run.exe",
             r"S:\Notes\My Vault\dev\README",
         ] {
-            assert_eq!(check(raw), Err(Refusal::NotAnImage), "{raw}");
+            assert_eq!(check(raw), Err(Refusal::WrongType), "{raw}");
         }
     }
 

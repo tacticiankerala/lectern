@@ -51,6 +51,12 @@ export class Outline {
     this.watch(doc);
   }
 
+  /** Shows `message` in place of an outline Lectern can't list (a PDF's). */
+  note(message: string): void {
+    this.clear();
+    this.host.replaceChildren(h("p", { class: "outline-note" }, message));
+  }
+
   clear(): void {
     this.observer?.disconnect();
     this.observer = null;

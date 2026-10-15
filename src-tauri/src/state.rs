@@ -1,5 +1,5 @@
 //! What the commands work on. `App` holds what every window shares: the settings, the workspaces,
-//! the trusted hosts, the image scope, the path mapper, the highlighter's warm-up and release, the
+//! the trusted hosts, the asset scope, the path mapper, the highlighter's warm-up and release, the
 //! saver, and each window's `WindowState`. A `WindowState` holds what one window shows: the
 //! workspace it is bound to, its library and index, its render cache, the document on screen and
 //! the watcher over them. Each command is one call into a method of the calling window's
@@ -30,6 +30,7 @@ mod grammars;
 mod library;
 mod open;
 mod open_queue;
+mod pages;
 mod paths;
 mod profile;
 mod review;
@@ -68,6 +69,7 @@ use tauri::Window;
 pub use self::assets::AssetResponse;
 pub use self::doc::{render_file, Early, EarlyDoc};
 pub use self::open_queue::{HeldLaunches, OpenQueue};
+pub use self::pages::PageResponse;
 pub use self::profile::{load_profile, mapper_for, Profile};
 pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
@@ -192,7 +194,7 @@ pub struct App {
     settings_rev: AtomicU64,
     /// The network hosts Lectern may reach, in any window.
     trust: RwLock<Trust>,
-    /// The folders the image protocol may serve from, in any window.
+    /// The folders the image and page protocols may serve from, in any window.
     assets: RwLock<AssetScope>,
     /// The reading positions, shared by every window.
     state: Mutex<StateFile>,
@@ -449,6 +451,16 @@ impl App {
             request_path,
             |raw| assets::decide(raw, &read(&self.trust), &read(&self.assets)),
             assets::read_capped,
+        )
+    }
+
+    /// Answers a page-protocol request for `request_path` (the URL path, percent-encoded): the same
+    /// checks as for an image, made in memory under brief read locks before the file is read.
+    pub fn serve_page(&self, request_path: &str) -> PageResponse {
+        pages::serve(
+            request_path,
+            |url_path| pages::decide(url_path, &read(&self.trust), &read(&self.assets)),
+            pages::read,
         )
     }
 
@@ -849,7 +861,7 @@ mod tests {
     use super::*;
     use crate::state::test_support::*;
     use lectern_core::ipc::OpenResult;
-    use lectern_core::library::pathmap::asset_url;
+    use lectern_core::library::pathmap::{asset_url, page_url, PAGE_ORIGIN};
     use std::path::Path;
     use std::{fs, thread};
 
@@ -1050,6 +1062,47 @@ mod tests {
                 .status,
             404
         );
+    }
+
+    /// The page protocol serves pages, PDFs and what a page loads under a root from the start,
+    /// beside each other at hierarchical URLs, and from an opened document's folder once it opens.
+    #[test]
+    fn pages_under_a_root_or_an_opened_folder_are_served() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let page = dir.file("vault/artifacts/report.html", "<h1>Report</h1>");
+        dir.file("vault/artifacts/style.css", "h1 { color: teal }");
+        let pdf = dir.file("elsewhere/trip/brief.pdf", "%PDF-1.4");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let url = |path: &Path| {
+            let url = page_url(path).unwrap();
+            url.strip_prefix(PAGE_ORIGIN).unwrap().to_owned()
+        };
+        let served = f.app.serve_page(&url(&page));
+        assert_eq!(served.status, 200);
+        assert_eq!(served.content_type, Some("text/html"));
+        assert_eq!(served.body, b"<h1>Report</h1>");
+        assert!(served.policy.unwrap().contains("sandbox"));
+        // A relative link resolves beside the page.
+        let page_path = url(&page);
+        let (folder, _) = page_path.rsplit_once('/').unwrap();
+        let style = f.app.serve_page(&format!("{folder}/style.css?v=1"));
+        assert_eq!(style.status, 200);
+        assert_eq!(style.body, b"h1 { color: teal }");
+        assert_eq!(
+            f.app
+                .serve_page(&url(&root.join("artifacts").join("gone.css")))
+                .status,
+            404
+        );
+        // Outside every root until its folder is opened; then a PDF, unsandboxed.
+        assert_eq!(f.app.serve_page(&url(&pdf)).status, 403);
+        f.state.open_document(&path_string(&pdf));
+        let served = f.app.serve_page(&url(&pdf));
+        assert_eq!(served.status, 200);
+        assert_eq!(served.content_type, Some("application/pdf"));
+        assert_eq!(served.policy, None);
+        assert_eq!(served.body, b"%PDF-1.4");
     }
 
     /// A raw `<img>` naming an image by its drive path loads through the image protocol when the

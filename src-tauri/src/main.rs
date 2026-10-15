@@ -13,6 +13,7 @@ mod app;
 mod commands;
 mod events;
 mod logging;
+mod navigate;
 mod shell;
 mod state;
 mod updater;

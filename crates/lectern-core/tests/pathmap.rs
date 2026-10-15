@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::PathForms;
-use lectern_core::library::pathmap::{split_line_suffix, LineRef, Mapped, PathMapper};
+use lectern_core::library::pathmap::{
+    page_path, page_url, split_line_suffix, LineRef, Mapped, PathMapper, PAGE_ORIGIN,
+};
 
 fn mapper(mappings: &[(&str, &str)]) -> PathMapper {
     PathMapper {
@@ -543,4 +545,144 @@ fn literal_forms_map_linux_and_mounted_paths_without_the_index() {
         path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"))
     );
     assert_eq!(m.literal_forms("notes/plan.md"), path_forms(None, None));
+}
+
+/// The page protocol's URL path for `path`, without the origin.
+fn page_url_path(path: &str) -> String {
+    let url = page_url(Path::new(path)).unwrap_or_else(|| panic!("no page URL for {path}"));
+    url.strip_prefix(PAGE_ORIGIN)
+        .unwrap_or_else(|| panic!("{url} isn't on the page origin"))
+        .to_owned()
+}
+
+#[test]
+fn page_urls_are_hierarchical_with_each_segment_encoded() {
+    assert_eq!(
+        page_url(Path::new(r"X:\a\b c.html")).as_deref(),
+        Some("http://lxpage.localhost/d/x/a/b%20c.html")
+    );
+    assert_eq!(
+        page_url(Path::new(r"\\host\share\x.pdf")).as_deref(),
+        Some("http://lxpage.localhost/u/host/share/x.pdf")
+    );
+    // Only RFC 3986's unreserved characters stay as they are.
+    assert_eq!(
+        page_url_path(r"S:\Notes\C#\100%\Café 日本\a #1 (draft)~v2_x-y.html"),
+        "/d/s/Notes/C%23/100%25/Caf%C3%A9%20%E6%97%A5%E6%9C%AC/a%20%231%20%28draft%29~v2_x-y.html"
+    );
+    // Either separator.
+    assert_eq!(page_url_path("S:/Notes/a.pdf"), "/d/s/Notes/a.pdf");
+    assert_eq!(page_url_path("//nas/share/a.pdf"), "/u/nas/share/a.pdf");
+}
+
+#[test]
+fn page_urls_round_trip() {
+    for path in [
+        r"X:\a\b c.html",
+        r"S:\Notes\My Vault\artifacts\brief.pdf",
+        r"S:\Notes\C#\100%\Café 日本\a #1.html",
+        r"S:\Notes\50% off; [x] & {y} = 'z'!.html",
+        r"\\nas\share\notes\x.pdf",
+        r"\\Host.Example\Share $\img\a b.png",
+        // Roots, which no type check will serve, but which map all the same.
+        r"X:\",
+        r"\\nas\share",
+    ] {
+        assert_eq!(
+            page_path(&page_url_path(path)).as_deref(),
+            Some(path),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn page_paths_ignore_the_query_and_fragment() {
+    assert_eq!(
+        page_path("/d/s/Notes/brief.pdf?v=3#page=2").as_deref(),
+        Some(r"S:\Notes\brief.pdf")
+    );
+    assert_eq!(
+        page_path("/d/s/Notes/a%3Fb%23c.html#x").as_deref(),
+        None,
+        "a decoded ? is refused"
+    );
+    assert_eq!(
+        page_path("/u/nas/share/report.html#top").as_deref(),
+        Some(r"\\nas\share\report.html")
+    );
+    // Without the leading slash too.
+    assert_eq!(page_path("d/s/a.pdf").as_deref(), Some(r"S:\a.pdf"));
+}
+
+#[test]
+fn page_paths_refuse_what_decodes_to_another_place() {
+    for url in [
+        // Climbing, as written or encoded: each segment is decoded once, then checked.
+        "/d/s/Notes/..%2F..%2Fsecret.txt",
+        "/d/s/Notes/../secret.txt",
+        "/d/s/Notes/%2E%2E/secret.txt",
+        "/d/s/Notes/./a.html",
+        "/d/s/Notes/%2e/a.html",
+        "/d/s/Notes/..%5Csecret.txt",
+        // Another drive or a stream, smuggled into a segment.
+        "/d/s/Notes/%3A%5CWindows%5Cwin.ini",
+        "/d/s/Notes/a.html%3Astream",
+        "/d/s/a%2Fb.html",
+        // NUL, control characters and the names Windows forbids.
+        "/d/s/a%00b.html",
+        "/d/s/a%0Ab.html",
+        "/d/s/a%1Fb.html",
+        "/d/s/a%3Cb.html",
+        "/d/s/a%3Eb.html",
+        "/d/s/a%22b.html",
+        "/d/s/a%7Cb.html",
+        "/d/s/a%3Fb.html",
+        "/d/s/a%2Ab.html",
+        // Empty segments.
+        "/d/s//a.html",
+        "/d/s/a.html/",
+        "/u/nas//share/a.html",
+        // A missing or malformed drive, host or share.
+        "",
+        "/",
+        "/d",
+        "/d/",
+        "/d//a.html",
+        "/d/ss/a.html",
+        "/d/1/a.html",
+        "/d/%73/a.html",
+        "/u",
+        "/u/nas",
+        "/u//share/a.html",
+        "/u/%3F/UNC/nas/a.html",
+        "/u/./share/a.html",
+        "/x/s/a.html",
+        "/D/s/a.html",
+        // Not UTF-8 once decoded.
+        "/d/s/%FF%FE.html",
+    ] {
+        assert_eq!(page_path(url), None, "{url}");
+    }
+}
+
+#[test]
+fn only_drive_and_unc_paths_have_page_urls() {
+    for path in [
+        "notes/a.html",
+        "/home/me/a.html",
+        r"X:a.html",
+        "X:",
+        r"\\?\C:\a.html",
+        r"\\.\pipe\a",
+        r"\\nas",
+        r"\\nas\",
+        r"X:\a\..\b.html",
+        r"X:\a\.\b.html",
+        r"X:\a\\b.html",
+        r"X:\a.html:stream",
+        "",
+    ] {
+        assert_eq!(page_url(Path::new(path)), None, "{path:?}");
+    }
 }

@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Lectern",
         "visible": false,
         "width": 1280,
@@ -19,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://lxasset.localhost https: data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' http://lxasset.localhost https: data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src http://lxpage.localhost"
     }
   },
   "bundle": {

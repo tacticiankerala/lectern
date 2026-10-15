@@ -4,7 +4,7 @@
 // note and text file from fixtures/vault added for the fake's full-text search, which reads no
 // HTML pages or PDFs, as Rust's doesn't.
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -90,7 +90,18 @@ await esbuild.build({
   logLevel: "warning",
 });
 
-await cp(path.join(root, "index.html"), path.join(outdir, "index.html"));
+if (fake) {
+  // The fake serves pages and PDFs from the dev server (dev/serve.mjs), not `lxpage`, so its
+  // frames come from the page's own origin.
+  const page = await readFile(path.join(root, "index.html"), "utf8");
+  const appFrames = "frame-src http://lxpage.localhost";
+  if (!page.includes(appFrames)) {
+    throw new Error(`index.html's CSP has no "${appFrames}"`);
+  }
+  await writeFile(path.join(outdir, "index.html"), page.replace(appFrames, `${appFrames} 'self'`));
+} else {
+  await cp(path.join(root, "index.html"), path.join(outdir, "index.html"));
+}
 const fonts = path.join(root, "fonts");
 if (existsSync(fonts)) {
   await cp(fonts, path.join(outdir, "fonts"), { recursive: true });

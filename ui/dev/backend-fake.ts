@@ -2,7 +2,9 @@
 // UI runs in a plain browser for Playwright. Tests drive it through `window.__fake`.
 //
 // Full-text search matches the fixtures' notes and text files, which `build.mjs --fake` inlines, as
-// Rust does: smart case, line by line. Each document's kind comes from core, through the export.
+// Rust does: smart case, line by line. Each document's kind comes from core, through the export. A
+// page or a PDF loads into its frame from the dev server (`/__page/…`, dev/serve.mjs), as it would
+// from `lxpage`.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -151,6 +153,8 @@ const POSITIONS_KEY = "lx-fake-positions";
 const WORKSPACES_KEY = "lx-fake-workspaces";
 /** As Rust, a review asked for while review comments are off. */
 const FEATURE_OFF = "Review comments are turned off in Preferences.";
+/** As Rust, the reason a PDF shows no comments. */
+const NOT_ON_A_PDF = "PDFs don't take comments.";
 /** As core: a workspace's name is at most 60 characters. */
 const MAX_NAME_CHARS = 60;
 /**
@@ -491,6 +495,19 @@ function sidecarOf(path: string): string {
   const dot = name.lastIndexOf(".");
   const base = dot > 0 && name.slice(dot + 1).toLowerCase() === "md" ? name.slice(0, dot) : name;
   return `${path.slice(0, path.length - name.length)}${base}.review.md`;
+}
+
+/**
+ * As core's `page_url`, but on the dev server (dev/serve.mjs): a drive path's segments, each
+ * encoded, under `/__page/d/<drive>/`. Null for any other path.
+ */
+function pageUrl(path: string): string | null {
+  const drive = /^([A-Za-z]):\\(.*)$/.exec(path);
+  if (!drive) {
+    return null;
+  }
+  const segments = (drive[2] ?? "").split("\\").map(encodeURIComponent);
+  return `/__page/d/${(drive[1] ?? "").toLowerCase()}/${segments.join("/")}`;
 }
 
 /** A drive path as WSL mounts it (`C:\x` → `/mnt/c/x`); null for anything else. */
@@ -962,6 +979,9 @@ export class FakeBackend implements Backend, FakeControl {
     if (failure !== null) {
       throw new Error(failure);
     }
+    if (this.kinds.get(key(path)) === "pdf") {
+      throw new Error(NOT_ON_A_PDF);
+    }
     const existing = this.reviews.get(key(path));
     if (existing?.readOnly) {
       throw new Error(existing.readOnly);
@@ -1087,7 +1107,7 @@ export class FakeBackend implements Backend, FakeControl {
       noteWslPath: review ? review.noteWslPath : wslPath(path),
       sidecarWslPath: review ? review.sidecarWslPath : wslPath(sidecarOf(path)),
       exists: review !== undefined,
-      readOnly: review?.readOnly ?? null,
+      readOnly: this.kinds.get(key(path)) === "pdf" ? NOT_ON_A_PDF : (review?.readOnly ?? null),
       comments,
       unreadable: structuredClone(review?.unreadable ?? []),
       openCount: comments.filter((c) => c.status !== "resolved" && c.status !== "dismissed").length,
@@ -1458,10 +1478,11 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
+    const kind = this.kinds.get(key(path)) ?? "markdown";
     return {
       path,
-      kind: this.kinds.get(key(path)) ?? "markdown",
-      frameUrl: null,
+      kind,
+      frameUrl: kind === "html" || kind === "pdf" ? pageUrl(path) : null,
       title: doc.title,
       html: doc.html,
       outline: doc.outline,

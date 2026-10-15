@@ -46,7 +46,7 @@ impl WindowState {
     }
 
     /// Reads and renders `path`, or takes its render from the cache. An HTML page or a PDF is
-    /// only stated: it shows in a frame.
+    /// only stated: it shows in a frame. Anything over its kind's size cap is refused unread.
     pub(super) fn load(&self, path: &Path) -> Result<Rendered, OpenError> {
         // The generation is read before the index, so a render against an index replaced
         // meanwhile is never cached.
@@ -55,14 +55,14 @@ impl WindowState {
         let kind = opened_kind(path);
         let stamp = stat_doc(path)?;
         let covered = index.root_for(path).is_some();
+        check_size(path, kind, stamp.size)?;
         if kind.framed() {
             return Ok(Rendered {
                 covered,
                 gen,
-                ..framed(path, kind, &stamp)
+                ..framed(path, kind, &stamp)?
             });
         }
-        check_size(path, kind, stamp.size)?;
         let key = CacheKey {
             path: path_key(path),
             mtime_ms: stamp.mtime_ms,
@@ -73,6 +73,7 @@ impl WindowState {
             return Ok(Rendered {
                 kind,
                 doc,
+                frame_url: None,
                 mtime_ms: stamp.mtime_ms,
                 lossy: false,
                 covered,
@@ -96,6 +97,7 @@ impl WindowState {
         Ok(Rendered {
             kind,
             doc,
+            frame_url: None,
             mtime_ms: stamp.mtime_ms,
             lossy: text.lossy,
             covered,
@@ -175,7 +177,7 @@ impl WindowState {
             position: lock(&self.app.state).reading.position(&path_text).cloned(),
             path: path_text,
             kind: rendered.kind,
-            frame_url: None,
+            frame_url: rendered.frame_url.clone(),
             title: doc.title.clone(),
             html: doc.html.clone(),
             outline: doc.outline.clone(),
@@ -333,7 +335,7 @@ fn refused(path: &str) -> OpenResult {
 mod tests {
     use super::*;
     use crate::state::test_support::*;
-    use lectern_core::library::pathmap::PathMapper;
+    use lectern_core::library::pathmap::{page_url, PathMapper, PAGE_ORIGIN};
     use std::fs;
 
     use crate::state::doc::render_file;
@@ -429,10 +431,10 @@ mod tests {
         assert_eq!(f.host.doc_changes(), 1);
     }
 
-    /// An HTML page or a PDF opens with its kind and nothing of Lectern's own to show; a note
-    /// opens as it always has.
+    /// An HTML page or a PDF opens with its kind, nothing of Lectern's own to show, and the page
+    /// protocol's URL for its frame, which serves it; a note opens as it always has.
     #[test]
-    fn a_page_opens_with_its_kind_and_no_content() {
+    fn a_page_opens_with_its_kind_and_a_frame_url() {
         let f = fixture(profile(&[]), FakeHost::default());
         let page = f.dir.file("one/report.html", "<h1>Report</h1><p>Rose.</p>");
         let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
@@ -442,7 +444,11 @@ mod tests {
                 panic!("{} didn't open", path.display());
             };
             assert_eq!(doc.kind, kind);
-            assert_eq!(doc.frame_url, None);
+            let url = doc.frame_url.expect("a frame URL");
+            assert_eq!(Some(&url), page_url(path).as_ref());
+            let served = f.app.serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap());
+            assert_eq!(served.status, 200, "{url}");
+            assert_eq!(served.body, fs::read(path).unwrap());
             assert_eq!(doc.html, "");
             assert!(doc.outline.is_empty());
             assert!(doc.frontmatter.is_none());
@@ -455,6 +461,87 @@ mod tests {
         assert_eq!(doc.frame_url, None);
         assert!(doc.html.contains("Plan"));
         assert_eq!(last_doc(&f), Some(path_string(&note)));
+    }
+
+    /// A page or a PDF opened through `..` shows from the folder it is in, which comes into the
+    /// protocol's scope.
+    #[test]
+    fn a_page_opened_through_dot_dot_shows_from_where_it_is() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
+        f.dir.folder("one/sub");
+        let through = pdf.with_file_name("sub").join("..").join("brief.pdf");
+        let OpenResult::Ok { doc } = f.state.open_document(&path_string(&through)) else {
+            panic!("{} didn't open", through.display());
+        };
+        let url = doc.frame_url.expect("a frame URL");
+        assert_eq!(Some(&url), page_url(&pdf).as_ref());
+        let served = f.app.serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap());
+        assert_eq!(served.status, 200, "{url}");
+    }
+
+    /// A page or a PDF at a path the page protocol can't name is an open error, never an empty
+    /// pane.
+    #[test]
+    fn a_page_without_a_frame_url_is_an_open_error() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
+        let verbatim = PathBuf::from(format!(r"\\?\{}", pdf.display()).replace('/', r"\"));
+        assert!(fs::metadata(&verbatim).is_ok(), "{}", verbatim.display());
+        for result in [
+            f.state.load(&verbatim),
+            render_file(&verbatim, &PathMapper::default(), &[]),
+        ] {
+            let Err(error) = result else {
+                panic!("{} loaded", verbatim.display());
+            };
+            assert!(matches!(error.kind, OpenErrorKind::Io), "{error:?}");
+        }
+    }
+
+    /// A PDF over 100 MiB or a page over 20 MiB, the page protocol's caps, doesn't open, at boot or
+    /// later; one at the cap does.
+    #[test]
+    fn a_pdf_or_a_page_over_its_cap_is_too_large() {
+        const MIB: u64 = 1024 * 1024;
+        let f = fixture(profile(&[]), FakeHost::default());
+        let sized = |rel: &str, len: u64| {
+            let path = f.dir.file(rel, "");
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_len(len))
+                .unwrap();
+            path
+        };
+        let pdf = "This PDF is too large to show (over 100 MB).";
+        let page = "This page is too large to show (over 20 MB).";
+        for (path, message) in [
+            (sized("big/brief.pdf", 100 * MIB + 1), pdf),
+            (sized("big/report.html", 20 * MIB + 1), page),
+            (sized("big/old.HTM", 20 * MIB + 1), page),
+        ] {
+            let OpenResult::Err { error } = f.state.open_document(&path_string(&path)) else {
+                panic!("{} opened", path.display());
+            };
+            assert!(matches!(error.kind, OpenErrorKind::TooLarge), "{error:?}");
+            assert_eq!(error.message, message);
+            let Err(error) = render_file(&path, &PathMapper::default(), &[]) else {
+                panic!("{} rendered at boot", path.display());
+            };
+            assert_eq!(error.message, message);
+        }
+        for path in [
+            sized("ok/brief.pdf", 100 * MIB),
+            sized("ok/report.html", 20 * MIB),
+        ] {
+            let opened = f.state.open_document(&path_string(&path));
+            assert!(
+                matches!(opened, OpenResult::Ok { .. }),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     /// A text file opens as written, in paragraphs, never as a note: read fresh and from the

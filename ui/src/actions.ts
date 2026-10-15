@@ -42,6 +42,10 @@ const WIDTHS = {
 const SLIDE_MS = 200;
 /** How long the comments badge pulses when Claude writes while the panel is closed. */
 const PULSE_MS = 2000;
+/** Where find is, for a PDF in its frame: the viewer has its own. */
+const PDF_FIND = "Click into the PDF and press Ctrl+F to search it.";
+/** Where find is, for a page in its frame. */
+const PAGE_FIND = "Find in pages arrives in Task 4.";
 
 export class Actions {
   /** Loaded on first use. */
@@ -117,6 +121,10 @@ export class Actions {
     app.on("workspaces", () => {
       this.preferences?.syncWorkspaces();
     });
+    // The find bar searches Lectern's own document, which a page or a PDF in a frame isn't.
+    app.on("doc", () => {
+      if (this.framed()) this.find?.close();
+    });
     app.layout.app.addEventListener("contextmenu", (e) => {
       this.linkMenu(e);
     });
@@ -155,7 +163,9 @@ export class Actions {
       case "find-next":
       case "find-prev":
         // F3 is also WebView2's own find shortcut, so it is always handled.
-        if (this.find?.isOpen) {
+        if (this.framed()) {
+          this.sayWhereFindIs();
+        } else if (this.find?.isOpen) {
           if (action === "find-next") this.find.next();
           else this.find.prev();
         } else {
@@ -313,10 +323,22 @@ export class Actions {
     }
   }
 
-  /** The find bar, searching for `prefill` when given, from `near` (see `FindBar.open`). */
+  /**
+   * The find bar, searching for `prefill` when given, from `near` (see `FindBar.open`). With a
+   * page or a PDF in a frame, it says where find is instead. A navigation while its module loads
+   * drops it, as a followed link is dropped: it was asked for in the document left.
+   */
   async showFind(prefill?: string, near?: Element): Promise<void> {
     this.menu?.close(false);
+    if (this.framed()) {
+      this.sayWhereFindIs();
+      return;
+    }
+    const navigation = this.app.navigation;
     const { FindBar } = await import("./find.js");
+    if (navigation !== this.app.navigation || this.framed()) {
+      return;
+    }
     this.find ??= new FindBar(this.app.layout.docPane, {
       doc: () => (this.app.state.doc ? this.app.layout.doc : null),
       scroller: this.app.scroller,
@@ -677,7 +699,7 @@ export class Actions {
     if (!doc) {
       return false;
     }
-    const line = this.app.view.captureAnchor().line ?? undefined;
+    const line = this.app.view.captureAnchor()?.line ?? undefined;
     this.app.backend.openInEditor(doc.path, line).catch((e: unknown) => {
       this.app.toast(String(e));
     });
@@ -708,6 +730,16 @@ export class Actions {
       return;
     }
     this.app.toast(COPIED[form], middleTruncate(path, TOAST_PATH_CHARS));
+  }
+
+  /** Whether the document shows in a frame: a page or a PDF. */
+  private framed(): boolean {
+    return (this.app.state.doc?.frameUrl ?? null) !== null;
+  }
+
+  /** For a page or a PDF in a frame, which the find bar can't search: where find is instead. */
+  private sayWhereFindIs(): void {
+    this.app.toast(this.app.state.doc?.kind === "pdf" ? PDF_FIND : PAGE_FIND);
   }
 
   /** Reads the document again, keeping the place; a file that failed to open is retried. */

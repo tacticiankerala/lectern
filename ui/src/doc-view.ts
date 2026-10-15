@@ -1,12 +1,14 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
 // buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
-// after the text for its last heading to reach the top.
+// after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
+// instead (frame-view.ts), and keeps no reading position.
 //
 // Anchor contract (ruling R16): links carry the fragment as written (`href="#Frag"` in-page,
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
-import { HEADINGS, findById, h, samePath } from "./dom";
+import { HEADINGS, findById, samePath } from "./dom";
+import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
 import type { FollowResult } from "./generated/FollowResult";
@@ -29,11 +31,14 @@ export class DocView {
   private lastHeading: HTMLElement | null = null;
   /** The room after the text, in pixels, as last set. */
   private room = -1;
+  /** The frame a page or a PDF shows in, in the pane. */
+  private readonly frame: FrameView;
 
   constructor(
     private readonly host: HTMLElement,
     private readonly app: App,
   ) {
+    this.frame = new FrameView(app.layout.docPane);
     host.addEventListener("click", (e) => {
       this.onClick(e);
     });
@@ -64,15 +69,15 @@ export class DocView {
   }
 
   render(doc: DocPayload): void {
-    if (doc.frameUrl === null && (doc.kind === "html" || doc.kind === "pdf")) {
-      // A page or a PDF shows in a frame; until the frame viewer lands, a placeholder.
-      this.host.replaceChildren(
-        h("div", { class: "state" }, h("p", { class: "state-detail" }, "Coming in this branch")),
-      );
+    if (doc.frameUrl !== null) {
+      // A page or a PDF shows in a frame, in place of the document.
+      this.host.replaceChildren();
+      this.frame.show(doc, doc.frameUrl);
       this.lastHeading = null;
       this.fitRoom();
       return;
     }
+    this.frame.close();
     this.host.innerHTML = doc.html;
     // A blocked image has no src to fail: it shows its placeholder straight away.
     for (const img of this.host.querySelectorAll<HTMLImageElement>("img.img-blocked")) {
@@ -129,9 +134,17 @@ export class DocView {
     return block !== null;
   }
 
-  /** Where the reader is in the document (position.ts). */
-  captureAnchor(): SavedPosition {
-    return capture(this.host, this.app.scroller);
+  /**
+   * Takes the frame of a page or a PDF away, for what shows in the document's place instead (the
+   * welcome screen, an error).
+   */
+  closeFrame(): void {
+    this.frame.close();
+  }
+
+  /** Where the reader is in the document (position.ts); null for a page or a PDF in a frame. */
+  captureAnchor(): SavedPosition | null {
+    return this.frame.shown ? null : capture(this.host, this.app.scroller);
   }
 
   /** Scrolls back to a captured position (position.ts). */

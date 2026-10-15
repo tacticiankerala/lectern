@@ -13,6 +13,9 @@ use lectern_core::ipc::{OpenRequest, Settings, ThemeId, ThemeMode};
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
 use lectern_core::workspace::WindowPlacement;
+#[cfg(not(dev))]
+use tauri::utils::config::FrontendDist;
+use tauri::utils::config::WindowConfig;
 use tauri::window::Color;
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, Theme, WebviewWindow,
@@ -21,11 +24,11 @@ use tauri::{
 
 use crate::events::TauriHost;
 use crate::state::{
-    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, Profile, Slot, Timings, WatchControl,
-    WindowState,
+    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, PageResponse, Profile, Slot, Timings,
+    WatchControl, WindowState,
 };
 use crate::updater::{self, Updates};
-use crate::{commands, win};
+use crate::{commands, navigate, win};
 
 /// The label of the first window, as in `tauri.conf.json`.
 pub const MAIN_WINDOW: &str = "main";
@@ -108,6 +111,21 @@ pub fn run(context: tauri::Context, launch: Launch) {
                 responder.respond(response.into_http());
             });
         })
+        // HTML pages and PDFs in a frame, and what a page loads, at
+        // `http://lxpage.localhost/d/<drive>/…` or `…/u/<host>/<share>/…`.
+        .register_asynchronous_uri_scheme_protocol("lxpage", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_owned();
+            // As for images: the checks are in memory, and only an allowed file is read, off the
+            // main thread.
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = match app.try_state::<Arc<App>>() {
+                    Some(state) => state.serve_page(&path),
+                    None => PageResponse::refused(),
+                };
+                responder.respond(response.into_http());
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::startup,
             commands::open_document,
@@ -155,6 +173,11 @@ pub fn run(context: tauri::Context, launch: Launch) {
 }
 
 fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<(), Box<dyn Error>> {
+    // The first window, guarded as every window is (`build_from_config`), and built where Tauri
+    // would have built it from the config, so WebView2 starts while the settings load.
+    let config =
+        main_window_config(app.handle()).ok_or("the main window's settings are missing")?;
+    build_from_config(app.handle(), &config)?;
     launch.perf.mark("setup", None);
     if !launch.booted {
         // The Lectern this launch found has quit, so this one is first after all: start the
@@ -229,21 +252,40 @@ pub fn build_window(handle: &AppHandle, label: &str, focus: bool) -> Result<(), 
     let state = app
         .window(label)
         .ok_or_else(|| format!("{label} has no state"))?;
-    let mut config = handle
+    let mut config = main_window_config(handle).ok_or("the main window's settings are missing")?;
+    config.label = label.to_owned();
+    config.focus = focus;
+    let window = build_from_config(handle, &config).map_err(|e| e.to_string())?;
+    prepare_window(&window, &state);
+    Ok(())
+}
+
+/// The first window's settings, from `tauri.conf.json`, which every window is built from. Tauri
+/// doesn't build it (`create: false`): Lectern does, guarded.
+fn main_window_config(handle: &AppHandle) -> Option<WindowConfig> {
+    handle
         .config()
         .app
         .windows
         .iter()
         .find(|w| w.label == MAIN_WINDOW)
         .cloned()
-        .ok_or("the main window's settings are missing")?;
-    config.label = label.to_owned();
-    config.focus = focus;
-    let window = WebviewWindowBuilder::from_config(handle, &config)
-        .and_then(WebviewWindowBuilder::build)
-        .map_err(|e| e.to_string())?;
-    prepare_window(&window, &state);
-    Ok(())
+}
+
+/// Builds a window from `config`, its page guarded so it never leaves Lectern's own page or opens
+/// a window (`navigate`): an unsandboxed frame, the PDF viewer, can navigate the top-level page.
+fn build_from_config(handle: &AppHandle, config: &WindowConfig) -> tauri::Result<WebviewWindow> {
+    let build = &handle.config().build;
+    // Where Tauri loads the page from (its `get_app_url`).
+    #[cfg(dev)]
+    let served_from = build.dev_url.as_ref();
+    #[cfg(not(dev))]
+    let served_from = match &build.frontend_dist {
+        Some(FrontendDist::Url(url)) => Some(url),
+        _ => None,
+    };
+    let app = navigate::app_url(served_from, config.use_https_scheme);
+    navigate::guard(WebviewWindowBuilder::from_config(handle, config)?, app).build()
 }
 
 /// Brings the window `label` forward, unminimised. A window still waiting for its first paint
@@ -624,6 +666,41 @@ mod capability_tests {
 mod bundle_tests {
     fn config() -> serde_json::Value {
         serde_json::from_str(include_str!("../tauri.conf.json")).unwrap()
+    }
+
+    /// The page's own CSP, from the `<meta>` in `ui/index.html`.
+    fn page_csp() -> &'static str {
+        let html = include_str!("../../ui/index.html");
+        let meta = html
+            .find(r#"http-equiv="Content-Security-Policy""#)
+            .unwrap();
+        let content = html[meta..].split(r#"content=""#).nth(1).unwrap();
+        &content[..content.find('"').unwrap()]
+    }
+
+    /// Lectern builds its first window itself, as it builds the others, so every window gets the
+    /// navigation guard (`navigate`).
+    #[test]
+    fn lectern_builds_the_first_window_itself() {
+        let windows = &config()["app"]["windows"];
+        assert_eq!(windows.as_array().map(Vec::len), Some(1));
+        assert_eq!(windows[0]["label"], super::MAIN_WINDOW);
+        assert_eq!(windows[0]["create"], false);
+    }
+
+    /// The app's CSP is the same in the page and in Tauri's config, and lets frames load from the
+    /// page protocol alone.
+    #[test]
+    fn the_csp_is_the_same_in_both_places_and_frames_only_pages() {
+        let config = config();
+        let csp = config["app"]["security"]["csp"].as_str().unwrap();
+        assert_eq!(page_csp(), csp);
+        let frames: Vec<&str> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|d| d.starts_with("frame-src "))
+            .collect();
+        assert_eq!(frames, ["frame-src http://lxpage.localhost"]);
     }
 
     /// A per-user installer (no admin rights; `updater::is_portable` relies on its folder) that

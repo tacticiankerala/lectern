@@ -326,7 +326,7 @@ export class Navigation {
     const refresh = ++this.refreshes;
     const navigation = this.navigations;
     const before = this.app.state.doc;
-    const position = before ? this.app.view.captureAnchor() : undefined;
+    const position = before ? (this.app.view.captureAnchor() ?? undefined) : undefined;
     let result: OpenResult;
     try {
       result = await this.app.backend.openDocument(path);
@@ -339,8 +339,14 @@ export class Navigation {
     if (before && result.status === "ok" && result.doc.mtimeMs !== before.mtimeMs) {
       this.app.state.updated = Date.now();
     }
-    if (before && result.status === "ok" && result.doc.html === before.html) {
-      // Only what surrounds the body can have changed: the title, properties and breadcrumbs.
+    if (
+      before &&
+      result.status === "ok" &&
+      result.doc.frameUrl === null &&
+      result.doc.html === before.html
+    ) {
+      // Only what surrounds the body can have changed: the title, properties and breadcrumbs. A
+      // page or a PDF in a frame is loaded again whatever, as Lectern never reads it.
       this.app.state.doc = result.doc;
       this.app.showMeta(result.doc);
       return;
