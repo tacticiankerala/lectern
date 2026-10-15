@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use lectern_core::ipc::{EditorPref, FollowKind, FollowResult, FollowTarget};
+use lectern_core::ipc::{EditorPref, FollowKind, FollowResult, FollowTarget, PathForms};
 use lectern_core::library::pathmap::Mapped;
 use lectern_core::library::scan::probe_with;
 
@@ -125,6 +125,20 @@ impl WindowState {
             Ok(()) => FollowResult::Opened,
             Err(message) => FollowResult::NotFound { message },
         }
+    }
+
+    /// The Windows and WSL forms of a path the user is copying: `literal`, an exact path (the open
+    /// file, a tree row, a resolved link's target), taken as it is; else text written as a path (a
+    /// selection), mapped as a link is, with this window's index. Never touches the disk, so a
+    /// stalled share can't hold it up.
+    pub fn path_forms(&self, raw: &str, literal: bool) -> PathForms {
+        let mapper = self.mapper();
+        if literal {
+            return mapper.literal_forms(raw);
+        }
+        let index = self.index();
+        let index = (!index.roots.is_empty()).then_some(&*index);
+        mapper.forms(raw, index)
     }
 
     /// Opens a local file in the editor (VS Code, a custom command, or else Explorer), at `line`

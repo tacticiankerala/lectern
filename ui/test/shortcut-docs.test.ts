@@ -3,7 +3,7 @@ import readme from "../../README.md?raw";
 import { renderWelcome } from "../src/welcome";
 
 describe("the shortcut cheat sheets", () => {
-  it("the welcome screen lists the library, breadcrumb chooser, sidebar text, comment and window keys", () => {
+  it("the welcome screen lists the library, breadcrumb chooser, sidebar text, comment, window and copy path keys", () => {
     const host = document.createElement("div");
     const none = (): void => undefined;
     renderWelcome(host, [], {
@@ -19,9 +19,10 @@ describe("the shortcut cheat sheets", () => {
     expect(keys).toContain("Ctrl+Shift+M");
     expect(keys).toContain("Ctrl+Alt+M");
     expect(keys).toContain("Ctrl+N");
+    expect(keys).toContain("Ctrl+Shift+C / Ctrl+Shift+L");
   });
 
-  it("so does the README, with Quit too, and describes the chooser and Sidebar text", () => {
+  it("so does the README, with Quit and copying paths too, and describes the chooser and Sidebar text", () => {
     expect(readme).toContain("| Ctrl+B | Show or hide the library |");
     expect(readme).toContain("| Ctrl+Shift+. |");
     expect(readme).toContain("| Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0 |");
@@ -29,6 +30,8 @@ describe("the shortcut cheat sheets", () => {
     expect(readme).toContain("| Ctrl+Alt+M |");
     expect(readme).toContain("| Ctrl+N | New window");
     expect(readme).toContain("| Ctrl+Q | Quit Lectern");
+    expect(readme).toContain("| Ctrl+Shift+C |");
+    expect(readme).toContain("| Ctrl+Shift+L |");
     expect(readme).toContain("**Sidebar text**");
     expect(readme).toMatch(/breadcrumb/i);
   });

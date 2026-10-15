@@ -381,6 +381,16 @@ pub enum FollowResult {
     },
 }
 
+/// A path in the two forms a terminal takes: `C:\…` or `\\server\…` for Windows, `/…` for WSL.
+/// `None` where the path has no such form, such as a share no mapping reaches from WSL.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PathForms {
+    pub windows: Option<String>,
+    pub wsl: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

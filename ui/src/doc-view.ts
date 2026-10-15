@@ -18,7 +18,8 @@ import { placeAt } from "./reflow";
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
 const COPIED_MS = 1200;
-const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
+/** Links to a local place: a note, a file the index holds, or a path checked when followed. */
+export const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
 
 export class DocView {
   private readonly copyTimers = new WeakMap<HTMLElement, number>();

@@ -68,6 +68,16 @@ describe("TauriBackend", () => {
     ]);
   });
 
+  it("asks for a path's forms with the path as written, and whether it is an exact path", async () => {
+    const backend = new TauriBackend();
+    await backend.pathForms("`/home/me/a.md:12`", false);
+    await backend.pathForms("C:\\Users\\me\\v1.0#archive", true);
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["path_forms", { raw: "`/home/me/a.md:12`", literal: false }],
+      ["path_forms", { raw: "C:\\Users\\me\\v1.0#archive", literal: true }],
+    ]);
+  });
+
   it("stops every listener before the page reloads, each once", async () => {
     const backend = new TauriBackend();
     const off = backend.on("doc-changed", () => undefined);

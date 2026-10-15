@@ -7,6 +7,7 @@ import type { FollowTarget } from "./generated/FollowTarget";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -41,6 +42,14 @@ export interface Backend {
   quickOpenCandidates(): Promise<Candidate[]>;
   search(query: string): Promise<FileHits[]>;
   follow(target: FollowTarget): Promise<FollowResult>;
+  /**
+   * The Windows and WSL forms of a path, for copying. `literal`: an exact path on this machine (the
+   * open file, a tree row, a resolved link's target), taken as it is, a `#` or `:12` included.
+   * Otherwise text written as a path (a selection, a broken link), trimmed, without a line or
+   * anchor suffix, and mapped as a link is, with the index. Strings and the index alone, never the
+   * disk. A form it has none of is null.
+   */
+  pathForms(raw: string, literal: boolean): Promise<PathForms>;
   revealInExplorer(path: string): Promise<void>;
   openInEditor(path: string, line?: number): Promise<void>;
   /**

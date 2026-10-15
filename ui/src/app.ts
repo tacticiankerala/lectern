@@ -451,8 +451,9 @@ export class App {
     await this.nav.openUserPath(path);
   }
 
-  toast(message: string): void {
-    this.toasts.show(message);
+  /** A short message at the bottom of the window, with `detail` (such as a path) below it. */
+  toast(message: string, detail?: string): void {
+    this.toasts.show(message, detail);
   }
 
   /** Saves the reading position in `path`; a save waiting for scrolling to stop is dropped. */

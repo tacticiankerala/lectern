@@ -119,6 +119,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::quick_open_candidates,
             commands::search,
             commands::follow,
+            commands::path_forms,
             commands::reveal_in_explorer,
             commands::open_in_editor,
             commands::load_review,
