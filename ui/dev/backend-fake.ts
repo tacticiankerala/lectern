@@ -3,12 +3,14 @@
 //
 // Full-text search matches the fixtures' notes and text files, which `build.mjs --fake` inlines, as
 // Rust does: smart case, line by line. Each document's kind comes from core, through the export. A
-// page or a PDF loads into its frame from the dev server (`/__page/…`, dev/serve.mjs), as it would
-// from `lxpage`: a page with the bridge in it, under the *HTML pages* setting's policy, which its
-// frame URL tells the server (`lxmode`), and a token naming the open. The browser's reports of
-// what a page loads don't reach the fake, so it tells them itself, from the hosts each page fixture
-// names (`pageHosts`), as Rust would. Keys pressed inside a frame, which only Rust sees, come from
-// `frameKey`.
+// page or a PDF loads into its frame from the dev server (`/__page/o/<token>/…`, dev/serve.mjs), as
+// it would from `lxpage`: each open has a token, which reaches the page's folder and below, and a
+// page comes with the bridge in it, under the *HTML pages* setting's policy, which its frame URL
+// tells the server (`lxmode`). The dev server keeps nothing of the fake's, so a token carries the
+// page it opened (`openUrl`). A change of the setting has the page on screen open again, as Rust
+// does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
+// from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
+// which only Rust sees, come from `frameKey`.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -74,6 +76,7 @@ import type { UpdateInfo } from "../src/generated/UpdateInfo";
 import type { UserOpen } from "../src/generated/UserOpen";
 import type { WorkspaceOutcome } from "../src/generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "../src/generated/WorkspaceSummary";
+import { fakeBridgeKey } from "./page-serving.mjs";
 
 export interface Fixtures {
   /** The fake library root, `C:\Fixtures\vault`. */
@@ -524,16 +527,20 @@ function sidecarOf(path: string): string {
 }
 
 /**
- * As core's `page_url`, but on the dev server (dev/serve.mjs): a drive path's segments, each
- * encoded, under `/__page/d/<drive>/`. Null for any other path.
+ * As core's `page_url`, but on the dev server (dev/serve.mjs): `/__page/o/<token>/<file name>`, the
+ * name encoded. The server keeps nothing, so the token, `t<n>-<hex>`, carries the page it opened,
+ * its UTF-8 in hex, from which the server takes the open's folder. Null for anything but a drive
+ * path.
  */
-function pageUrl(path: string): string | null {
-  const drive = /^([A-Za-z]):\\(.*)$/.exec(path);
-  if (!drive) {
+function openUrl(n: number, path: string): { token: string; url: string } | null {
+  if (!/^[A-Za-z]:\\/.test(path)) {
     return null;
   }
-  const segments = (drive[2] ?? "").split("\\").map(encodeURIComponent);
-  return `/__page/d/${(drive[1] ?? "").toLowerCase()}/${segments.join("/")}`;
+  const hex = [...new TextEncoder().encode(path)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const token = `t${String(n)}-${hex}`;
+  return { token, url: `/__page/o/${token}/${encodeURIComponent(baseName(path))}` };
 }
 
 /** A drive path as WSL mounts it (`C:\x` → `/mnt/c/x`); null for anything else. */
@@ -632,8 +639,10 @@ export class FakeBackend implements Backend, FakeControl {
   private readonly textBlocks = new Map<string, [number, number, string][]>();
   private reviewCount = 0;
   private reviewFailure: string | null = null;
-  /** Numbers each page opened, for its token. */
+  /** Numbers each page or PDF opened, for its token. */
   private pageOpens = 0;
+  /** The document last opened, which a change of the *HTML pages* setting opens again. */
+  private onScreen: string | null = null;
   /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
   /** The settings revision: bumped by every change to the settings or a workspace's theme. */
@@ -1225,6 +1234,7 @@ export class FakeBackend implements Backend, FakeControl {
    */
   setSettings(patch: SettingsPatch): Promise<SettingsSnapshot> {
     const before = JSON.stringify(this.windowSettings());
+    const pages = this.settings.htmlPages;
     const theme = new Set(["themeMode", "lightTheme", "darkTheme"]);
     const own = this.currentWorkspace()?.theme;
     const defined = Object.entries(patch).filter(([, v]) => v != null);
@@ -1239,6 +1249,7 @@ export class FakeBackend implements Backend, FakeControl {
       this.rev++;
       this.emit("settings-changed", this.snapshot());
     }
+    this.reloadPage(pages);
     return Promise.resolve(this.snapshot());
   }
 
@@ -1247,11 +1258,13 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   settingsElsewhere(patch: SettingsPatch): void {
+    const pages = this.settings.htmlPages;
     const defined = Object.entries(patch).filter(([, v]) => v != null);
     this.settings = { ...this.settings, ...Object.fromEntries(defined) };
     this.saveSettings();
     this.rev++;
     this.emit("settings-changed", this.snapshot());
+    this.reloadPage(pages);
   }
 
   /** This window's settings: the shared ones under its workspace's own theme. */
@@ -1580,6 +1593,7 @@ export class FakeBackend implements Backend, FakeControl {
 
   private open(path: string): OpenResult {
     const found = this.docs.get(key(path));
+    this.onScreen = path;
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };
     }
@@ -1587,38 +1601,59 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   /**
-   * Where a page or a PDF loads into its frame from: a page's URL names its open, by a token, and
-   * the *HTML pages* setting, for the dev server. A page whose fixture loads from the web tells it
-   * a moment later, as Rust tells what the browser reports.
+   * Where a page or a PDF loads into its frame from: an open of its own, and for a page the *HTML
+   * pages* setting, for the dev server, and its bridge's key. A page whose fixture loads from the
+   * web tells it a moment later, as Rust tells what the browser reports: loaded, or, without the
+   * web, blocked.
    */
-  private frameUrl(path: string, kind: DocKind): string | null {
-    const url = pageUrl(path);
-    if (url === null || kind !== "html") {
-      return kind === "pdf" ? url : null;
+  private frameOf(path: string, kind: DocKind): { url: string | null; key: string | null } {
+    const none = { url: null, key: null };
+    if (kind !== "html" && kind !== "pdf") {
+      return none;
     }
-    const token = `t${String(++this.pageOpens)}`;
+    const open = openUrl(++this.pageOpens, path);
+    if (open === null || kind === "pdf") {
+      return open === null ? none : { url: open.url, key: null };
+    }
     const mode = this.settings.htmlPages;
     const hosts =
       Object.entries(this.fixtures.pageHosts ?? {}).find(([p]) => key(p) === key(path))?.[1] ?? [];
     if (hosts.length > 0) {
+      const offline = mode !== "full";
       setTimeout(() => {
         this.emit("page-loads", {
-          token,
-          hosts: [...hosts],
-          count: hosts.length,
-          blocked: mode !== "full",
+          token: open.token,
+          hosts: offline ? [] : [...hosts],
+          count: offline ? 0 : hosts.length,
+          blockedHosts: offline ? [...hosts] : [],
+          blockedCount: offline ? hosts.length : 0,
+          offline,
         });
       }, PAGE_LOADS_MS);
     }
-    return `${url}?t=${token}&lxmode=${mode}`;
+    return { url: `${open.url}?lxmode=${mode}`, key: fakeBridgeKey(open.token) };
+  }
+
+  /** As Rust, once the *HTML pages* setting changed: the page on screen opens again. */
+  private reloadPage(before: Settings["htmlPages"]): void {
+    const path = this.onScreen;
+    if (
+      this.settings.htmlPages !== before &&
+      path !== null &&
+      this.kinds.get(key(path)) === "html"
+    ) {
+      this.emit("doc-changed", { path });
+    }
   }
 
   private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
     const kind = this.kinds.get(key(path)) ?? "markdown";
+    const frame = this.frameOf(path, kind);
     return {
       path,
       kind,
-      frameUrl: this.frameUrl(path, kind),
+      frameUrl: frame.url,
+      bridgeKey: frame.key,
       title: doc.title,
       html: doc.html,
       outline: doc.outline,

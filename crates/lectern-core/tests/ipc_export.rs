@@ -11,7 +11,7 @@ use lectern_core::ipc::{
     SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
-use lectern_core::page::{inject_script, page_policy};
+use lectern_core::page::{inject_script, page_policy, BRIDGE_KEY_SLOT};
 use lectern_core::review::anchor::AnchorState;
 use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::text::PageBlock;
@@ -260,7 +260,10 @@ fn page_vectors_exported() {
          /** The policies `page_policy` gives each mode for the nonce `NONCE`, with the open `TOKEN` and with none. */\n\
          export const PAGE_POLICIES: readonly {{\n  mode: string;\n  token: string | null;\n  enforced: string;\n  reportOnly: string | null;\n}}[] = [\n{policies}\n];\n\n\
          /** Where `inject_script` puts `<script nonce=\"NONCE\">BRIDGE</script>` in each page. */\n\
-         export const INJECTIONS: readonly {{ page: string; injected: string }}[] = [\n{injections}\n];\n"
+         export const INJECTIONS: readonly {{ page: string; injected: string }}[] = [\n{injections}\n];\n\n\
+         /** Where the bridge takes its open's key (`BRIDGE_KEY_SLOT`). */\n\
+         export const BRIDGE_KEY_SLOT = {};\n",
+        quote(BRIDGE_KEY_SLOT)
     );
     let path = generated_dir().join("page-vectors.ts");
     if fs::read_to_string(&path).ok().as_deref() != Some(ts.as_str()) {
@@ -286,7 +289,9 @@ fn page_types_are_lowercase_and_camel_case() {
         "token: string,",
         "hosts: Array<string>,",
         "count: number,",
-        "blocked: boolean,",
+        "blockedHosts: Array<string>,",
+        "blockedCount: number,",
+        "offline: boolean,",
     ] {
         assert!(loads.contains(field), "{field}: {loads}");
     }

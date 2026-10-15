@@ -97,7 +97,7 @@ impl RenderedDoc {
 }
 
 /// The title of a document that isn't a note (a text file, a page, a PDF): its file name.
-fn file_title(doc_path: &Path) -> String {
+pub(crate) fn file_title(doc_path: &Path) -> String {
     doc_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

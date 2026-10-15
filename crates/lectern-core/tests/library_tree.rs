@@ -70,10 +70,22 @@ fn tree_shows_text_html_and_pdf_files_with_their_kinds() {
     let (_tmp, vault) = common::vault_copy();
     let tree = tree_of(&vault);
     let artifacts = child(&tree, "artifacts");
-    // Its style sheet is no document.
+    // Its style sheet is no document; the chart's folder holds a page.
     assert_eq!(
         names(artifacts),
-        ["brief.pdf", "other.html", "remote.html", "report.html"]
+        [
+            "chart",
+            "brief.pdf",
+            "faking.html",
+            "late-leaving.html",
+            "leaving.html",
+            "other.html",
+            "redirect.html",
+            "refresh.html",
+            "remote.html",
+            "report.html",
+            "self-refresh.html"
+        ]
     );
     assert_eq!(artifacts.kind, None);
     assert_eq!(child(artifacts, "brief.pdf").kind, Some(DocKind::Pdf));

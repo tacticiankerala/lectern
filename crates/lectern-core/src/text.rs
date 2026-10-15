@@ -34,8 +34,19 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
     if sniff.contains(&0) {
         return Err(DecodeError::Binary);
     }
+    Ok(decode_utf8(bytes))
+}
+
+/// Decodes a file's bytes as [`decode`] does, but never as binary: a NUL is a character like any
+/// other. An HTML page's source is read so, as the browser reads the page whatever it holds.
+pub fn decode_lossy(bytes: &[u8]) -> Decoded {
+    decode_utf16(bytes).unwrap_or_else(|| decode_utf8(bytes))
+}
+
+/// `bytes` as UTF-8, a leading BOM dropped, invalid sequences replaced and flagged as lossy.
+fn decode_utf8(bytes: &[u8]) -> Decoded {
     let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
-    Ok(match std::str::from_utf8(bytes) {
+    match std::str::from_utf8(bytes) {
         Ok(text) => Decoded {
             text: text.to_owned(),
             lossy: false,
@@ -44,7 +55,7 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
             text: String::from_utf8_lossy(bytes).into_owned(),
             lossy: true,
         },
-    })
+    }
 }
 
 /// The text of `bytes` when they start with a UTF-16 byte order mark (`FF FE` little-endian,

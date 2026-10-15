@@ -90,13 +90,15 @@ The demo library in [`fixtures/demo`](fixtures/demo) has one of each: Orbit Note
 
 ### What a page may do
 
-Every page runs in a sandbox, away from your files and from Lectern. Its scripts can't read the files beside it, though the styles, scripts and images it links to load. Many agent-made pages also load a chart library or a font from the internet, so the **HTML pages** setting, in Preferences, decides how far a page may go:
+Every page runs in a sandbox, away from your files and from Lectern. A page reaches only its own folder and below: its styles, scripts, images and fonts there load, and nothing elsewhere on your computer does. Its scripts can't read the files beside it, so a page saved among other files can't send them anywhere. A page can't open another page in its place either; open that one from Lectern instead. Many agent-made pages also load a chart library or a font from the internet, so the **HTML pages** setting, in Preferences, decides how far a page may go:
 
 - **Run scripts and allow the internet**, the default.
 - **Run scripts offline:** the page's scripts run, but nothing loads from the internet.
 - **No page scripts:** the page shows as written, offline and without its scripts.
 
-**The notice.** When a page loads anything from the internet, a slim bar above it says where from, such as "This page loads from cdn.jsdelivr.net". Under the other two settings it names what was stopped instead, "Blocked loads from cdn.jsdelivr.net", with a link to change the setting. Click × to dismiss it. A page that loads nothing from the internet shows no notice.
+A change to the setting applies at once: a page on screen opens again under it.
+
+**The notice.** When a page loads anything from the internet, a slim bar above it says where from, such as "This page loads from cdn.jsdelivr.net", and, after it, what was stopped, such as "Blocked: plain.example.com" for an insecure `http:` address. Under the other two settings it names what was stopped instead, "Blocked loads from cdn.jsdelivr.net", with a link to change the setting. Click × to dismiss it. A page that loads nothing from the internet shows no notice.
 
 ## Gallery
 

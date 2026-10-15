@@ -10,7 +10,9 @@ use lectern_core::cache::CacheKey;
 use lectern_core::ipc::{
     DocPayload, OpenError, OpenErrorKind, OpenResult, RecentEntry, SavedPosition,
 };
+use lectern_core::library::pathmap::page_url;
 use lectern_core::library::{path_key, DocKind, LibraryIndex};
+use lectern_core::page::PageScope;
 use lectern_core::render::RENDER_VERSION;
 use lectern_core::store::State;
 
@@ -73,7 +75,7 @@ impl WindowState {
             return Ok(Rendered {
                 kind,
                 doc,
-                frame_url: None,
+                framed: None,
                 mtime_ms: stamp.mtime_ms,
                 lossy: false,
                 covered,
@@ -97,7 +99,7 @@ impl WindowState {
         Ok(Rendered {
             kind,
             doc,
-            frame_url: None,
+            framed: None,
             mtime_ms: stamp.mtime_ms,
             lossy: text.lossy,
             covered,
@@ -119,9 +121,16 @@ impl WindowState {
                 return OpenResult::Err { error };
             }
         };
-        let doc = self.doc_payload(path, &rendered, &self.index());
+        // Each open of a page or a PDF has a URL of its own, which reaches the page's folder and
+        // below, which its reports name, and whose bridge has a key of its own.
+        let open = rendered
+            .framed
+            .as_deref()
+            .map(|page| self.app.open_page(&self.label, page, folder_of(page)));
+        let doc = self.doc_payload(path, &rendered, &self.index(), open.as_ref());
         let current = self.make_current(seq, path, Some(&rendered));
         if current {
+            self.pin_open(seq, open.as_ref().map(|o| o.token.as_str()));
             // An index installed while this rendered has already looked for stale documents and
             // found the previous one; this one gets its look now.
             self.refresh_if_stale(None);
@@ -148,11 +157,13 @@ impl WindowState {
         OpenResult::Ok { doc }
     }
 
+    /// The payload of `path`, rendered as `rendered`, under `open` when it is a page or a PDF.
     pub(super) fn doc_payload(
         &self,
         path: &Path,
         rendered: &Rendered,
         index: &LibraryIndex,
+        open: Option<&PageScope>,
     ) -> DocPayload {
         let path_text = path_string(path);
         let (user_root, crumb_root) = {
@@ -173,18 +184,16 @@ impl WindowState {
             readme_in(index, dir)
         });
         let doc = &rendered.doc;
-        // A page's frame URL names this open, for the reports on what the page loads.
-        let frame_url = match (&rendered.frame_url, rendered.kind) {
-            (Some(url), DocKind::Html) => {
-                Some(format!("{url}?t={}", self.app.open_page(&self.label)))
-            }
-            (url, _) => url.clone(),
-        };
+        let frame_url = open.and_then(|o| page_url(&o.token, Path::new(&o.page)));
+        let bridge_key = open
+            .filter(|_| rendered.kind == DocKind::Html)
+            .map(|o| o.key.clone());
         DocPayload {
             position: lock(&self.app.state).reading.position(&path_text).cloned(),
             path: path_text,
             kind: rendered.kind,
             frame_url,
+            bridge_key,
             title: doc.title.clone(),
             html: doc.html.clone(),
             outline: doc.outline.clone(),
@@ -285,6 +294,32 @@ impl WindowState {
         }
     }
 
+    /// The open numbered `seq` is on screen, with the page or PDF open `token` (none for any other
+    /// document): that open is kept however many come after it. Under the lock that made it
+    /// current, so a newer open's pin is never undone by an older one's.
+    fn pin_open(&self, seq: u64, token: Option<&str>) {
+        let current = lock(&self.current);
+        if current.as_ref().is_some_and(|c| c.seq == seq) {
+            lock(&self.app.page_opens).pin(&self.label, token);
+        }
+    }
+
+    /// Asks the UI to load the HTML page on screen again, once the window has shown it: the *HTML
+    /// pages* setting changed, and a page already loaded keeps the policy it was served under. A
+    /// PDF, which the setting doesn't touch, a note, and a page that failed to open are left alone.
+    pub(super) fn reload_page(&self) {
+        if !self.ui_shown.is_open() {
+            return;
+        }
+        let path = lock(&self.current)
+            .as_ref()
+            .filter(|c| c.doc.is_some() && opened_kind(&c.path) == DocKind::Html)
+            .map(|c| c.path.clone());
+        if let Some(path) = path {
+            self.emit(UiEvent::DocChanged(path));
+        }
+    }
+
     /// The recent files of the window's workspace, newest first.
     pub(super) fn recent(&self) -> Vec<RecentEntry> {
         self.workspace_id()
@@ -320,6 +355,16 @@ fn as_reading<R>(recent: &mut Vec<RecentEntry>, f: impl FnOnce(&mut State) -> R)
     result
 }
 
+/// The folder of `page`, a normalised path (`X:\a.html`, `\\server\share\a.html`): a drive's
+/// root keeps its separator.
+fn folder_of(page: &str) -> &str {
+    match page.rsplit_once('\\') {
+        Some((folder, _)) if folder.ends_with(':') => &page[..=folder.len()],
+        Some((folder, _)) => folder,
+        None => page,
+    }
+}
+
 /// Whether the document at `path` shows anything the index or the path mappings decide: a note's
 /// links and images do. A page, a PDF or a text file shows the same whatever they hold, so it is
 /// never reloaded for them.
@@ -342,7 +387,7 @@ fn refused(path: &str) -> OpenResult {
 mod tests {
     use super::*;
     use crate::state::test_support::*;
-    use lectern_core::library::pathmap::{page_url, PathMapper, PAGE_ORIGIN};
+    use lectern_core::library::pathmap::{PathMapper, PAGE_ORIGIN};
     use std::fs;
 
     use crate::state::doc::render_file;
@@ -438,40 +483,45 @@ mod tests {
         assert_eq!(f.host.doc_changes(), 1);
     }
 
-    /// An HTML page or a PDF opens with its kind, nothing of Lectern's own to show, and the page
-    /// protocol's URL for its frame, which serves it; a note opens as it always has.
+    /// The path of an open's frame URL, and the token in it: `/o/<token>/<file name>`.
+    fn open_url(url: &str) -> (&str, &str) {
+        let path = url.strip_prefix(PAGE_ORIGIN).expect("on the page origin");
+        let token = path
+            .strip_prefix("/o/")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(token, _)| token)
+            .expect("an open's URL");
+        (path, token)
+    }
+
+    /// An HTML page or a PDF opens with its kind, nothing of Lectern's own to show, and a frame URL
+    /// naming an open of its own, which serves it; a note opens as it always has.
     #[test]
     fn a_page_opens_with_its_kind_and_a_frame_url() {
         let f = fixture(profile(&[]), FakeHost::default());
         let page = f.dir.file("one/report.html", "<h1>Report</h1><p>Rose.</p>");
         let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
         let note = f.dir.file("one/plan.md", "# Plan\n");
+        let mut tokens = Vec::new();
         for (path, kind) in [(&page, DocKind::Html), (&pdf, DocKind::Pdf)] {
             let OpenResult::Ok { doc } = f.state.open_document(&path_string(path)) else {
                 panic!("{} didn't open", path.display());
             };
             assert_eq!(doc.kind, kind);
             let url = doc.frame_url.expect("a frame URL");
-            // A page's names its open, for its reports; a PDF's is the file's alone.
-            let (file, query) = match url.split_once('?') {
-                Some((file, query)) => (file, Some(query)),
-                None => (url.as_str(), None),
-            };
-            assert_eq!(Some(file), page_url(path).as_deref());
-            assert_eq!(
-                query.is_some_and(|q| q.starts_with("t=")),
-                kind == DocKind::Html
-            );
-            let served = f
-                .app
-                .serve_page(file.strip_prefix(PAGE_ORIGIN).unwrap(), query);
+            let (file, token) = open_url(&url);
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert_eq!(file, format!("/o/{token}/{name}"));
+            tokens.push(token.to_owned());
+            let served = f.app.serve_page(file, None);
             assert_eq!(served.status, 200, "{url}");
             assert!(served.body.ends_with(&fs::read(path).unwrap()), "{url}");
             assert_eq!(doc.html, "");
             assert!(doc.outline.is_empty());
             assert!(doc.frontmatter.is_none());
-            assert_eq!(doc.title, path.file_name().unwrap().to_string_lossy());
+            assert_eq!(doc.title, name);
         }
+        assert_ne!(tokens[0], tokens[1]);
         let OpenResult::Ok { doc } = f.state.open_document(&path_string(&note)) else {
             panic!("the note didn't open");
         };
@@ -481,23 +531,27 @@ mod tests {
         assert_eq!(last_doc(&f), Some(path_string(&note)));
     }
 
-    /// A page or a PDF opened through `..` shows from the folder it is in, which comes into the
-    /// protocol's scope.
+    /// A page or a PDF opened through `..` shows from the folder it is in, which its open reaches.
     #[test]
     fn a_page_opened_through_dot_dot_shows_from_where_it_is() {
         let f = fixture(profile(&[]), FakeHost::default());
         let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
+        f.dir.file("one/style.css", "p {}");
         f.dir.folder("one/sub");
         let through = pdf.with_file_name("sub").join("..").join("brief.pdf");
         let OpenResult::Ok { doc } = f.state.open_document(&path_string(&through)) else {
             panic!("{} didn't open", through.display());
         };
         let url = doc.frame_url.expect("a frame URL");
-        assert_eq!(Some(&url), page_url(&pdf).as_ref());
-        let served = f
-            .app
-            .serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap(), None);
-        assert_eq!(served.status, 200, "{url}");
+        let (file, token) = open_url(&url);
+        assert_eq!(file, format!("/o/{token}/brief.pdf"));
+        assert_eq!(f.app.serve_page(file, None).status, 200, "{url}");
+        assert_eq!(
+            f.app
+                .serve_page(&format!("/o/{token}/style.css"), None)
+                .status,
+            200
+        );
     }
 
     /// A page or a PDF at a path the page protocol can't name is an open error, never an empty

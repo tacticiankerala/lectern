@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lectern_core::ipc::{Crumb, OpenError, OpenErrorKind};
-use lectern_core::library::pathmap::{page_url, PathMapper};
+use lectern_core::library::pathmap::{page_name, PathMapper};
 use lectern_core::library::{doc_kind, path_key, DocKind, LibraryIndex};
 use lectern_core::render::{render, render_plain, RenderContext, RenderedDoc};
 use lectern_core::text::{decode, DecodeError};
@@ -16,6 +16,7 @@ use lectern_core::text::{decode, DecodeError};
 use super::assets::normalize;
 use super::pages::{MAX_BYTES as MAX_PAGE_BYTES, MAX_PDF_BYTES};
 use super::paths::{is_under, path_string, root_name};
+use crate::shell::local_path;
 
 /// The prefix of Lectern's image protocol (`lxasset`) for local images in rendered documents.
 pub const ASSET_BASE: &str = "http://lxasset.localhost/";
@@ -28,8 +29,9 @@ pub struct Rendered {
     pub kind: DocKind,
     /// Empty for an HTML page or a PDF, which shows in a frame (`RenderedDoc::framed`).
     pub doc: Arc<RenderedDoc>,
-    /// Where an HTML page or a PDF loads into its frame from; `None` for every other kind.
-    pub frame_url: Option<String>,
+    /// An HTML page's or a PDF's path as the page protocol serves it (normalised): each open mints
+    /// its frame URL from it. `None` for every other kind.
+    pub framed: Option<String>,
     pub mtime_ms: i64,
     pub lossy: bool,
     /// The index held the file's own root when it was rendered; without that, its wikilinks show
@@ -77,7 +79,7 @@ pub fn render_file(
     Ok(Rendered {
         kind,
         doc: Arc::new(doc),
-        frame_url: None,
+        framed: None,
         mtime_ms: stamp.mtime_ms,
         lossy: text.lossy,
         covered: false,
@@ -91,11 +93,12 @@ pub(super) fn opened_kind(path: &Path) -> DocKind {
 }
 
 /// An HTML page or a PDF of kind `kind`, stated as `stamp`, opened without reading it: it shows
-/// in a frame, from the page protocol's URL for where it is (`.` and `..` applied). A path that
-/// has no such URL is an error rather than an empty frame.
+/// in a frame, served by the page protocol from where it is (`.` and `..` applied). A path the
+/// protocol can't serve (a device path, a name it would refuse) is an error rather than an empty
+/// frame.
 pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Result<Rendered, OpenError> {
-    let frame_url = normalize(&path_string(path))
-        .and_then(|normal| page_url(Path::new(&normal)))
+    let page = normalize(&path_string(path))
+        .filter(|normal| local_path(normal).is_some() && page_name(Path::new(normal)).is_some())
         .ok_or_else(|| OpenError {
             kind: OpenErrorKind::Io,
             message: format!(
@@ -107,7 +110,7 @@ pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Result<Render
     Ok(Rendered {
         kind,
         doc: Arc::new(RenderedDoc::framed(path)),
-        frame_url: Some(frame_url),
+        framed: Some(page),
         mtime_ms: stamp.mtime_ms,
         lossy: false,
         covered: false,
@@ -382,6 +385,35 @@ mod tests {
         let other = dir.file("notes.log", "# Log\n");
         let rendered = render_file(&other, &PathMapper::default(), &[]).unwrap();
         assert_eq!(rendered.kind, DocKind::Markdown);
+    }
+
+    /// A note saved in UTF-16, by its byte order mark either way round, renders as Markdown like
+    /// any other.
+    #[test]
+    fn a_utf16_note_renders_as_markdown() {
+        let dir = TempDir::new();
+        let text = "# Plan\n\nShip *it*, café 日本.\n";
+        for (name, little) in [("le.md", true), ("be.md", false)] {
+            let bom: [u8; 2] = if little { [0xFF, 0xFE] } else { [0xFE, 0xFF] };
+            let units = text.encode_utf16().flat_map(|u| {
+                if little {
+                    u.to_le_bytes()
+                } else {
+                    u.to_be_bytes()
+                }
+            });
+            let path = dir.0.join(name);
+            fs::write(&path, bom.into_iter().chain(units).collect::<Vec<u8>>()).unwrap();
+            let rendered = render_file(&path, &PathMapper::default(), &[]).unwrap();
+            assert_eq!(rendered.kind, DocKind::Markdown, "{name}");
+            assert!(!rendered.lossy, "{name}");
+            assert_eq!(rendered.doc.title, "Plan", "{name}");
+            assert!(
+                rendered.doc.html.contains(">it</em>, café 日本.</p>"),
+                "{name}: {}",
+                rendered.doc.html
+            );
+        }
     }
 
     /// Only text files have a size limit: a note opens whatever its size, as it always has.

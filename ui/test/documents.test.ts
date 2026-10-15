@@ -8,10 +8,12 @@ import { A, appRoot, fixtures, rendered, settle } from "./helpers";
 const PAGE = "C:\\V\\artifacts\\report.html";
 const PDF = "C:\\V\\artifacts\\brief.pdf";
 const TEXT = "C:\\V\\notes\\readme.txt";
-/** Where the fake serves the page and the PDF from: the dev server, as `lxpage` would. */
-/** A page's URL also names its open (`t`) and, for the dev server, the HTML pages setting. */
-const PAGE_URL = /^\/__page\/d\/c\/V\/artifacts\/report\.html\?t=t\d+&lxmode=full$/;
-const PDF_URL = "/__page/d/c/V/artifacts/brief.pdf";
+/**
+ * Where the fake serves the page and the PDF from: the dev server, as `lxpage` would, an open of
+ * their own each (`/o/<token>/`), and for a page the HTML pages setting, for the dev server.
+ */
+const PAGE_URL = /^\/__page\/o\/t\d+-[0-9a-f]+\/report\.html\?lxmode=full$/;
+const PDF_URL = /^\/__page\/o\/t\d+-[0-9a-f]+\/brief\.pdf$/;
 
 /** The app with a page, a PDF and a text file beside the notes, and `initial` open. */
 async function started(initial: string) {
@@ -71,7 +73,7 @@ describe("documents that aren't notes", () => {
     expect(app.state.doc?.frameUrl).toMatch(PAGE_URL);
     await app.open(PDF);
     expect(app.state.doc?.kind).toBe("pdf");
-    expect(app.state.doc?.frameUrl).toBe(PDF_URL);
+    expect(app.state.doc?.frameUrl).toMatch(PDF_URL);
     await app.open(TEXT);
     expect(app.state.doc?.kind).toBe("text");
     expect(app.state.doc?.frameUrl).toBeNull();
@@ -87,7 +89,7 @@ describe("documents that aren't notes", () => {
     expect(pane.classList.contains("framed")).toBe(true);
     expect(frame()?.hasAttribute("sandbox")).toBe(false);
     expect(frame()?.getAttribute("src")).toMatch(
-      /^\/__page\/d\/c\/V\/artifacts\/brief\.pdf\?v=\d+#page=1$/,
+      /^\/__page\/o\/t\d+-[0-9a-f]+\/brief\.pdf\?v=\d+#page=1$/,
     );
     expect(frame()?.title).toBe("brief.pdf");
     expect(doc?.childElementCount).toBe(0);
@@ -95,7 +97,7 @@ describe("documents that aren't notes", () => {
     expect(document.querySelectorAll("iframe")).toHaveLength(1);
     expect(frame()?.getAttribute("sandbox")).toBe("allow-scripts");
     expect(frame()?.getAttribute("src")).toMatch(
-      /^\/__page\/d\/c\/V\/artifacts\/report\.html\?t=t\d+&lxmode=full&v=\d+$/,
+      /^\/__page\/o\/t\d+-[0-9a-f]+\/report\.html\?lxmode=full&v=\d+$/,
     );
     // A text file shows its own text, and the frame goes.
     await app.open(TEXT);
@@ -206,6 +208,23 @@ describe("documents that aren't notes", () => {
     // A page is searched through its text (pages.test.ts).
     await app.open(PAGE);
     expect(bar()?.hidden).toBe(false);
+  });
+
+  it("open a page or a text file in the editor, never a PDF", async () => {
+    const { fake, app } = await started(PDF);
+    const editor = vi.spyOn(fake, "openInEditor");
+    expect(app.actions.run("open-editor")).toBe(false);
+    press({ key: "e", ctrlKey: true });
+    const items = await moreMenu();
+    expect(label(items[0] ?? document.body)).toBe("Open in editor");
+    expect(items[0]?.disabled).toBe(true);
+    document.body.click();
+    expect(editor).not.toHaveBeenCalled();
+    for (const path of [PAGE, TEXT]) {
+      await app.open(path);
+      expect(app.actions.run("open-editor"), path).toBe(true);
+      expect(editor).toHaveBeenLastCalledWith(path, undefined);
+    }
   });
 
   it("⋯ offers Open in default app for a page, a PDF or a text file, never a note", async () => {

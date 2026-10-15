@@ -3,6 +3,8 @@
 // after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
 // instead (frame-view.ts): a page keeps its scroll fraction as its reading position, its headings
 // are its anchors, and its links go through Lectern's link rules; a PDF keeps no reading position.
+// A page whose frame another page fills is opened again, with a toast; one that keeps doing so is
+// let go, the document area saying so.
 //
 // Anchor contract (ruling R16): links carry the fragment as written (`href="#Frag"` in-page,
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
@@ -20,12 +22,15 @@ import type { PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
 import { placeAt } from "./reflow";
 import { effectiveTheme } from "./themes";
+import { renderNavigatingAway } from "./welcome";
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
 const COPIED_MS = 1200;
 /** Links to a local place: a note, a file the index holds, or a path checked when followed. */
 export const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
+/** The toast when a page navigates its own frame. */
+const NAVIGATED_AWAY = "This page tried to open another page; open it from Lectern instead.";
 
 export class DocView {
   private readonly copyTimers = new WeakMap<HTMLElement, number>();
@@ -66,6 +71,14 @@ export class DocView {
       },
       commentClicked: (offset) => {
         app.pageCommentClicked(offset);
+      },
+      navigatedAway: (path) => {
+        app.toast(NAVIGATED_AWAY);
+        // Through the navigation queue, so a navigation the reader started wins.
+        app.nav.changed(path);
+      },
+      keepsNavigatingAway: (path) => {
+        renderNavigatingAway(this.host, () => void app.openWithDefaultApp(path));
       },
     });
     host.addEventListener("click", (e) => {
@@ -158,6 +171,19 @@ export class DocView {
       placeAt(this.app.scroller, target, TOP_GAP);
     }
     return target !== null;
+  }
+
+  /**
+   * Scrolls to the heading the outline lists `index`th, whose id is `id`: in an HTML page by where
+   * it is, as two of its headings may share an id; elsewhere by its id.
+   */
+  scrollToOutlineItem(id: string, index: number): void {
+    const page = this.frame.page;
+    if (page?.ready) {
+      page.scrollToHeadingAt(index);
+    } else {
+      this.scrollToAnchor(id);
+    }
   }
 
   /** Scrolls the block holding source line `line` to the top of the pane. */

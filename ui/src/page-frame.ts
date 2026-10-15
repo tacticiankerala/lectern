@@ -8,11 +8,14 @@
 // The page can post to Lectern itself, so nothing it sends is trusted: frame-view.ts takes only
 // messages from the frame's own window, and every field is checked here, by type and size. A
 // message that is off in any way is dropped, never thrown on. Values are only ever text, never
-// markup. A link is followed only right after the reader did something in the page, and at most
-// one a second, so a page can't send Lectern anywhere by itself, nor many places at once. The page's text is taken at most
-// every half second, the latest, so a page that keeps changing doesn't rebuild find and the
-// outline all the time. An anchor, or a place to restore, waits until the page is ready; an anchor
-// wins.
+// markup. Only messages signed with the open's key reach a session (frame-view.ts checks), and a
+// second `ready` is the page loading itself again: it is read again, and taken back where the
+// reader was. A link is followed only right after the reader did something in the
+// page, and at most one a second, so a page can't send Lectern anywhere by itself, nor many places
+// at once; one within the page's open (its own URL's folder, `/o/<token>/`, and below) goes to the
+// file it names there. The page's text is taken at most every half second, the latest, so a page
+// that keeps changing doesn't rebuild find and the outline all the time. An anchor, or a place to
+// restore, waits until the page is ready; an anchor wins.
 import type { PageSurface } from "./comments-page";
 import { h } from "./dom";
 import type { FindPage, Span } from "./find";
@@ -23,7 +26,6 @@ import type { PageLoads } from "./generated/PageLoads";
 
 /** The most text a page reports, in UTF-16 code units, as the bridge caps it. */
 export const MAX_TEXT = 2 * 1024 * 1024;
-const MAX_TITLE = 2000;
 const MAX_HEADINGS = 10_000;
 const MAX_HEADING_TEXT = 2000;
 const MAX_ID = 1000;
@@ -64,7 +66,6 @@ export interface PageSelection {
 export type BridgeMessage =
   | {
       type: "ready";
-      title: string;
       headings: PageHeading[];
       blocks: PageBlock[];
       scroll: PageScroll;
@@ -168,12 +169,11 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
         const h = headings(data.headings);
         const b = blocks(data.blocks);
         const s = scroll(data.scroll);
-        if (!isText(data.title, MAX_TITLE) || !h || !b || !s || typeof data.dark !== "boolean") {
+        if (!h || !b || !s || typeof data.dark !== "boolean") {
           return null;
         }
         return {
           type: "ready",
-          title: data.title,
           headings: h,
           blocks: b,
           scroll: s,
@@ -209,73 +209,122 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
   }
 }
 
-/**
- * The notice of what a page loads from the web: up to three of the `hosts` Rust names, then how
- * many more of the `count` it has seen in all.
- */
-export function noticeText(hosts: string[], count: number, blocked: boolean): string {
+/** Up to three of the `hosts` Rust names, then how many more of the `count` it has seen in all. */
+function hostNames(hosts: string[], count: number): string {
   const shown = hosts.slice(0, NOTICE_HOSTS);
   const more = Math.max(hosts.length, count) - shown.length;
-  const named =
-    more > 0
-      ? `${shown.join(", ")} and ${String(more)} more`
-      : shown.length > 1
-        ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1] ?? ""}`
-        : (shown[0] ?? "");
+  return more > 0
+    ? `${shown.join(", ")} and ${String(more)} more`
+    : shown.length > 1
+      ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1] ?? ""}`
+      : (shown[0] ?? "");
+}
+
+/**
+ * The notice of what a page loads from the web, or was blocked from (`blocked`): the hosts named
+ * as `hostNames` names them.
+ */
+export function noticeText(hosts: string[], count: number, blocked: boolean): string {
+  const named = hostNames(hosts, count);
   return blocked ? `Blocked loads from ${named}` : `This page loads from ${named}`;
 }
 
 /**
- * Where a link clicked in the page at `docPath` leads: a web or mail link goes out as an external
- * link; a relative one resolves against the page's folder, never above its drive or share, and
- * goes as a path (Lectern's link rules decide what opens it); anything else goes nowhere.
+ * Where a page's open serves from: the token its URL names, that URL's folder (`…/o/<token>/`,
+ * absolute), and the folder on disk it stands for, the page's own, with the separator its path
+ * uses.
  */
-export function pageLinkTarget(docPath: string, href: string): FollowTarget | null {
-  const link = href.trim();
-  if (/^(https?|mailto):/i.test(link)) {
-    return { kind: "external", target: link, line: null, anchor: null };
-  }
-  // A scheme (a drive letter looks like one too), a host, or the root: not beside the page.
-  if (link === "" || /^[a-z][a-z0-9+.-]*:/i.test(link) || /^[\\/]/.test(link)) {
+export interface PageOpen {
+  token: string;
+  base: string;
+  folder: string;
+  separator: string;
+}
+
+/** The open of the page at `docPath`, from its frame URL (`…/o/<token>/<name>`), or null. */
+export function pageOpen(frameUrl: string | null, docPath: string): PageOpen | null {
+  if (frameUrl === null) {
     return null;
   }
-  const hash = link.indexOf("#");
-  const beforeHash = hash < 0 ? link : link.slice(0, hash);
-  const query = beforeHash.indexOf("?");
-  const rel = query < 0 ? beforeHash : beforeHash.slice(0, query);
-  if (rel === "") {
-    return null;
-  }
-  let decoded: string;
-  let anchor: string | null = null;
+  let url: URL;
   try {
-    decoded = decodeURIComponent(rel);
-    if (hash >= 0 && hash < link.length - 1) {
-      anchor = decodeURIComponent(link.slice(hash + 1));
-    }
+    url = new URL(frameUrl, location.href);
   } catch {
     return null;
   }
-  const unc = /^(\\\\[^\\]+\\[^\\]+)\\(.*)$/.exec(docPath);
-  const drive = /^([A-Za-z]:)\\(.*)$/.exec(docPath);
-  const parts = unc ?? drive;
-  if (!parts) {
+  const found = /^(.*\/o\/([^/]+)\/)[^/]+$/.exec(url.origin + url.pathname);
+  // Either separator, as a path may be written with either.
+  const cut = Math.max(docPath.lastIndexOf("\\"), docPath.lastIndexOf("/"));
+  if (!found || cut < 0) {
     return null;
   }
-  const root = parts[1] ?? "";
-  const folder = (parts[2] ?? "")
-    .split("\\")
-    .slice(0, -1)
-    .filter((s) => s !== "");
-  for (const segment of decoded.split(/[\\/]/)) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") folder.pop();
-    else folder.push(segment);
-  }
-  if (folder.length === 0) {
+  return {
+    token: found[2] ?? "",
+    base: found[1] ?? "",
+    folder: docPath.slice(0, cut),
+    separator: docPath.charAt(cut),
+  };
+}
+
+/** Whether `host` is a machine-local name: `localhost`, or one of Lectern's own `*.localhost`. */
+function isLocalHost(host: string): boolean {
+  return host === "localhost" || host.endsWith(".localhost");
+}
+
+/**
+ * Where a link clicked in a page leads, from the URL the browser resolved it to (`href`, `<base>`
+ * and all): one within the page's open (`open`) goes as a path, its open's folder and below on
+ * disk, to Lectern's link rules; a web or mail link goes out as an external link; anything else,
+ * any other URL of the page's origin among them, goes nowhere.
+ */
+export function pageLinkTarget(open: PageOpen | null, href: string): FollowTarget | null {
+  let url: URL;
+  try {
+    url = new URL(href.trim());
+  } catch {
     return null;
   }
-  return { kind: "path", target: `${root}\\${folder.join("\\")}`, line: null, anchor };
+  const at = url.origin + url.pathname;
+  if (open !== null && at.startsWith(open.base)) {
+    const segments: string[] = [];
+    for (const segment of at.slice(open.base.length).split("/")) {
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(segment);
+      } catch {
+        return null;
+      }
+      // eslint-disable-next-line no-control-regex -- control characters are what it refuses
+      if (/^\.{0,2}$|[\\/:\u0000-\u001f]/.test(decoded)) {
+        return null;
+      }
+      segments.push(decoded);
+    }
+    let anchor: string | null = null;
+    if (url.hash.length > 1) {
+      try {
+        anchor = decodeURIComponent(url.hash.slice(1));
+      } catch {
+        return null;
+      }
+    }
+    return {
+      kind: "path",
+      target: [open.folder, ...segments].join(open.separator),
+      line: null,
+      anchor,
+    };
+  }
+  if (open !== null && url.origin === new URL(open.base).origin) {
+    return null;
+  }
+  if (
+    url.protocol === "mailto:" ||
+    (/^https?:$/.test(url.protocol) && !isLocalHost(url.hostname))
+  ) {
+    return { kind: "external", target: url.href, line: null, anchor: null };
+  }
+  return null;
 }
 
 /** What a page's session needs from the app. */
@@ -338,8 +387,8 @@ export class PageFrame implements FindPage, PageSurface {
   private headings: PageHeading[] = [];
   /** The block at the top of the view. */
   private topBlock = 0;
-  /** This open's token, which its reports of what it loads carry. */
-  private readonly token: string | null;
+  /** This page's open: its token, which its reports of what it loads carry, and what it reaches. */
+  private readonly open: PageOpen | null;
   /** The reader dismissed the notice. */
   private dismissed = false;
   /** When a link was last followed; links within `FOLLOW_EVERY_MS` of it are dropped. */
@@ -352,14 +401,15 @@ export class PageFrame implements FindPage, PageSurface {
   private restoreTo: number | null;
   private anchorTo: string | null;
 
+  /** The session of the page `doc` in `frame`, its notice in `notice`. */
   constructor(
     private readonly frame: HTMLIFrameElement,
     private readonly notice: HTMLElement,
-    private readonly doc: { path: string; frameUrl: string | null },
+    doc: { path: string; frameUrl: string | null },
     private readonly host: PageHost,
     start: { fraction: number | null; anchor: string | null },
   ) {
-    this.token = tokenOf(doc.frameUrl);
+    this.open = pageOpen(doc.frameUrl, doc.path);
     this.restoreTo = start.fraction;
     this.anchorTo = start.anchor;
   }
@@ -376,12 +426,18 @@ export class PageFrame implements FindPage, PageSurface {
       return;
     }
     switch (message.type) {
-      case "ready":
+      case "ready": {
+        // A second is the page loading itself again: back where the reader was.
+        const again = this.ready ? this.fraction : null;
         this.ready = true;
         this.dark = message.dark;
         this.takeScroll(message.scroll);
         this.sendTheme();
         this.takeText(message.headings, message.blocks);
+        if (again !== null) {
+          this.post({ type: "scroll-to", fraction: again });
+          break;
+        }
         if (this.anchorTo !== null && this.scrollToHeading(this.anchorTo)) {
           // At the anchor, over any saved place.
         } else if (this.restoreTo !== null) {
@@ -390,6 +446,7 @@ export class PageFrame implements FindPage, PageSurface {
         this.anchorTo = null;
         this.restoreTo = null;
         break;
+      }
       case "blocks":
         this.textLater(message.headings, message.blocks);
         break;
@@ -445,6 +502,19 @@ export class PageFrame implements FindPage, PageSurface {
     return this.frame.getBoundingClientRect();
   }
 
+  /**
+   * Scrolls the heading the outline lists `index`th to the top, by where its block starts, which
+   * tells apart two headings that share an id; false when it lists no such heading.
+   */
+  scrollToHeadingAt(index: number): boolean {
+    const heading = this.headings[index];
+    if (!heading) {
+      return false;
+    }
+    this.post({ type: "scroll-to", offset: heading.offset });
+    return true;
+  }
+
   /** Scrolls the heading `id` to the top; false when the page has no such heading. */
   scrollToHeading(id: string): boolean {
     const heading = this.headings.find((h) => h.id === id);
@@ -485,9 +555,16 @@ export class PageFrame implements FindPage, PageSurface {
     }
   }
 
-  /** What the page has loaded from the web (or was blocked from), for this open's notice. */
+  /**
+   * What the page has loaded from the web, and what it was blocked from, for this open's notice:
+   * Preferences a click away when it was served without the web.
+   */
   loads(loads: PageLoads): void {
-    if (loads.token !== this.token || this.dismissed || loads.hosts.length === 0) {
+    if (
+      loads.token !== this.open?.token ||
+      this.dismissed ||
+      loads.hosts.length + loads.blockedHosts.length === 0
+    ) {
       return;
     }
     const dismiss = h(
@@ -499,10 +576,28 @@ export class PageFrame implements FindPage, PageSurface {
       this.dismissed = true;
       this.notice.hidden = true;
     });
-    const parts: HTMLElement[] = [
-      h("span", { class: "page-notice-text" }, noticeText(loads.hosts, loads.count, loads.blocked)),
-    ];
-    if (loads.blocked) {
+    // What it loaded, and apart from it what was blocked; else only what was blocked.
+    const parts: HTMLElement[] =
+      loads.hosts.length > 0
+        ? [h("span", { class: "page-notice-text" }, noticeText(loads.hosts, loads.count, false))]
+        : [
+            h(
+              "span",
+              { class: "page-notice-text" },
+              noticeText(loads.blockedHosts, loads.blockedCount, true),
+            ),
+          ];
+    if (loads.hosts.length > 0 && loads.blockedHosts.length > 0) {
+      parts.push(
+        h(
+          "span",
+          { class: "page-notice-blocked" },
+          `Blocked: ${hostNames(loads.blockedHosts, loads.blockedCount)}`,
+        ),
+      );
+    }
+    // Served without the web, the page may be let at it.
+    if (loads.offline) {
       const change = h(
         "button",
         { type: "button", class: "page-notice-prefs" },
@@ -528,7 +623,7 @@ export class PageFrame implements FindPage, PageSurface {
     if (!readerActed() || now - this.followedAt < FOLLOW_EVERY_MS) {
       return;
     }
-    const target = pageLinkTarget(this.doc.path, href);
+    const target = pageLinkTarget(this.open, href);
     if (target) {
       this.followedAt = now;
       this.host.follow(target);
@@ -588,17 +683,5 @@ export class PageFrame implements FindPage, PageSurface {
   private post(message: Record<string, unknown>): void {
     // The frame's origin is opaque, so no other target origin reaches it.
     this.frame.contentWindow?.postMessage({ lx: 1, ...message }, "*");
-  }
-}
-
-/** The token of a page's open, from its frame URL (`?t=`). */
-function tokenOf(frameUrl: string | null): string | null {
-  if (frameUrl === null) {
-    return null;
-  }
-  try {
-    return new URL(frameUrl, location.href).searchParams.get("t");
-  } catch {
-    return null;
   }
 }

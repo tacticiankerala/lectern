@@ -19,6 +19,7 @@ import {
 import type { CrumbChooser } from "./crumb-chooser";
 import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
+import type { DocPayload } from "./generated/DocPayload";
 import type { PathForms } from "./generated/PathForms";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
@@ -525,7 +526,12 @@ export class Actions {
         : [];
     await this.openMenu(
       [
-        { label: "Open in editor", keys: "Ctrl+E", disabled: !doc, run: () => this.openInEditor() },
+        {
+          label: "Open in editor",
+          keys: "Ctrl+E",
+          disabled: !editable(doc),
+          run: () => this.openInEditor(),
+        },
         ...defaultApp,
         {
           label: "Reveal in Explorer",
@@ -695,10 +701,10 @@ export class Actions {
     this.libraryButton.title = `${showing ? "Hide" : "Show"} library (Ctrl+B)`;
   }
 
-  /** Opens the document in the editor at the line being read; false without a document. */
+  /** Opens the document in the editor at the line being read; false without one an editor takes. */
   private openInEditor(): boolean {
     const doc = this.app.state.doc;
-    if (!doc) {
+    if (!editable(doc)) {
       return false;
     }
     const line = this.app.view.captureAnchor()?.line ?? undefined;
@@ -790,4 +796,9 @@ export class Actions {
       handle.addEventListener("pointercancel", end);
     });
   }
+}
+
+/** Whether `doc` is one an editor opens (Ctrl+E): any document but a PDF. */
+function editable(doc: DocPayload | null): doc is DocPayload {
+  return doc !== null && doc.kind !== "pdf";
 }

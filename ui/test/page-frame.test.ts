@@ -7,6 +7,7 @@ import {
   PageFrame,
   noticeText,
   pageLinkTarget,
+  pageOpen,
   parseBridgeMessage,
   type PageHost,
 } from "../src/page-frame";
@@ -14,7 +15,6 @@ import {
 const READY = {
   lx: 1,
   type: "ready",
-  title: "Weekly report",
   headings: [
     { level: 1, text: "Weekly report", id: "lx-heading-1", offset: 0 },
     { level: 2, text: "Results", id: "results", offset: 14 },
@@ -32,16 +32,15 @@ describe("messages from a page's bridge", () => {
   it("are taken when every field is as the bridge sends it", () => {
     expect(parseBridgeMessage(READY)).toEqual({
       type: "ready",
-      title: "Weekly report",
       headings: READY.headings,
       blocks: READY.blocks,
       scroll: { fraction: 0, top: 0 },
       dark: false,
     });
-    expect(parseBridgeMessage({ lx: 1, type: "link", href: "other.html" })).toEqual({
-      type: "link",
-      href: "other.html",
-    });
+    // A title, as an older bridge sent, is no part of it.
+    expect(parseBridgeMessage({ ...READY, title: "Weekly report" })).not.toHaveProperty("title");
+    const href = "http://lxpage.localhost/o/tok1/other.html";
+    expect(parseBridgeMessage({ lx: 1, type: "link", href })).toEqual({ type: "link", href });
     expect(
       parseBridgeMessage({ lx: 1, type: "scroll", scroll: { fraction: 0.5, top: 3 } }),
     ).toEqual({ type: "scroll", scroll: { fraction: 0.5, top: 3 } });
@@ -78,7 +77,6 @@ describe("messages from a page's bridge", () => {
       [],
       { ...READY, lx: 2 },
       { ...READY, type: "paint" },
-      { ...READY, title: 7 },
       { ...READY, headings: "none" },
       { ...READY, headings: [{ level: 9, text: "x", id: "x", offset: 0 }] },
       { ...READY, headings: [{ level: 1, text: "x", id: "x", offset: -1 }] },
@@ -142,52 +140,102 @@ describe("the notice of what a page loads", () => {
 
 describe("a link clicked in a page", () => {
   const PAGE = "C:\\Fixtures\\vault\\artifacts\\report.html";
+  const OPEN = pageOpen("http://lxpage.localhost/o/tok1/report.html", PAGE);
+  const IN = "http://lxpage.localhost/o/tok1/";
+
+  it("knows its open from its frame URL", () => {
+    expect(OPEN).toEqual({
+      token: "tok1",
+      base: IN,
+      folder: "C:\\Fixtures\\vault\\artifacts",
+      separator: "\\",
+    });
+    // The fake's, on the dev server, beside the app.
+    expect(pageOpen("/__page/o/t3-4321/report.html?lxmode=full", PAGE)).toEqual({
+      token: "t3-4321",
+      base: `${location.origin}/__page/o/t3-4321/`,
+      folder: "C:\\Fixtures\\vault\\artifacts",
+      separator: "\\",
+    });
+    // A path written with forward slashes.
+    const slashed = pageOpen(
+      "http://lxpage.localhost/o/tok1/report.html",
+      "S:/Notes/My Vault/report.html",
+    );
+    expect(slashed).toEqual({
+      token: "tok1",
+      base: IN,
+      folder: "S:/Notes/My Vault",
+      separator: "/",
+    });
+    expect(pageLinkTarget(slashed, `${IN}other.html`)?.target).toBe("S:/Notes/My Vault/other.html");
+    expect(pageOpen(null, PAGE)).toBeNull();
+    expect(pageOpen("http://lxpage.localhost/d/c/report.html", PAGE)).toBeNull();
+    expect(pageOpen("http://lxpage.localhost/o/tok1/report.html", "report.html")).toBeNull();
+  });
 
   it("to the web or mail goes out as an external link", () => {
-    expect(pageLinkTarget(PAGE, "https://example.com/a?b#c")).toEqual({
+    expect(pageLinkTarget(OPEN, "https://example.com/a?b#c")).toEqual({
       kind: "external",
       target: "https://example.com/a?b#c",
       line: null,
       anchor: null,
     });
-    expect(pageLinkTarget(PAGE, "MAILTO:someone@example.com")?.kind).toBe("external");
+    expect(pageLinkTarget(OPEN, "MAILTO:someone@example.com")?.kind).toBe("external");
+    expect(pageLinkTarget(null, "https://example.com/")?.kind).toBe("external");
   });
 
-  it("relative, resolves against the page's folder, with its anchor", () => {
-    expect(pageLinkTarget(PAGE, "other.html#part-2")).toEqual({
+  it("within the page's open goes to the file it names in the page's folder, with its anchor", () => {
+    expect(pageLinkTarget(OPEN, `${IN}other.html#part-2`)).toEqual({
       kind: "path",
       target: "C:\\Fixtures\\vault\\artifacts\\other.html",
       line: null,
       anchor: "part-2",
     });
-    expect(pageLinkTarget(PAGE, "../notes/r%C3%A9sum%C3%A9%20notes.md")?.target).toBe(
-      "C:\\Fixtures\\vault\\notes\\résumé notes.md",
+    expect(pageLinkTarget(OPEN, `${IN}sub/r%C3%A9sum%C3%A9%20notes.md`)?.target).toBe(
+      "C:\\Fixtures\\vault\\artifacts\\sub\\résumé notes.md",
     );
-    expect(pageLinkTarget(PAGE, "./img/../data.json?x=1")?.target).toBe(
+    expect(pageLinkTarget(OPEN, `${IN}data.json?x=1`)?.target).toBe(
       "C:\\Fixtures\\vault\\artifacts\\data.json",
     );
-    // Never above the drive or the share.
-    expect(pageLinkTarget(PAGE, "../../../../../x.html")?.target).toBe("C:\\x.html");
-    expect(pageLinkTarget("\\\\nas\\share\\notes\\a.html", "../../b.html")?.target).toBe(
-      "\\\\nas\\share\\b.html",
+    // Where a `<base href="docs/">` sent it: the browser resolved it.
+    expect(pageLinkTarget(OPEN, `${IN}docs/guide.html`)?.target).toBe(
+      "C:\\Fixtures\\vault\\artifacts\\docs\\guide.html",
     );
   });
 
   it("anywhere else is ignored", () => {
     for (const href of [
+      // Other URLs of the page's origin: another open, the reports, the old forms.
+      "http://lxpage.localhost/o/tok2/other.html",
+      "http://lxpage.localhost/o/tok12/other.html",
+      "http://lxpage.localhost/__csp-report?t=tok1",
+      "http://lxpage.localhost/d/c/Windows/win.ini",
+      // Its open's folder itself, and what decodes to a climb, a separator or a drive.
+      IN,
+      `${IN}..%2Fsecret.html`,
+      `${IN}%2E%2E/secret.html`,
+      `${IN}a%5Cb.html`,
+      `${IN}C%3A%5Ca.html`,
+      `${IN}a%00b.html`,
+      `${IN}%ZZ.html`,
+      `${IN}a//b.html`,
+      // Lectern's own and the machine's.
+      "http://localhost:1420/index.html",
+      "http://ipc.localhost/open",
+      "http://lxasset.localhost/C%3A%5Cx.png",
       "javascript:alert(1)",
       "file:///C:/Windows/win.ini",
-      "C:\\Windows\\win.ini",
-      "//example.com/x",
-      "/d/c/Windows/win.ini",
-      "\\\\attacker\\share\\x.html",
       "data:text/html,x",
+      // Not as the browser resolves a link.
+      "other.html",
+      "C:\\Windows\\win.ini",
+      "\\\\attacker\\share\\x.html",
       "",
       "   ",
       "#top",
-      "%ZZ.html",
     ]) {
-      expect(pageLinkTarget(PAGE, href), href).toBeNull();
+      expect(pageLinkTarget(OPEN, href), href).toBeNull();
     }
   });
 });
@@ -220,7 +268,7 @@ function session(restore: number | null = null, anchor: string | null = null) {
     notice,
     {
       path: "C:\\Fixtures\\vault\\artifacts\\report.html",
-      frameUrl: "/__page/d/c/Fixtures/vault/artifacts/report.html?t=tok1",
+      frameUrl: "http://lxpage.localhost/o/tok1/report.html",
     },
     host,
     { fraction: restore, anchor },
@@ -345,7 +393,7 @@ describe("a page's session", () => {
         page.receive({ lx: 1, type: "link", href });
       };
       readerActed(true);
-      link("other.html");
+      link("http://lxpage.localhost/o/tok1/other.html");
       expect(host.follow).toHaveBeenCalledWith({
         kind: "path",
         target: "C:\\Fixtures\\vault\\artifacts\\other.html",
@@ -419,6 +467,35 @@ describe("a page's session", () => {
     }
   });
 
+  it("reads a page that loads itself again, and takes it back where the reader was", () => {
+    const { page, host, posted } = session();
+    page.receive(READY);
+    page.receive({ lx: 1, type: "scroll", scroll: { fraction: 0.4, top: 1 } });
+    page.receive({ ...READY, blocks: [{ text: "Refreshed" }] });
+    expect(page.text).toBe("Refreshed");
+    expect(host.text).toHaveBeenCalledTimes(2);
+    expect(posted.filter((m) => m.type === "theme")).toHaveLength(2);
+    expect(posted).toContainEqual({ lx: 1, type: "scroll-to", fraction: 0.4 });
+  });
+
+  it("scrolls to the heading the outline lists by its place, where two share an id", () => {
+    const { page, posted } = session();
+    page.receive({
+      ...READY,
+      headings: [
+        { level: 2, text: "Notes", id: "notes", offset: 0 },
+        { level: 2, text: "Notes", id: "notes", offset: 6 },
+      ],
+      blocks: [
+        { text: "Notes", headingLevel: 2 },
+        { text: "Notes", headingLevel: 2 },
+      ],
+    });
+    expect(page.scrollToHeadingAt(1)).toBe(true);
+    expect(posted).toContainEqual({ lx: 1, type: "scroll-to", offset: 6 });
+    expect(page.scrollToHeadingAt(2)).toBe(false);
+  });
+
   it("drops what isn't a message from the bridge", () => {
     const { page, host } = session();
     page.receive({ ...READY, blocks: [{ text: "x".repeat(3 * 1024 * 1024) }] });
@@ -429,27 +506,44 @@ describe("a page's session", () => {
 
   it("shows what the page loads from the web, for this open only, until dismissed", () => {
     const { page, notice, host } = session();
-    page.loads({ token: "other", hosts: ["cdn.example.test"], count: 1, blocked: false });
+    const loads = (token: string, hosts: string[], blocked: string[], offline = false) => {
+      page.loads({
+        token,
+        hosts,
+        count: hosts.length,
+        blockedHosts: blocked,
+        blockedCount: blocked.length,
+        offline,
+      });
+    };
+    loads("other", ["cdn.example.test"], []);
     expect(notice.hidden).toBe(true);
-    page.loads({ token: "tok1", hosts: ["cdn.example.test"], count: 1, blocked: false });
+    loads("tok1", ["cdn.example.test"], []);
     expect(notice.hidden).toBe(false);
     expect(notice.textContent).toBe("This page loads from cdn.example.test×");
-    page.loads({
-      token: "tok1",
-      hosts: ["cdn.example.test", "fonts.example.test"],
-      count: 2,
-      blocked: true,
-    });
+    expect(notice.querySelector(".page-notice-prefs")).toBeNull();
+    // What was blocked, beside what loaded: Preferences can't help with it.
+    loads("tok1", ["cdn.example.test"], ["plain.example.test"]);
+    expect(notice.querySelector(".page-notice-text")?.textContent).toBe(
+      "This page loads from cdn.example.test",
+    );
+    expect(notice.querySelector(".page-notice-blocked")?.textContent).toBe(
+      "Blocked: plain.example.test",
+    );
+    expect(notice.querySelector(".page-notice-prefs")).toBeNull();
+    // Served without the web: all of it blocked, and Preferences a click away.
+    loads("tok1", [], ["cdn.example.test", "fonts.example.test"], true);
     expect(notice.querySelector(".page-notice-text")?.textContent).toBe(
       "Blocked loads from cdn.example.test and fonts.example.test",
     );
+    expect(notice.querySelector(".page-notice-blocked")).toBeNull();
     const change = notice.querySelector<HTMLButtonElement>(".page-notice-prefs");
     expect(change?.textContent).toBe("Change in Preferences");
     change?.click();
     expect(host.preferences).toHaveBeenCalled();
     notice.querySelector<HTMLButtonElement>(".page-notice-dismiss")?.click();
     expect(notice.hidden).toBe(true);
-    page.loads({ token: "tok1", hosts: ["late.example.test"], count: 1, blocked: true });
+    loads("tok1", [], ["late.example.test"], true);
     expect(notice.hidden).toBe(true);
   });
 });

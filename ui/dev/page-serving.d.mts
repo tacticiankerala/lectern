@@ -14,3 +14,9 @@ export function pagePolicy(
 ): PagePolicy;
 
 export function injectScript(html: string, script: string): string;
+
+export const BRIDGE_KEY_SLOT: string;
+
+export function fakeBridgeKey(token: string): string;
+
+export function bridgeFor(bridge: string, key: string): string;

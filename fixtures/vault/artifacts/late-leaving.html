@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slow board</title>
+</head>
+<body>
+<h1>Slow board</h1>
+<p>An invented page that is ready, then leaves for the other page before its last image has loaded.</p>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    setTimeout(function () {
+      location.href = "other.html";
+    }, 400);
+  });
+</script>
+<!-- The fake's dev server holds this back (lxdelay), so the page leaves before its own load. -->
+<img src="style.css?lxdelay=5000" alt="">
+</body>
+</html>

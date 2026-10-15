@@ -111,20 +111,25 @@ pub fn run(context: tauri::Context, launch: Launch) {
                 responder.respond(response.into_http());
             });
         })
-        // HTML pages and PDFs in a frame, and what a page loads, at
-        // `http://lxpage.localhost/d/<drive>/…` or `…/u/<host>/<share>/…`; and the browser's
-        // reports on what a page loaded, at `/__csp-report`.
+        // HTML pages and PDFs in a frame, and what a page loads from its folder and below, at
+        // `http://lxpage.localhost/o/<token>/…`, one token per open; and the browser's reports on
+        // what a page loaded, at `/__csp-report`.
         .register_asynchronous_uri_scheme_protocol("lxpage", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let (parts, body) = request.into_parts();
             let method = parts.method.as_str().to_owned();
             let path = parts.uri.path().to_owned();
             let query = parts.uri.query().map(str::to_owned);
-            let content_type = parts
-                .headers
-                .get(tauri::http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
+            let header = |name: &str| {
+                parts
+                    .headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            let content_type = header("content-type");
+            // What the request is for: a module script or a font may be shared with the page.
+            let fetch_dest = header("sec-fetch-dest");
             // As for images: the checks are in memory, and only an allowed file is read, off the
             // main thread.
             tauri::async_runtime::spawn_blocking(move || {
@@ -134,6 +139,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
                         path: &path,
                         query: query.as_deref(),
                         content_type: content_type.as_deref(),
+                        fetch_dest: fetch_dest.as_deref(),
                         body: &body,
                     }),
                     None => PageResponse::refused(),

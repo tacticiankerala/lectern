@@ -1,5 +1,6 @@
 //! HTML pages as Lectern serves them into their frame (`lxpage`): Lectern's bridge script inserted
-//! at the top, the content security policy each *HTML pages* setting gives, the encoding a page
+//! at the top of an open's own page, signed with the open's key (no other page gets it), the
+//! content security policy each *HTML pages* setting gives, the encoding a page
 //! declares (kept in the response's type, as the bridge pushes the page's own declaration down; a
 //! UTF-16 page is served as UTF-8), and the policy reports through which the browser names the
 //! hosts a page loaded from.
@@ -13,9 +14,10 @@
 //! allows it alone, by the nonce of its script element.
 //!
 //! The reports come from the browser, not the page, so a page can't hide what it loaded: under
-//! `full` a report-only policy reports every load from the web, and under `offline` and `static`
-//! the enforced policy reports every load it blocked. Each report names the open it is for by a
-//! token minted when the window opened the page (`PageReports`).
+//! `full` a report-only policy reports every load from the web, and in every mode the enforced
+//! policy reports every load it blocked. Each report names the open it is for by a token minted
+//! when the window opened the page (`PageOpens`), which also bounds what the page reaches: its own
+//! folder and the folders below it.
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
@@ -29,9 +31,14 @@ use crate::ipc::{HtmlPages, PageLoads};
 use crate::library::pathmap::PAGE_ORIGIN;
 use crate::text::decode_utf16;
 
-/// Lectern's bridge: one script, inserted at the top of every page, that reports the page's text,
-/// headings, selection, scroll position and clicked links to Lectern, and paints its highlights.
+/// Lectern's bridge: one script, inserted at the top of an open's own page, that reports the page's
+/// text, headings, selection, scroll position and clicked links to Lectern, and paints its
+/// highlights. It is served with its open's key in `BRIDGE_KEY_SLOT` (`bridge_for`).
 pub const BRIDGE: &str = include_str!("../assets/page-bridge.js");
+
+/// Where the bridge takes its open's key: a string literal in its source, filled in as it is
+/// served. The key signs every message it sends, which a page's own scripts never see.
+pub const BRIDGE_KEY_SLOT: &str = "\"LECTERN_BRIDGE_KEY\"";
 
 /// Where the policy reports of a page go, on the page protocol: `?t=<token>` names the open.
 pub const REPORT_PATH: &str = "/__csp-report";
@@ -39,8 +46,8 @@ pub const REPORT_PATH: &str = "/__csp-report";
 /// A window hears about a page's loads at most this often.
 pub const REPORT_THROTTLE: Duration = Duration::from_millis(250);
 
-/// The opens a window keeps reports for: its last few, so a page whose open raced another's (two
-/// pages opened at once, the later first) still reports.
+/// The opens a window keeps: its last few, so a page whose open raced another's (two pages opened
+/// at once, the later first) still loads and reports.
 const OPENS_KEPT: usize = 4;
 
 /// How far into a page the browser looks for the encoding it declares.
@@ -65,7 +72,9 @@ pub struct PagePolicy {
 
 /// The policies for a page served under `mode`, whose bridge script carries `nonce`, and whose
 /// reports go to the open `report` names (a token), when there is one. Without one, nothing the
-/// page loaded could be told (a page can drop its own `?t=`), so `full` gives the offline policy.
+/// page loaded could be told, so `full` gives the offline policy. Whatever the enforced policy
+/// stops is reported, `full`'s too (an `http:` load). In every mode the page may fetch what the
+/// page protocol serves it (`'self'`): its own folder and below.
 pub fn page_policy(mode: HtmlPages, nonce: &str, report: Option<&str>) -> PagePolicy {
     let mode = if mode == HtmlPages::Full && report.is_none() {
         HtmlPages::Offline
@@ -79,8 +88,11 @@ pub fn page_policy(mode: HtmlPages, nonce: &str, report: Option<&str>) -> PagePo
                 "sandbox allow-scripts; default-src 'self' https: data: blob:; \
                  script-src 'self' https: 'unsafe-inline' 'unsafe-eval' blob:; \
                  style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data: blob:; \
-                 font-src 'self' https: data:; connect-src https:; \
-                 media-src 'self' https: data: blob:; frame-src https:; {ALWAYS}"
+                 font-src 'self' https: data:; connect-src 'self' https:; \
+                 media-src 'self' https: data: blob:; frame-src https:; {ALWAYS}{}",
+                report_uri
+                    .as_deref()
+                    .map_or(String::new(), |uri| format!("; {uri}"))
             ),
             report_only: report_uri.map(|uri| {
                 format!("default-src 'self' data: blob: 'unsafe-inline' 'unsafe-eval'; {uri}")
@@ -96,7 +108,7 @@ pub fn page_policy(mode: HtmlPages, nonce: &str, report: Option<&str>) -> PagePo
             let mut enforced = format!(
                 "sandbox allow-scripts; default-src 'self' data: blob:; script-src {scripts}; \
                  style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
-                 font-src 'self' data:; connect-src 'none'; media-src 'self' data: blob:; \
+                 font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; \
                  frame-src 'none'; {ALWAYS}"
             );
             if let Some(uri) = report_uri {
@@ -111,12 +123,19 @@ pub fn page_policy(mode: HtmlPages, nonce: &str, report: Option<&str>) -> PagePo
     }
 }
 
-/// `html` with the bridge inserted as `<script nonce="…">` (`inject_script`). The page's bytes are
-/// kept as they are, whatever their encoding.
-pub fn inject_bridge(html: &[u8], nonce: &str) -> Vec<u8> {
+/// The bridge for the open whose key is `key` (a fresh token: hex digits only, as a string
+/// literal takes them as they are).
+pub fn bridge_for(key: &str) -> String {
+    debug_assert!(key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    BRIDGE.replacen(BRIDGE_KEY_SLOT, &format!("\"{key}\""), 1)
+}
+
+/// `html` with the bridge of the open whose key is `key` inserted as `<script nonce="…">`
+/// (`inject_script`). The page's bytes are kept as they are, whatever their encoding.
+pub fn inject_bridge(html: &[u8], nonce: &str, key: &str) -> Vec<u8> {
     inject_script(
         html,
-        &format!("<script nonce=\"{nonce}\">{BRIDGE}</script>"),
+        &format!("<script nonce=\"{nonce}\">{}</script>", bridge_for(key)),
     )
 }
 
@@ -260,18 +279,23 @@ pub struct PreparedPage {
     pub charset: Option<String>,
 }
 
-/// `html` as served, with the bridge in (`inject_bridge`). A page in UTF-16 (by its byte order
-/// mark, which the browser goes by first) is decoded as `text::decode_utf16` decodes it, an
-/// unpaired surrogate or an odd last byte becoming U+FFFD, and served as UTF-8: the bridge is
-/// UTF-8. Any other keeps its bytes, and the charset it declares (`declared_charset`).
-pub fn prepare_page(html: &[u8], nonce: &str) -> PreparedPage {
+/// `html` as served: with the bridge in under `bridge`'s nonce and key (`inject_bridge`), or, for
+/// a page that isn't its open's own, as written. A page in UTF-16 (by its byte order mark, which
+/// the browser goes by first) is decoded as `text::decode_utf16` decodes it, an unpaired surrogate
+/// or an odd last byte becoming U+FFFD, and served as UTF-8: the bridge is UTF-8. Any other keeps
+/// its bytes, and the charset it declares (`declared_charset`).
+pub fn prepare_page(html: &[u8], bridge: Option<(&str, &str)>) -> PreparedPage {
+    let with_bridge = |bytes: &[u8]| match bridge {
+        Some((nonce, key)) => inject_bridge(bytes, nonce, key),
+        None => bytes.to_vec(),
+    };
     match decode_utf16(html) {
         Some(page) => PreparedPage {
-            body: inject_bridge(page.text.as_bytes(), nonce),
+            body: with_bridge(page.text.as_bytes()),
             charset: Some("utf-8".to_owned()),
         },
         None => PreparedPage {
-            body: inject_bridge(html, nonce),
+            body: with_bridge(html),
             charset: declared_charset(html),
         },
     }
@@ -472,23 +496,43 @@ fn content_charset(content: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The host a policy report (`application/csp-report`) says was loaded or blocked: that of its
-/// `blocked-uri`, when that is a web or web-socket URL. Inline code, `data:` and `blob:` have none, and
-/// Lectern's own protocols (`*.localhost`) are no load from the web.
-pub fn report_host(body: &[u8]) -> Option<String> {
-    let report: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let uri = report.get("csp-report")?.get("blocked-uri")?.as_str()?;
-    let url = Url::parse(uri).ok()?;
-    // Web sockets too: `connect-src https:` lets `wss:` through.
-    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
-        return None;
-    }
-    let host = url.host_str()?.to_ascii_lowercase();
-    (host != "localhost" && !host.ends_with(".localhost")).then_some(host)
+/// A load a policy report tells of: its host, and whether it was stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedLoad {
+    pub host: String,
+    pub blocked: bool,
 }
 
-/// A fresh random token, 32 hex digits: a script nonce, or the name of a page's open. Keyed by
-/// the process's random hash keys, so no page can guess one.
+/// The load a policy report (`application/csp-report`) tells of: the host of its `blocked-uri`,
+/// when that is a web or web-socket URL; inline code, `data:` and `blob:` have none, and Lectern's
+/// own protocols (`*.localhost`) are no load from the web. It was blocked when the enforced policy
+/// reported it (`"disposition": "enforce"`), and when it was plain `http:` or `ws:`, which `full`'s
+/// enforced policy stops though its report-only one tells of it as well.
+pub fn reported_load(body: &[u8]) -> Option<ReportedLoad> {
+    let report: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let report = report.get("csp-report")?;
+    let url = Url::parse(report.get("blocked-uri")?.as_str()?).ok()?;
+    let secure = match url.scheme() {
+        "https" | "wss" => true,
+        "http" | "ws" => false,
+        _ => return None,
+    };
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return None;
+    }
+    let enforced = report
+        .get("disposition")
+        .and_then(serde_json::Value::as_str)
+        == Some("enforce");
+    Some(ReportedLoad {
+        host,
+        blocked: enforced || !secure,
+    })
+}
+
+/// A fresh random token, 32 hex digits: a script nonce, the name of a page's or a PDF's open, or
+/// its bridge's key. Keyed by the process's random hash keys, so no page can guess one.
 pub fn fresh_token() -> String {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
@@ -501,112 +545,212 @@ pub fn fresh_token() -> String {
     format!("{high:016x}{low:016x}")
 }
 
-/// What to do after a report (`PageReports::report`).
+/// What to do after a report (`PageOpens::report`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportSend {
     /// Nothing new, or the open is unknown.
     Nothing,
     /// Tell this window now.
     Now(String, PageLoads),
-    /// Tell the window this much later (`PageReports::flush`): it heard about the page lately.
+    /// Tell the window this much later (`PageOpens::flush`): it heard about the page lately.
     Later(Duration),
 }
 
-/// An open page's reports.
+/// What an open may serve: the page it opened, and the folder it reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageScope {
+    pub token: String,
+    /// The page the open shows (normalised): the only page served with its bridge, and the only
+    /// one whose reports go to it.
+    pub page: String,
+    /// The page's folder (normalised): the open serves it and the folders below it.
+    pub folder: String,
+    /// The secret the open's bridge signs its messages with: in the open's payload for the UI,
+    /// and in the page's own bridge, never anywhere a page's scripts can read it.
+    pub key: String,
+    /// The folder's real path, links and junctions resolved, once the page protocol has looked.
+    pub real_folder: Option<String>,
+}
+
+/// Hosts an open has heard of, of one kind: the first few by name, the rest only counted.
+#[derive(Debug, Default)]
+struct Hosts {
+    /// The first hosts reported, at most `HOSTS_NAMED`.
+    named: Vec<String>,
+    /// The hosts reported past those, by their hash: counted, not named.
+    beyond: HashSet<u64>,
+}
+
+impl Hosts {
+    fn contains(&self, host: &str, hash: u64) -> bool {
+        self.named.iter().any(|known| known == host) || self.beyond.contains(&hash)
+    }
+
+    /// Takes `host` (whose hash is `hash`); false when it was known, named or only counted, or is
+    /// past counting. One only counted stays so, though a named slot has come free since.
+    fn add(&mut self, host: &str, hash: u64) -> bool {
+        if self.contains(host, hash) {
+            return false;
+        }
+        if self.named.len() < HOSTS_NAMED {
+            self.named.push(host.to_owned());
+            return true;
+        }
+        self.beyond.len() < HOSTS_COUNTED && self.beyond.insert(hash)
+    }
+
+    fn remove(&mut self, host: &str, hash: u64) {
+        self.named.retain(|known| known != host);
+        self.beyond.remove(&hash);
+    }
+
+    fn count(&self) -> u32 {
+        u32::try_from(self.named.len() + self.beyond.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// A page the windows have open, and what it has loaded.
 #[derive(Debug)]
 struct Open {
     window: String,
+    page: String,
+    folder: String,
+    key: String,
+    real_folder: Option<String>,
     /// Numbers the window's opens, oldest first.
     seq: u64,
-    /// The first hosts reported, at most `HOSTS_NAMED`.
-    hosts: Vec<String>,
-    /// The hosts reported past those, by their hash: counted, not named.
-    beyond: HashSet<u64>,
-    blocked: bool,
+    loaded: Hosts,
+    blocked: Hosts,
+    /// The page was served without the web.
+    offline: bool,
     /// When its window last heard about it.
     told: Option<Instant>,
     /// A later telling is due (`ReportSend::Later`).
     due: bool,
 }
 
-/// The pages the windows have open, by token, and what each has loaded from the web. A window
-/// keeps its last few opens (`OPENS_KEPT`); older ones, and those of a window that has closed or
-/// turned to another workspace (`forget`), are forgotten.
+impl Open {
+    fn scope(&self, token: &str) -> PageScope {
+        PageScope {
+            token: token.to_owned(),
+            page: self.page.clone(),
+            folder: self.folder.clone(),
+            key: self.key.clone(),
+            real_folder: self.real_folder.clone(),
+        }
+    }
+}
+
+/// The pages and PDFs the windows have open, by token: the page each open shows, the folder it may
+/// serve, its bridge's key, and what the page has loaded from the web. A window keeps its last few
+/// opens (`OPENS_KEPT`), and the one on screen (`pin`) however old; others, and those of a window
+/// that has closed or turned to another workspace (`forget`), are forgotten, and their URLs serve
+/// nothing.
 #[derive(Debug, Default)]
-pub struct PageReports {
+pub struct PageOpens {
     opens: HashMap<String, Open>,
     seq: u64,
+    /// The open each window has on screen, by window: kept past `OPENS_KEPT`.
+    pinned: HashMap<String, String>,
     /// Hashes the hosts an open counts without naming.
     keys: RandomState,
 }
 
-impl PageReports {
-    /// A token for a page the window `window` is opening, for its frame URL and its reports.
-    pub fn open(&mut self, window: &str) -> String {
+impl PageOpens {
+    /// A new open of the page or PDF at `page` (normalised), in the folder `folder`, that the
+    /// window `window` is opening, with a fresh token (its frame URL carries it, and its reports
+    /// come back with it) and a fresh key for its bridge.
+    pub fn open(&mut self, window: &str, page: &str, folder: &str) -> PageScope {
+        let pinned = self.pinned.get(window).cloned();
         let mut kept: Vec<u64> = self
             .opens
-            .values()
-            .filter(|open| open.window == window)
-            .map(|open| open.seq)
+            .iter()
+            .filter(|(token, open)| open.window == window && Some(*token) != pinned.as_ref())
+            .map(|(_, open)| open.seq)
             .collect();
         if kept.len() >= OPENS_KEPT {
             kept.sort_unstable();
             let oldest = kept[kept.len() - OPENS_KEPT];
-            self.opens
-                .retain(|_, open| open.window != window || open.seq > oldest);
+            self.opens.retain(|token, open| {
+                open.window != window || open.seq > oldest || Some(token) == pinned.as_ref()
+            });
         }
         self.seq += 1;
         let token = fresh_token();
-        self.opens.insert(
-            token.clone(),
-            Open {
-                window: window.to_owned(),
-                seq: self.seq,
-                hosts: Vec::new(),
-                beyond: HashSet::new(),
-                blocked: false,
-                told: None,
-                due: false,
-            },
-        );
-        token
+        let open = Open {
+            window: window.to_owned(),
+            page: page.to_owned(),
+            folder: folder.to_owned(),
+            key: fresh_token(),
+            real_folder: None,
+            seq: self.seq,
+            loaded: Hosts::default(),
+            blocked: Hosts::default(),
+            offline: false,
+            told: None,
+            due: false,
+        };
+        let scope = open.scope(&token);
+        self.opens.insert(token, open);
+        scope
+    }
+
+    /// What the open `token` may serve; `None` when no window has it open.
+    pub fn scope(&self, token: &str) -> Option<PageScope> {
+        self.opens.get(token).map(|open| open.scope(token))
+    }
+
+    /// The window `window` has the open `token` on screen (`None`: no page or PDF): it is kept
+    /// however many opens come after it, until something else is on screen.
+    pub fn pin(&mut self, window: &str, token: Option<&str>) {
+        match token {
+            Some(token) => self.pinned.insert(window.to_owned(), token.to_owned()),
+            None => self.pinned.remove(window),
+        };
+    }
+
+    /// Keeps the real path of the open `token`'s folder, `real`, as the page protocol found it.
+    pub fn set_real_folder(&mut self, token: &str, real: &str) {
+        if let Some(open) = self.opens.get_mut(token) {
+            open.real_folder = Some(real.to_owned());
+        }
     }
 
     /// Forgets the opens of the window `window`, which has closed or turned to another workspace:
-    /// their reports go nowhere from now on.
+    /// they serve nothing, and their reports go nowhere, from now on.
     pub fn forget(&mut self, window: &str) {
         self.opens.retain(|_, open| open.window != window);
+        self.pinned.remove(window);
     }
 
-    /// The page of the open `token` is being served, its loads `blocked` (`offline`, `static`)
-    /// or not; false when the open is unknown, and then the page reports nowhere.
-    pub fn served(&mut self, token: &str, blocked: bool) -> bool {
+    /// The page of the open `token` is being served, without the web (`offline`, `static`) or
+    /// with it; false when the open is unknown, and then the page reports nowhere.
+    pub fn served(&mut self, token: &str, offline: bool) -> bool {
         match self.opens.get_mut(token) {
             Some(open) => {
-                open.blocked = blocked;
+                open.offline = offline;
                 true
             }
             None => false,
         }
     }
 
-    /// A report for the open `token` named `host`, at `now`: a new host is told to the window at
-    /// once, or, when it heard less than `REPORT_THROTTLE` ago, once that has passed. Past the
-    /// first `HOSTS_NAMED` hosts, a new one is only counted, up to `HOSTS_COUNTED` more.
-    pub fn report(&mut self, token: &str, host: &str, now: Instant) -> ReportSend {
-        let hash = self.keys.hash_one(host);
+    /// A report for the open `token` of `load`, at `now`: a host new to its kind (loaded or
+    /// blocked) is told to the window at once, or, when it heard less than `REPORT_THROTTLE` ago,
+    /// once that has passed. A host is told once: one ever blocked is blocked only. Past the first
+    /// `HOSTS_NAMED` hosts of a kind, a new one is only counted, up to `HOSTS_COUNTED` more.
+    pub fn report(&mut self, token: &str, load: &ReportedLoad, now: Instant) -> ReportSend {
+        let hash = self.keys.hash_one(&load.host);
         let Some(open) = self.opens.get_mut(token) else {
             return ReportSend::Nothing;
         };
-        if open.hosts.iter().any(|known| known == host) {
-            return ReportSend::Nothing;
-        }
-        if open.hosts.len() < HOSTS_NAMED {
-            open.hosts.push(host.to_owned());
-        } else if open.beyond.len() >= HOSTS_COUNTED || !open.beyond.insert(hash) {
-            return ReportSend::Nothing;
-        }
-        if open.due {
+        let new = if load.blocked {
+            open.loaded.remove(&load.host, hash);
+            open.blocked.add(&load.host, hash)
+        } else {
+            !open.blocked.contains(&load.host, hash) && open.loaded.add(&load.host, hash)
+        };
+        if !new || open.due {
             return ReportSend::Nothing;
         }
         match open.told.map(|told| now.saturating_duration_since(told)) {
@@ -634,8 +778,10 @@ impl PageReports {
 fn loads(token: &str, open: &Open) -> PageLoads {
     PageLoads {
         token: token.to_owned(),
-        hosts: open.hosts.clone(),
-        count: u32::try_from(open.hosts.len() + open.beyond.len()).unwrap_or(u32::MAX),
-        blocked: open.blocked,
+        hosts: open.loaded.named.clone(),
+        count: open.loaded.count(),
+        blocked_hosts: open.blocked.named.clone(),
+        blocked_count: open.blocked.count(),
+        offline: open.offline,
     }
 }

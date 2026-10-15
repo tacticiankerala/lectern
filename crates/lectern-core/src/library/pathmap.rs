@@ -441,90 +441,77 @@ const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// The page-protocol URL for a local file, hierarchical so a page's relative links resolve beside
-/// it: `X:\a\b c.html` is `http://lxpage.localhost/d/x/a/b%20c.html` and `\\host\share\x.pdf` is
-/// `http://lxpage.localhost/u/host/share/x.pdf`, each segment percent-encoded. `None` for anything
-/// but a drive or UNC path, and for a path `page_path` would refuse (`.`, `..`, empty segments,
-/// characters Windows forbids), so `page_path` always gives the path back.
-pub fn page_url(path: &Path) -> Option<String> {
-    let text = path.to_str()?;
-    let b = text.as_bytes();
-    let (mut url, rest) = if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        let drive = char::from(b[0].to_ascii_lowercase());
-        // `X:a` and `X:` are relative to the drive's current folder.
-        let rest = text[2..].strip_prefix(['\\', '/'])?;
-        (format!("{PAGE_ORIGIN}/d/{drive}"), rest)
-    } else {
-        let rest = text.strip_prefix(['\\', '/'])?.strip_prefix(['\\', '/'])?;
-        // A host and a share at least.
-        if rest.split(['\\', '/']).count() < 2 {
-            return None;
-        }
-        (format!("{PAGE_ORIGIN}/u"), rest)
-    };
-    if rest.is_empty() {
-        return Some(url);
-    }
-    for segment in rest.split(['\\', '/']) {
-        if !page_segment(segment) {
-            return None;
-        }
-        url.push('/');
-        url.extend(utf8_percent_encode(segment, UNRESERVED));
-    }
-    Some(url)
+/// The page-protocol URL of the page at `page`, opened as the open `token`:
+/// `http://lxpage.localhost/o/<token>/<file name>`, the file name percent-encoded. The page's
+/// relative links resolve under `/o/<token>/`, which names the page's folder (`page_path`), so a
+/// page reaches its own folder and the folders below it, and nothing else. `None` for a file name
+/// `page_path` would refuse (see `page_segment`), so `page_path` always gives the page back.
+pub fn page_url(token: &str, page: &Path) -> Option<String> {
+    let name = page_name(page)?;
+    Some(format!(
+        "{PAGE_ORIGIN}/o/{token}/{}",
+        utf8_percent_encode(name, UNRESERVED)
+    ))
 }
 
-/// The local path a page-protocol URL path (`/d/x/a/b%20c.html`, its query and fragment ignored)
-/// names: `X:\a\b c.html` or `\\host\share\…`. Each segment is percent-decoded once and then
-/// checked, so an encoded `..%2F` or `%3A%5C` is refused rather than climbing or switching drive:
-/// `None` for an empty segment, `.` or `..`, a segment holding a separator, `:`, NUL, a control
-/// character or one of `<>"|?*`, one that isn't UTF-8, and a missing drive, host or share.
-pub fn page_path(url_path: &str) -> Option<String> {
+/// The file name of the page at `page` (either separator), as an open's URL names it
+/// (`page_url`); `None` for one `page_path` would refuse (see `page_segment`).
+pub fn page_name(page: &Path) -> Option<&str> {
+    let name = page.to_str()?.rsplit(['\\', '/']).next()?;
+    page_segment(name).then_some(name)
+}
+
+/// The open a page-protocol URL path names, and the rest of the path below it, still encoded:
+/// `/o/<token>/<rest>`, its query and fragment dropped. `None` for any other path, and for an empty
+/// token or rest.
+pub fn page_token(url_path: &str) -> Option<(&str, &str)> {
     let end = url_path.find(['?', '#']).unwrap_or(url_path.len());
-    let path = &url_path[..end];
-    let mut segments = path.strip_prefix('/').unwrap_or(path).split('/');
-    let mut out = match segments.next()? {
-        "d" => {
-            let drive = segments.next()?;
-            match drive.as_bytes() {
-                [letter] if letter.is_ascii_alphabetic() => {
-                    format!("{}:", char::from(letter.to_ascii_uppercase()))
-                }
-                _ => return None,
-            }
+    let (token, rest) = url_path[..end].strip_prefix("/o/")?.split_once('/')?;
+    (!token.is_empty() && !rest.is_empty()).then_some((token, rest))
+}
+
+/// The local path the URL path `rest`, below an open's `/o/<token>/` (`page_token`), names in the
+/// open's folder `folder`: `folder\a\b c.html` for `a/b%20c.html`. Each segment is percent-decoded
+/// once and then checked (`page_segment`), so an encoded `..%2F` or `%3A%5C` is refused rather than
+/// climbing or switching drive. `None` for an empty segment and for one that isn't UTF-8 once
+/// decoded.
+pub fn page_path(folder: &str, rest: &str) -> Option<String> {
+    let mut out = folder.trim_end_matches(['\\', '/']).to_owned();
+    for segment in rest.split('/') {
+        let decoded = percent_decode_str(segment).decode_utf8().ok()?;
+        if !page_segment(&decoded) {
+            return None;
         }
-        "u" => {
-            let host = page_decode(segments.next()?)?;
-            let share = page_decode(segments.next()?)?;
-            format!(r"\\{host}\{share}")
-        }
-        _ => return None,
-    };
-    let mut named = false;
-    for segment in segments {
         out.push('\\');
-        out.push_str(&page_decode(segment)?);
-        named = true;
-    }
-    // A drive's root keeps its separator: `X:\`.
-    if !named && out.ends_with(':') {
-        out.push('\\');
+        out.push_str(&decoded);
     }
     Some(out)
 }
 
-/// One URL path segment, percent-decoded once, if it names a file or folder (`page_segment`).
-fn page_decode(encoded: &str) -> Option<String> {
-    let decoded = percent_decode_str(encoded).decode_utf8().ok()?;
-    page_segment(&decoded).then(|| decoded.into_owned())
-}
-
-/// Whether a decoded segment names one file or folder: not empty, `.` or `..`, and without a
-/// separator, `:`, a control character (NUL among them) or one of `<>"|?*`.
+/// Whether a decoded segment names one file or folder as written: not empty, `.` or `..`; without
+/// a separator, `:`, a control character (NUL among them) or one of `<>"|?*`; not ending in `.` or
+/// a space, which Windows drops (`.. ` is `..` to it); and not a device's name.
 fn page_segment(segment: &str) -> bool {
     !matches!(segment, "" | "." | "..")
+        && !segment.ends_with(['.', ' '])
+        && !is_device_name(segment)
         && !segment.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
         })
+}
+
+/// Whether a file name (extensions and all) names a DOS device (`CON`, `NUL`, `COM1`, …), which
+/// Windows opens instead of a file of that name.
+pub fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.chars().count() == 4
+        && upper
+            .chars()
+            .nth(3)
+            .is_some_and(|c| c.is_ascii_digit() || matches!(c, '¹' | '²' | '³')))
 }

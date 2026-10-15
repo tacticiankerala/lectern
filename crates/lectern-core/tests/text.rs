@@ -1,4 +1,4 @@
-use lectern_core::text::{decode, decode_utf16, DecodeError, Decoded};
+use lectern_core::text::{decode, decode_lossy, decode_utf16, DecodeError, Decoded};
 
 #[test]
 fn binary_detected() {
@@ -91,4 +91,30 @@ fn broken_utf16_is_replaced_and_flagged() {
         })
     );
     assert_eq!(decode_utf16(b"# plain UTF-8"), None);
+}
+
+/// An HTML page's source is read whatever it holds, as the browser reads it: a NUL in its head
+/// is a character like any other, and UTF-16 is still UTF-16.
+#[test]
+fn a_source_read_lossily_is_never_binary() {
+    let page = b"\xEF\xBB\xBF<head><title>A\0B</title></head><p>Caf\xC3\xA9 \xFF</p>";
+    assert_eq!(decode(page), Err(DecodeError::Binary));
+    assert_eq!(
+        decode_lossy(page),
+        Decoded {
+            text: "<head><title>A\0B</title></head><p>Café \u{fffd}</p>".to_owned(),
+            lossy: true,
+        }
+    );
+    assert_eq!(
+        decode_lossy(b"<p>plain</p>"),
+        Decoded {
+            text: "<p>plain</p>".to_owned(),
+            lossy: false,
+        }
+    );
+    assert_eq!(
+        decode_lossy(&utf16("<p>Café</p>", true)).text,
+        "<p>Café</p>"
+    );
 }

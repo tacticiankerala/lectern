@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use lectern_core::library::{doc_kind, DocKind};
@@ -16,8 +16,10 @@ use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::{page_text_len, NoteText, PageBlock, MAX_PAGE_TEXT};
 use lectern_core::review::view::{build_payload, PayloadInput, ReviewPayload};
 use lectern_core::review::{is_sidecar_name, iso_utc, sidecar_path, store, Review};
+use lectern_core::text::decode_lossy;
 
-use super::doc::{read_text, render_text};
+use super::doc::{open_error, read_text, render_text};
+use super::pages::{self, MAX_BYTES as MAX_PAGE_BYTES};
 use super::sync::{lock, read};
 use super::{trust, WindowState};
 
@@ -28,6 +30,7 @@ const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
 const NO_PAGE_TEXT: &str =
     "The page hasn't reported its text yet, so its comments can't be placed.";
 const PAGE_TOO_LONG: &str = "The page's text is over 2 MB, too much for comments.";
+const PAGE_TOO_LARGE: &str = "The page is too large for comments (over 20 MB).";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -64,14 +67,25 @@ impl Target {
     }
 
     /// Reads the note, and its text as the review anchors read it, with its fingerprint: an HTML
-    /// page's from the blocks its bridge reported (`page`, see `NoteText::of_page`), any other's
-    /// by its kind (`NoteText::of_note`).
+    /// page's from the blocks its bridge reported (`page`, see `NoteText::of_page`), its source
+    /// read for the lines (`read_page_source`); any other's by its kind (`NoteText::of_note`).
     fn read(&self, page: Option<&[PageBlock]>) -> Result<NoteText, String> {
+        if let Some(blocks) = page {
+            return Ok(NoteText::of_page(blocks, &read_page_source(&self.note)?));
+        }
         let source = read_text(&self.note).map_err(|e| e.message)?.text;
-        Ok(match page {
-            Some(blocks) => NoteText::of_page(blocks, &source),
-            None => NoteText::of_note(&self.note_name, &source),
-        })
+        NoteText::of_note(&self.note_name, &source).ok_or_else(|| NO_PAGE_TEXT.to_owned())
+    }
+}
+
+/// The source of the HTML page at `path`, read as the browser reads the page: whatever it holds
+/// (a NUL is a character, not a sign of a binary file), invalid bytes replaced, up to the page
+/// protocol's 20 MiB, past which it isn't read.
+fn read_page_source(path: &Path) -> Result<String, String> {
+    match pages::read(path, MAX_PAGE_BYTES) {
+        Ok(bytes) => Ok(decode_lossy(&bytes).text),
+        Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(PAGE_TOO_LARGE.to_owned()),
+        Err(e) => Err(open_error(path, &e).message),
     }
 }
 
@@ -703,6 +717,41 @@ mod tests {
             .review_op(&note_path, add("Why 50?"), Some(report_page()))
             .unwrap();
         assert_eq!(payload.comments[0].heading_path, ["Tide sync", "Batching"]);
+    }
+
+    /// A page's source is read for its lines whatever it holds, as the browser reads the page: a
+    /// NUL in its head is a character, not a sign of a binary file, so its comments load and take
+    /// new ones. A source grown past 20 MiB since the page opened is refused, unread.
+    #[test]
+    fn a_pages_source_is_read_lossily_up_to_20_mib() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let source = REPORT.replace(
+            "<title>Weekly report</title>",
+            "<title>Weekly\0report \u{fffd}</title>",
+        );
+        let page = f.dir.file("artifacts/report.html", &source);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let saved = f
+            .state
+            .review_op(
+                &path,
+                add_on_page("conversion dipped in week 3", "", "weekly, not daily"),
+                Some(report_page()),
+            )
+            .unwrap();
+        assert_eq!(saved.comments[0].start_line, 12);
+        let loaded = f.state.load_review(&path, Some(report_page())).unwrap();
+        assert_eq!(loaded.comments[0].state, AnchorState::Anchored);
+        fs::File::options()
+            .write(true)
+            .open(&page)
+            .and_then(|file| file.set_len(20 * 1024 * 1024 + 1))
+            .unwrap();
+        assert_eq!(
+            f.state.load_review(&path, Some(report_page())).unwrap_err(),
+            PAGE_TOO_LARGE
+        );
     }
 
     /// A file beside a page named as its sidecar, without a sidecar's frontmatter, isn't one

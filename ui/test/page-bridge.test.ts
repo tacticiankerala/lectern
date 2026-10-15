@@ -36,17 +36,30 @@ interface Page {
   /** Waits for the bridge's next message of `type`. */
   next(type: string): Promise<Message>;
   dark: { matches: boolean; listeners: (() => void)[] };
+  /** Ends the page's parsing (`loading`): the browser's own DOMContentLoaded and load follow. */
+  finish(): void;
 }
 
 const frames: HTMLIFrameElement[] = [];
 const listeners: ((e: MessageEvent) => void)[] = [];
+/** The open's key, as Lectern serves it into the bridge's slot for it. */
+const KEY = "k-test";
 
 afterEach(() => {
   for (const frame of frames.splice(0)) frame.remove();
   for (const listener of listeners.splice(0)) window.removeEventListener("message", listener);
 });
 
-function page(html: string): Page {
+/**
+ * `html` in a frame with the bridge running, after `before` has set the frame up. With `loading`,
+ * the bridge runs while the page is still being parsed, as Lectern serves it, and the page's
+ * DOMContentLoaded and load come once `finish` is called.
+ */
+function page(
+  html: string,
+  before?: (win: FrameWindow, doc: Document) => void,
+  loading = false,
+): Page {
   const frame = document.createElement("iframe");
   document.body.append(frame);
   frames.push(frame);
@@ -55,7 +68,12 @@ function page(html: string): Page {
   doc.open();
   // eslint-disable-next-line @typescript-eslint/no-deprecated -- a whole page, doctype and all
   doc.write(html);
-  doc.close();
+  if (loading) {
+    // jsdom has it complete already; the browser has it loading until the page is parsed.
+    Object.defineProperty(doc, "readyState", { value: "loading", configurable: true });
+  } else {
+    doc.close();
+  }
   win.CSS = { highlights: new Map() };
   win.Highlight = FakeHighlight;
   const dark = { matches: false, listeners: [] as (() => void)[] };
@@ -78,7 +96,8 @@ function page(html: string): Page {
   };
   window.addEventListener("message", listener);
   listeners.push(listener);
-  win.eval(bridge);
+  before?.(win, doc);
+  win.eval(bridge.replace('"LECTERN_BRIDGE_KEY"', JSON.stringify(KEY)));
   return {
     win,
     doc,
@@ -93,6 +112,10 @@ function page(html: string): Page {
       return new Promise((resolve) => {
         waiting.push({ type, resolve });
       });
+    },
+    finish() {
+      Reflect.deleteProperty(doc, "readyState");
+      doc.close();
     },
   };
 }
@@ -125,10 +148,10 @@ const REPORT = `<!doctype html>
 </body></html>`;
 
 describe("the page bridge", () => {
-  it("reports the page once it has loaded: title, headings, blocks, scroll and scheme", async () => {
+  it("reports the page once it has loaded: headings, blocks, scroll and scheme", async () => {
     const p = page(REPORT);
     const ready = await p.next("ready");
-    expect(ready.title).toBe("Weekly report");
+    expect(ready).not.toHaveProperty("title");
     expect(ready.blocks).toEqual([
       { text: "Weekly report", headingLevel: 1 },
       { text: "An invented report, week by week." },
@@ -154,6 +177,100 @@ describe("the page bridge", () => {
     expect(ready.dark).toBe(false);
   });
 
+  it("signs every message with its open's key, which no page script sees", async () => {
+    const stolen: unknown[] = [];
+    const script = { removed: false };
+    const p = page("<body><h1>Report</h1><p>Text.</p></body>", (win, doc) => {
+      // The bridge's own element, which it takes out of the page before any page script runs.
+      const element = doc.createElement("script");
+      doc.head.append(element);
+      element.remove = () => {
+        script.removed = true;
+        Element.prototype.remove.call(element);
+      };
+      Object.defineProperty(doc, "currentScript", { value: element, configurable: true });
+      // A page that would catch the key as it is set on a message.
+      const ObjectOf = (win as unknown as { Object: typeof Object }).Object;
+      ObjectOf.defineProperty(ObjectOf.prototype, "key", {
+        set(value: unknown) {
+          stolen.push(value);
+        },
+        configurable: true,
+      });
+    });
+    const ready = await p.next("ready");
+    expect(ready.key).toBe(KEY);
+    expect(script.removed).toBe(true);
+    expect(p.doc.querySelector("script")).toBeNull();
+    p.doc.dispatchEvent(new Event("scroll"));
+    p.win.dispatchEvent(new Event("scroll"));
+    await p.next("scroll");
+    expect(p.messages.every((m) => m.key === KEY)).toBe(true);
+    expect(stolen).toEqual([]);
+  });
+
+  it("says it is ready without an animation frame, as in a window in the background", async () => {
+    const p = page("<body><p>Text.</p></body>", (win) => {
+      win.requestAnimationFrame = () => 0;
+    });
+    const ready = await p.next("ready");
+    expect(ready.blocks).toEqual([{ text: "Text." }]);
+    // Loaded already, it said so too, as it started.
+    expect(p.messages.filter((m) => m.type === "loaded")).toEqual([
+      { lx: 1, key: KEY, type: "loaded" },
+    ]);
+  });
+
+  it("says its page has loaded, signed, once its window's load comes, whatever the page does", async () => {
+    const p = page("<body><p>Text.</p></body>", undefined, true);
+    // A page script, after the bridge as every page script is, that stops the load event going
+    // any further, as soon as it can.
+    p.win.addEventListener(
+      "load",
+      (e) => {
+        e.stopImmediatePropagation();
+      },
+      true,
+    );
+    const ready = p.next("ready");
+    const loaded = p.next("loaded");
+    p.finish();
+    await ready;
+    expect(await loaded).toEqual({ lx: 1, key: KEY, type: "loaded" });
+  });
+
+  it("answers the browser's own DOMContentLoaded and load once, never ones a page fakes", async () => {
+    const p = page("<body><p>Text.</p></body>", undefined, true);
+    const ready = p.next("ready");
+    const loaded = p.next("loaded");
+    p.finish();
+    await ready;
+    await loaded;
+    // A page faking them again, to have the bridge say so again, then leave.
+    const EventOf = (p.win as unknown as { Event: typeof Event }).Event;
+    p.doc.dispatchEvent(new EventOf("DOMContentLoaded"));
+    p.win.dispatchEvent(new EventOf("load"));
+    await new Promise((r) => setTimeout(r, 250));
+    expect(p.messages.filter((m) => m.type === "ready")).toHaveLength(1);
+    expect(p.messages.filter((m) => m.type === "loaded")).toHaveLength(1);
+    // Its text changing still goes out, as blocks.
+    const blocks = p.next("blocks");
+    p.doc.body.append(p.doc.createTextNode(" More."));
+    expect(textOf((await blocks).blocks)).toBe("Text. More.");
+  });
+
+  it("takes no faked DOMContentLoaded or load for the browser's own", async () => {
+    const p = page("<body><p>Text.</p></body>", undefined, true);
+    const EventOf = (p.win as unknown as { Event: typeof Event }).Event;
+    p.doc.dispatchEvent(new EventOf("DOMContentLoaded"));
+    p.win.dispatchEvent(new EventOf("load"));
+    await new Promise((r) => setTimeout(r, 250));
+    expect(p.messages.filter((m) => m.type === "ready" || m.type === "loaded")).toEqual([]);
+    const ready = p.next("ready");
+    p.finish();
+    await ready;
+  });
+
   it("lists a long heading cut short, and one with an overlong id without it", async () => {
     const long = "Quarterly ".repeat(60);
     const id = "x".repeat(300);
@@ -161,7 +278,6 @@ describe("the page bridge", () => {
       `<head><title>${"T".repeat(3000)}</title></head><body><h1 id="${id}">${long}</h1></body>`,
     );
     const ready = await p.next("ready");
-    expect((ready.title as string).length).toBe(1000);
     const [heading] = ready.headings as { text: string; id: string }[];
     expect(heading?.text).toBe(long.trim().slice(0, 300));
     expect(heading?.id).toBe("");
@@ -193,17 +309,26 @@ describe("the page bridge", () => {
     expect(textOf(ready.blocks).length).toBeLessThanOrEqual(2 * 1024 * 1024);
   });
 
-  it("hands a clicked link to Lectern instead of following it; in-page anchors stay the page's", async () => {
-    const p = page(`<body>
+  it("hands a clicked link to Lectern as the browser resolves it; in-page anchors stay the page's", async () => {
+    const p = page(`<head><base href="http://lxpage.localhost/o/tok1/docs/"></head><body>
       <a id="rel" href="other.html#part">Other</a>
+      <a id="up" href="../report.html">Up</a>
       <a id="web" href="https://example.com/x"><span>Web</span></a>
       <a id="anchor" href="#results">Results</a>
       <a id="script" href="javascript:void 0">Script</a>
       <a id="own" href="mine.html">Own</a>
+      <a id="kept" href="kept.html">Kept</a>
+      <a id="bare">No href</a>
+      <svg><a id="chart" xlink:href="chart.html"><text>Chart</text></a></svg>
       <h2 id="results">Results</h2></body>`);
     await p.next("ready");
+    // The page's own handlers come after the bridge's: one that takes the click, or stops it
+    // going any further, hides nothing from Lectern.
     p.doc.getElementById("own")?.addEventListener("click", (e) => {
       e.preventDefault();
+    });
+    p.doc.getElementById("kept")?.addEventListener("click", (e) => {
+      e.stopPropagation();
     });
     const click = (id: string, child?: string): boolean => {
       const target = child ? p.doc.querySelector(`#${id} ${child}`) : p.doc.getElementById(id);
@@ -215,15 +340,104 @@ describe("the page bridge", () => {
       return event.defaultPrevented;
     };
     expect(click("rel")).toBe(true);
+    expect(click("up")).toBe(true);
     expect(click("web", "span")).toBe(true);
     expect(click("anchor")).toBe(false);
     expect(click("script")).toBe(false);
     expect(click("own")).toBe(true);
+    expect(click("kept")).toBe(true);
+    expect(click("bare")).toBe(false);
+    expect(click("chart", "text")).toBe(true);
     await new Promise((r) => setTimeout(r, 20));
     expect(p.messages.filter((m) => m.type === "link").map((m) => m.href)).toEqual([
-      "other.html#part",
+      "http://lxpage.localhost/o/tok1/docs/other.html#part",
+      "http://lxpage.localhost/o/tok1/report.html",
       "https://example.com/x",
+      "http://lxpage.localhost/o/tok1/docs/mine.html",
+      "http://lxpage.localhost/o/tok1/docs/kept.html",
+      "http://lxpage.localhost/o/tok1/docs/chart.html",
     ]);
+  });
+
+  it("holds the selection while a pointer drags it, and reports it once the pointer is up", async () => {
+    const p = page("<body><p>Conversion dipped in week 3.</p></body>");
+    await p.next("ready");
+    const para = p.doc.querySelector("p");
+    if (!para?.firstChild) throw new Error("no paragraph");
+    const Pointer = (p.win as unknown as { Event: typeof Event }).Event;
+    const pointer = (type: string): void => {
+      p.win.dispatchEvent(new Pointer(type, { bubbles: true }));
+    };
+    pointer("pointerdown");
+    const range = p.doc.createRange();
+    for (const end of [4, 10, 17]) {
+      range.setStart(para.firstChild, 0);
+      range.setEnd(para.firstChild, end);
+      p.win.getSelection()?.removeAllRanges();
+      p.win.getSelection()?.addRange(range);
+      p.doc.dispatchEvent(new Event("selectionchange"));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+    expect(p.messages.filter((m) => m.type === "selection")).toEqual([]);
+    const selected = p.next("selection");
+    pointer("pointerup");
+    expect(((await selected).selection as Record<string, unknown>).quote).toBe("Conversion dipped");
+    await new Promise((r) => setTimeout(r, 250));
+    expect(p.messages.filter((m) => m.type === "selection")).toHaveLength(1);
+  });
+
+  it("lets a held selection go when the window loses the focus, or after 3 seconds", async () => {
+    const p = page("<body><p>Conversion dipped in week 3.</p></body>");
+    await p.next("ready");
+    const para = p.doc.querySelector("p");
+    if (!para?.firstChild) throw new Error("no paragraph");
+    const Pointer = (p.win as unknown as { Event: typeof Event }).Event;
+    const select = (end: number): void => {
+      const range = p.doc.createRange();
+      range.setStart(para.firstChild as Node, 0);
+      range.setEnd(para.firstChild as Node, end);
+      p.win.getSelection()?.removeAllRanges();
+      p.win.getSelection()?.addRange(range);
+      p.doc.dispatchEvent(new Event("selectionchange"));
+    };
+    p.win.dispatchEvent(new Pointer("pointerdown", { bubbles: true }));
+    select(10);
+    const blurred = p.next("selection");
+    p.win.dispatchEvent(new Pointer("blur"));
+    expect(((await blurred).selection as Record<string, unknown>).quote).toBe("Conversion");
+    // A pointer that never comes up: let go after 3 seconds.
+    p.win.dispatchEvent(new Pointer("pointerdown", { bubbles: true }));
+    select(17);
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(p.messages.filter((m) => m.type === "selection")).toHaveLength(1);
+    const late = p.next("selection");
+    expect(((await late).selection as Record<string, unknown>).quote).toBe("Conversion dipped");
+  }, 10_000);
+
+  it("makes up a heading's id by its place among those without, so a rebuild changes nothing", async () => {
+    const markup = "<h2>Alpha</h2><p>One.</p><h2 id='beta'>Beta</h2><h2>Gamma</h2>";
+    const p = page(`<body><main id="app">${markup}</main><p id="lx-heading-2">Taken</p></body>`);
+    const ready = await p.next("ready");
+    const ids = (headings: unknown) => (headings as { id: string }[]).map((h) => h.id);
+    // The page's own `lx-heading-2` is skipped.
+    expect(ids(ready.headings)).toEqual(["lx-heading-1", "beta", "lx-heading-3"]);
+    // The page renders its headings again, as new elements without ids.
+    const app = p.doc.getElementById("app");
+    if (app) app.innerHTML = markup;
+    await new Promise((r) => setTimeout(r, 700));
+    expect(p.messages.filter((m) => m.type === "blocks")).toEqual([]);
+    expect([...p.doc.querySelectorAll("#app h2")].map((h) => h.id)).toEqual([
+      "lx-heading-1",
+      "beta",
+      "lx-heading-3",
+    ]);
+    // An id the page gives a heading later is its own, kept.
+    const first = p.doc.querySelector("#app h2");
+    if (first) first.id = "alpha";
+    const blocks = p.next("blocks");
+    first?.append(" again");
+    expect(ids((await blocks).headings)).toEqual(["alpha", "beta", "lx-heading-1"]);
+    expect(first?.id).toBe("alpha");
   });
 
   it("reports the selection as a quote with its offsets into the text, and its clearing", async () => {
@@ -318,7 +532,7 @@ describe("the page bridge", () => {
     });
     await click(para, 25);
     expect(clicks()).toEqual([
-      { lx: 1, type: "comment-click", offset: text.indexOf("sion dipped") },
+      { lx: 1, key: KEY, type: "comment-click", offset: text.indexOf("sion dipped") },
     ]);
     // Its last character, from its right half.
     await click(para, 36);
@@ -419,6 +633,9 @@ describe("the page bridge", () => {
     p.send({ lx: 1, type: "scroll-to", fraction: 0.25 });
     expect(top).toBe(500);
     // The text at an offset goes to the top, or, to reveal it, to the middle when out of sight.
+    // jsdom has no `scrollIntoView`, and lays nothing out: the block stays where it is.
+    const ElementOf = (p.win as unknown as { Element: typeof Element }).Element;
+    ElementOf.prototype.scrollIntoView = () => undefined;
     const RangeOf = (p.win as unknown as { Range: typeof Range }).Range;
     let at = { top: 600, bottom: 620, height: 20 };
     // jsdom lays nothing out.
@@ -522,6 +739,48 @@ describe("the page bridge", () => {
     expect(p.win.CSS.highlights.get("lx-find")?.ranges).toHaveLength(3000);
     expect(p.win.CSS.highlights.get("lx-find")?.ranges[2999]?.toString()).toBe("word");
     expect(reads).toBeLessThan(10);
+  });
+
+  it("reveals a match inside a scrolling box by scrolling every box around it", async () => {
+    const p = page(`<body><p>Top</p>
+      <div id="box" style="overflow-y: auto"><p>Filler</p><p id="deep">Deep match</p></div></body>`);
+    const ready = await p.next("ready");
+    const text = textOf(ready.blocks);
+    const scroller = p.doc.scrollingElement ?? p.doc.documentElement;
+    const before = scroller.scrollTop;
+    const box = p.doc.getElementById("box");
+    if (!box) throw new Error("no box");
+    const rect = (top: number, bottom: number) =>
+      ({
+        top,
+        bottom,
+        left: 0,
+        right: 100,
+        width: 100,
+        height: bottom - top,
+        x: 0,
+        y: top,
+      }) as DOMRect;
+    // The box shows 100 to 400 of the window; the match is in the window, but scrolled out of
+    // the box, below it.
+    box.getBoundingClientRect = () => rect(100, 400);
+    let at = rect(500, 520);
+    const RangeOf = (p.win as unknown as { Range: typeof Range }).Range;
+    RangeOf.prototype.getBoundingClientRect = () => at;
+    const scrolled: [Element, unknown][] = [];
+    const ElementOf = (p.win as unknown as { Element: typeof Element }).Element;
+    ElementOf.prototype.scrollIntoView = function (this: Element, options?: unknown) {
+      scrolled.push([this, options]);
+      at = rect(240, 260);
+    };
+    p.send({ lx: 1, type: "scroll-to", offset: text.indexOf("Deep match"), reveal: true });
+    expect(scrolled).toEqual([
+      [p.doc.getElementById("deep"), { block: "center", inline: "nearest" }],
+    ]);
+    expect(scroller.scrollTop).toBe(before);
+    // In sight in the box and the window: left where it is.
+    p.send({ lx: 1, type: "scroll-to", offset: text.indexOf("Deep match"), reveal: true });
+    expect(scrolled).toHaveLength(1);
   });
 
   it("opens the closed <details> around a match it reveals, not one whose summary holds it", async () => {

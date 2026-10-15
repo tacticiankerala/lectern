@@ -1,30 +1,42 @@
-//! Lectern's page protocol, `lxpage` (`http://lxpage.localhost/d/<drive>/…` and
-//! `/u/<host>/<share>/…`, from `pathmap::page_url`), which serves HTML pages and PDFs into a frame,
-//! and the files a page loads beside it. Its URLs are hierarchical, so a page's relative links
-//! resolve as they would on disk.
+//! Lectern's page protocol, `lxpage` (`http://lxpage.localhost/o/<token>/…`, from
+//! `pathmap::page_url`), which serves HTML pages and PDFs into a frame, and the files a page loads
+//! beside it. Every page or PDF open mints a token bound to its window, its page and the page's
+//! folder (`PageOpens`): a page's relative URLs resolve under `/o/<token>/`, so it reaches its own
+//! folder and the folders below it, and nothing else, no library root and no other note's folder.
 //!
-//! The request path is decoded one segment at a time (`pathmap::page_path`), then put through the
-//! image protocol's checks (`assets::admit`): absolute and local, on a trusted host, normalised, a
-//! type served here, and inside a library root or the folder of a document opened this session.
-//! Nothing touches the file system before the file is read.
+//! A request is decided from strings, in this order, before anything touches the file system: the
+//! token's open (an unknown token, or a URL of any other form, is 404); the path below it, decoded
+//! a segment at a time under the open's folder (`pathmap::page_path`); a trusted host; normalised;
+//! a type served here; inside the open's folder. Only then is the file read.
+//!
+//! The file is then read by its real path, links and junctions resolved, which must still be in the
+//! real path of the open's folder: a junction in the folder reaches nothing outside it.
 //!
 //! Every response but a PDF's carries a sandboxing CSP of its own, so a page or an SVG that ends up
 //! in an unsandboxed frame (a link in a PDF can navigate the PDF's frame) is sandboxed all the same.
-//! None sends `Access-Control-Allow-Origin`, so a page can't read the files beside it.
+//! Within a valid open, a module script or a font the page loads (`Sec-Fetch-Dest: script` or
+//! `font`) carries `Access-Control-Allow-Origin: null`, as the sandboxed page needs to load them.
+//! Nothing else does, a page's own `fetch` included, so a page saved among other files can't read
+//! them and send them out; a request that doesn't say what it is for gets none either.
 //!
-//! An HTML page is served with Lectern's bridge inserted at its top, its script carrying a nonce
-//! fresh for each response, under the policy its *HTML pages* setting gives (`lectern_core::page`).
-//! The browser's reports on what the page loaded come back to `REPORT_PATH`, which takes them
-//! without a scope check: they name hosts, never files.
+//! An open's own HTML page is served with Lectern's bridge inserted at its top, carrying the open's
+//! key, its script a nonce fresh for each response, under the policy its *HTML pages* setting gives
+//! (`lectern_core::page`). Any other page served through the open (one the frame navigated to, or
+//! fetched) gets no bridge and no key, and reports nowhere. Reports come back to `REPORT_PATH`,
+//! which takes them without a scope check: they name hosts, never files.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::HtmlPages;
-use lectern_core::library::pathmap::page_path;
-use lectern_core::page::{fresh_token, page_policy, prepare_page, report_host};
+use lectern_core::library::path_key;
+use lectern_core::library::pathmap::{page_path, page_token};
+use lectern_core::page::{
+    fresh_token, page_policy, prepare_page, reported_load, PageScope, ReportedLoad,
+};
 
-use super::assets::{self, AssetScope, Refusal};
+use super::assets::{self, key_within, Refusal};
 use super::trust::Trust;
 
 /// The largest file served, but for a PDF. An HTML page over it doesn't open (`doc::check_size`).
@@ -109,11 +121,14 @@ pub struct PageFile {
     pub kind: PageType,
 }
 
-/// Decides whether the file `url_path` names (the URL path, still percent-encoded) may be served,
-/// without touching the file system.
-pub fn decide(url_path: &str, trust: &Trust, scope: &AssetScope) -> Result<PageFile, Refusal> {
-    let raw = page_path(url_path).ok_or(Refusal::NotLocal)?;
-    let (path, kind) = assets::admit(&raw, trust, scope, page_type)?;
+/// Decides whether the file `rest` names (the URL path below the open's `/o/<token>/`, still
+/// percent-encoded) may be served for the open `scope`, without touching the file system.
+pub fn decide(scope: &PageScope, rest: &str, trust: &Trust) -> Result<PageFile, Refusal> {
+    let raw = page_path(&scope.folder, rest).ok_or(Refusal::NotLocal)?;
+    let folder = path_key(Path::new(&scope.folder));
+    let (path, kind) = assets::admit(&raw, trust, page_type, |path| {
+        key_within(&path_key(Path::new(path)), &folder)
+    })?;
     Ok(PageFile {
         path: PathBuf::from(path),
         kind,
@@ -128,6 +143,9 @@ pub struct PageRequest<'a> {
     pub path: &'a str,
     pub query: Option<&'a str>,
     pub content_type: Option<&'a str>,
+    /// What the browser says it asks for (`Sec-Fetch-Dest`): `script`, `font`, `empty` (a
+    /// script's `fetch`) and so on.
+    pub fetch_dest: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -142,15 +160,20 @@ pub struct PageResponse {
     /// The `Content-Security-Policy-Report-Only`: an HTML page's under `full`, while a window
     /// waits for its reports.
     pub report_only: Option<String>,
+    /// A module script or a font answered within a valid open: `Access-Control-Allow-Origin:
+    /// null`, so the sandboxed page, whose origin is opaque, may load it.
+    pub shared: bool,
     pub body: Vec<u8>,
 }
 
 /// How an HTML page is served: under the *HTML pages* setting, its reports going to the open
-/// `report` names (a token a window minted), when there is one.
+/// `report` names (a token a window minted), when there is one, and with the bridge carrying `key`
+/// when it is the open's own page; without one, it has no bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageOptions {
     pub mode: HtmlPages,
     pub report: Option<String>,
+    pub key: Option<String>,
 }
 
 impl PageResponse {
@@ -159,23 +182,19 @@ impl PageResponse {
         match kind.served {
             Served::Page => page(kind, &body, &options()),
             Served::Pdf => Self {
-                status: 200,
                 content_type: Some(kind.content_type.to_owned()),
                 policy: None,
-                report_only: None,
-                body,
+                ..Self::ok(body)
             },
             Served::Resource => Self {
-                status: 200,
                 content_type: Some(kind.content_type.to_owned()),
-                policy: Some(SANDBOXED.to_owned()),
-                report_only: None,
-                body,
+                ..Self::ok(body)
             },
         }
     }
 
-    /// As an HTTP response: sniff-proof, never cached, and never readable from another origin.
+    /// As an HTTP response: sniff-proof, never cached, and readable from the page's opaque origin
+    /// only when shared.
     pub fn into_http(self) -> tauri::http::Response<Vec<u8>> {
         let mut response = tauri::http::Response::builder()
             .status(self.status)
@@ -189,6 +208,9 @@ impl PageResponse {
         }
         if let Some(policy) = self.report_only {
             response = response.header("Content-Security-Policy-Report-Only", policy);
+        }
+        if self.shared {
+            response = response.header("Access-Control-Allow-Origin", "null");
         }
         response.body(self.body).unwrap_or_else(|_| {
             tauri::http::Response::builder()
@@ -204,45 +226,65 @@ impl PageResponse {
         Self::empty(403)
     }
 
-    fn empty(status: u16) -> Self {
+    /// `body`, sandboxed and not shared, to be typed.
+    fn ok(body: Vec<u8>) -> Self {
         Self {
-            status,
+            status: 200,
             content_type: None,
             policy: Some(SANDBOXED.to_owned()),
             report_only: None,
-            body: Vec::new(),
+            shared: false,
+            body,
+        }
+    }
+
+    fn empty(status: u16) -> Self {
+        Self {
+            status,
+            ..Self::ok(Vec::new())
+        }
+    }
+
+    /// This, a module script or a font answered within a valid open.
+    fn shared(self) -> Self {
+        Self {
+            shared: true,
+            ..self
         }
     }
 }
 
-/// An HTML page, as served: as written, with the bridge inserted at its top under a nonce fresh
-/// for this response, sandboxed under `options`' policy (`lectern_core::page`). The charset the
-/// page declares is kept in the type, as the bridge, ahead of it, may push its declaration past
-/// where the browser looks; a UTF-16 page is served as UTF-8.
+/// An HTML page, as served: as written, with the bridge of its open's `key` (in `options`, for the
+/// open's own page) inserted at its top under a nonce fresh for this response, sandboxed under
+/// `options`' policy (`lectern_core::page`). The charset the page declares is kept in the type, as
+/// the bridge, ahead of it, may push its declaration past where the browser looks; a UTF-16 page
+/// is served as UTF-8.
 fn page(kind: PageType, body: &[u8], options: &PageOptions) -> PageResponse {
     let nonce = fresh_token();
     let policy = page_policy(options.mode, &nonce, options.report.as_deref());
-    let page = prepare_page(body, &nonce);
+    let page = prepare_page(
+        body,
+        options.key.as_deref().map(|key| (nonce.as_str(), key)),
+    );
     let content_type = match page.charset {
         Some(charset) => format!("{}; charset={charset}", kind.content_type),
         None => kind.content_type.to_owned(),
     };
     PageResponse {
-        status: 200,
         content_type: Some(content_type),
         policy: Some(policy.enforced),
         report_only: policy.report_only,
-        body: page.body,
+        ..PageResponse::ok(page.body)
     }
 }
 
-/// Takes a policy report: a `POST` of `application/csp-report`, at most 64 KiB, whose host (when
-/// it names one) goes to `accept`. 204 once taken, whatever it said; 405, 415 or 413 otherwise.
+/// Takes a policy report: a `POST` of `application/csp-report`, at most 64 KiB, whose load (when it
+/// names a host) goes to `accept`. 204 once taken, whatever it said; 405, 415 or 413 otherwise.
 pub fn report(
     method: &str,
     content_type: Option<&str>,
     body: &[u8],
-    accept: impl FnOnce(String),
+    accept: impl FnOnce(ReportedLoad),
 ) -> PageResponse {
     if method != "POST" {
         return PageResponse::empty(405);
@@ -258,23 +300,42 @@ pub fn report(
     if body.len() > MAX_REPORT_BYTES {
         return PageResponse::empty(413);
     }
-    if let Some(host) = report_host(body) {
-        accept(host);
+    if let Some(load) = reported_load(body) {
+        accept(load);
     }
     PageResponse::empty(204)
 }
 
-/// Answers a request for `url_path` (the URL path, still percent-encoded). `decide` judges it;
-/// `read` reads the file, up to the cap its type allows, once it has been allowed, and never
-/// before; `options` says how an HTML page read is served. 403 when refused, 404 for a type not
-/// served or a missing file, 413 over the cap.
+/// Answers a request for `url_path` (the URL path, still percent-encoded): `/o/<token>/<rest>`,
+/// asked for `dest` (`Sec-Fetch-Dest`). `scope` gives the token's open, else it is 404; `decide`
+/// judges `rest` within it; `read` reads the file for the open, up to the cap its type allows,
+/// once it has been allowed, and never before (`read_within`); `options` says how an HTML page
+/// read is served, given its open and its path. Within the open, 403 when refused, 404 for a type
+/// not served or a missing file, 413 over the cap; a module script's or a font's answer is shared.
 pub fn serve(
     url_path: &str,
-    decide: impl FnOnce(&str) -> Result<PageFile, Refusal>,
-    read: impl FnOnce(&Path, u64) -> io::Result<Vec<u8>>,
-    options: impl FnOnce() -> PageOptions,
+    dest: Option<&str>,
+    scope: impl FnOnce(&str) -> Option<PageScope>,
+    decide: impl FnOnce(&PageScope, &str) -> Result<PageFile, Refusal>,
+    read: impl FnOnce(&PageScope, &Path, u64) -> io::Result<Vec<u8>>,
+    options: impl FnOnce(&PageScope, &Path) -> PageOptions,
 ) -> PageResponse {
-    let file = match decide(url_path) {
+    let shared = |response: PageResponse| {
+        if matches!(dest, Some("script" | "font")) {
+            response.shared()
+        } else {
+            response
+        }
+    };
+    let Some((token, rest)) = page_token(url_path) else {
+        log::debug!("lxpage has nothing at {url_path}");
+        return PageResponse::empty(404);
+    };
+    let Some(open) = scope(token) else {
+        log::debug!("lxpage has no open {token}");
+        return PageResponse::empty(404);
+    };
+    let file = match decide(&open, rest) {
         Ok(file) => file,
         Err(refusal) => {
             log::debug!("lxpage refused {url_path}: {refusal:?}");
@@ -283,18 +344,19 @@ pub fn serve(
             } else {
                 403
             };
-            return PageResponse::empty(status);
+            return shared(PageResponse::empty(status));
         }
     };
-    match read(&file.path, file.kind.cap()) {
-        Ok(body) => PageResponse::file(file.kind, body, options),
+    let response = match read(&open, &file.path, file.kind.cap()) {
+        Ok(body) => PageResponse::file(file.kind, body, || options(&open, &file.path)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => PageResponse::empty(404),
         Err(e) if e.kind() == io::ErrorKind::FileTooLarge => PageResponse::empty(413),
         Err(e) => {
             log::debug!("lxpage couldn't serve {}: {e}", file.path.display());
             PageResponse::empty(403)
         }
-    }
+    };
+    shared(response)
 }
 
 /// Reads a file for the protocol, up to `cap` bytes.
@@ -302,11 +364,29 @@ pub fn read(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
     assets::read_at_most(path, cap)
 }
 
+/// Reads the file at `path` for an open whose folder's real path is `real_folder`, up to `cap`
+/// bytes: by its own real path, which must be inside that folder, or it is `PermissionDenied`.
+/// Links and junctions are resolved, so one in the folder reaches nothing outside it.
+pub fn read_within(real_folder: &Path, path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+    let real = fs::canonicalize(path)?;
+    if !real_within(&real, real_folder) {
+        log::debug!("lxpage refused {}: it is elsewhere", path.display());
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    read(&real, cap)
+}
+
+/// Whether the real path `real` is the real folder `folder` or inside it, compared as their
+/// verbatim forms come (`\\?\C:\…`, `\\?\UNC\…`), in any letter case.
+pub fn real_within(real: &Path, folder: &Path) -> bool {
+    key_within(&path_key(real), &path_key(folder))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::test_support::TempDir;
-    use lectern_core::page::BRIDGE;
+    use lectern_core::page::bridge_for;
 
     fn trust() -> Trust {
         Trust::new(
@@ -318,37 +398,73 @@ mod tests {
         )
     }
 
-    fn scope() -> AssetScope {
-        let mut scope = AssetScope::default();
-        scope.set_roots(&[r"S:\Notes\My Vault", r"\\nas\share\notes"]);
-        scope.add_folder(Path::new(r"C:\Users\me\Downloads\trip"));
-        scope
+    /// The open `t1`: the report in the vault's artifacts folder.
+    fn open() -> PageScope {
+        open_of(r"S:\Notes\My Vault\artifacts\report.html")
     }
 
-    fn check(url_path: &str) -> Result<PageFile, Refusal> {
-        decide(url_path, &trust(), &scope())
-    }
-
-    /// How a page is served by default: scripts and the web, its reports going to the open `t1`.
-    fn full() -> PageOptions {
-        PageOptions {
-            mode: HtmlPages::Full,
-            report: Some("t1".to_owned()),
+    /// An open `t1` of `page`, in the folder it is in.
+    fn open_of(page: &str) -> PageScope {
+        let (folder, _) = page.rsplit_once('\\').unwrap();
+        PageScope {
+            token: "t1".to_owned(),
+            page: page.to_owned(),
+            folder: if folder.ends_with(':') {
+                format!(r"{folder}\")
+            } else {
+                folder.to_owned()
+            },
+            key: "k1".to_owned(),
+            real_folder: None,
         }
     }
 
-    fn no_options() -> PageOptions {
+    /// The open `t1`, the only one there is.
+    fn opens(token: &str) -> Option<PageScope> {
+        (token == "t1").then(open)
+    }
+
+    fn check(rest: &str) -> Result<PageFile, Refusal> {
+        decide(&open(), rest, &trust())
+    }
+
+    fn checks(scope: &PageScope, rest: &str) -> Result<PageFile, Refusal> {
+        decide(scope, rest, &trust())
+    }
+
+    /// How a page is served by default: scripts and the web, as its open's own page, with its
+    /// bridge and its reports going to its open.
+    fn full(open: &PageScope, _: &Path) -> PageOptions {
+        PageOptions {
+            mode: HtmlPages::Full,
+            report: Some(open.token.clone()),
+            key: Some(open.key.clone()),
+        }
+    }
+
+    fn no_scope(_: &str) -> Option<PageScope> {
+        panic!("an open was looked for")
+    }
+
+    fn no_decision(_: &PageScope, _: &str) -> Result<PageFile, Refusal> {
+        panic!("a path was decided")
+    }
+
+    fn no_options(_: &PageScope, _: &Path) -> PageOptions {
         panic!("only a page asks how it is served")
     }
 
-    fn no_reads(_: &Path, _: u64) -> io::Result<Vec<u8>> {
+    fn no_reads(_: &PageScope, _: &Path, _: u64) -> io::Result<Vec<u8>> {
         panic!("the file system was touched")
     }
 
     /// `body`, whatever is asked for.
-    fn reads(body: &'static [u8]) -> impl FnOnce(&Path, u64) -> io::Result<Vec<u8>> {
-        move |_, _| Ok(body.to_vec())
+    fn reads(body: &'static [u8]) -> impl FnOnce(&PageScope, &Path, u64) -> io::Result<Vec<u8>> {
+        move |_, _, _| Ok(body.to_vec())
     }
+
+    /// What a module script asks for: the only kind of request, with a font's, a page may read.
+    const SCRIPT: Option<&str> = Some("script");
 
     fn header(response: &tauri::http::Response<Vec<u8>>, name: &str) -> Option<String> {
         response
@@ -358,9 +474,9 @@ mod tests {
     }
 
     #[test]
-    fn pages_pdfs_and_what_pages_load_are_decided_after_decoding() {
+    fn pages_pdfs_and_what_pages_load_are_decided_after_decoding_under_the_opens_folder() {
         assert_eq!(
-            check("/d/s/Notes/My%20Vault/artifacts/report.HTML"),
+            check("report.HTML"),
             Ok(PageFile {
                 path: PathBuf::from(r"S:\Notes\My Vault\artifacts\report.HTML"),
                 kind: PageType {
@@ -370,83 +486,117 @@ mod tests {
             })
         );
         assert_eq!(
-            check("/u/nas/share/notes/brief.pdf?v=2").map(|f| f.kind.served),
+            check("img/a%20b.svg").map(|f| f.path),
+            Ok(PathBuf::from(r"S:\Notes\My Vault\artifacts\img\a b.svg"))
+        );
+        assert_eq!(
+            check("C%23/100%25/Caf%C3%A9%20%E6%97%A5%E6%9C%AC.css").map(|f| f.path),
+            Ok(PathBuf::from(
+                r"S:\Notes\My Vault\artifacts\C#\100%\Café 日本.css"
+            ))
+        );
+        let pdf = open_of(r"\\nas\share\notes\brief.pdf");
+        assert_eq!(
+            checks(&pdf, "brief.pdf").map(|f| f.kind.served),
             Ok(Served::Pdf)
         );
+        // An open at a drive's root reaches the drive: its folder is all it has.
+        let root = open_of(r"C:\report.html");
         assert_eq!(
-            check("/d/c/Users/me/Downloads/trip/img/a%20b.svg").map(|f| f.path),
-            Ok(PathBuf::from(r"C:\Users\me\Downloads\trip\img\a b.svg"))
-        );
-        assert_eq!(
-            check("/d/s/Notes/My%20Vault/C%23/100%25/Caf%C3%A9%20%E6%97%A5%E6%9C%AC.css")
-                .map(|f| f.path),
-            Ok(PathBuf::from(r"S:\Notes\My Vault\C#\100%\Café 日本.css"))
+            checks(&root, "style.css").map(|f| f.path),
+            Ok(PathBuf::from(r"C:\style.css"))
         );
     }
 
     #[test]
-    fn every_check_of_the_image_protocol_holds_after_decoding() {
-        // The URL itself: segments that decode to a climb, another drive or a forbidden name.
-        for url in [
-            "/d/s/Notes/My%20Vault/..%2F..%2Fsecret.txt",
-            "/d/s/Notes/My%20Vault/%3A%5CWindows%5Cwin.ini",
-            "/d/s/Notes/My%20Vault/a%00.html",
-            "/x/s/Notes/a.html",
-            "/u/nas",
+    fn every_check_holds_after_decoding() {
+        // Segments that decode to a climb, another drive, a stream or a device.
+        for rest in [
+            "..%2F..%2Fsecret.txt",
+            "..%2Fstyle.css",
+            "%2E%2E/style.css",
+            "%3A%5CWindows%5Cwin.ini",
+            "a%00.html",
+            "a.html%3Astream",
+            "work./a.html",
+            "..%20/a.html",
+            "CON.html",
+            "img/com1.png",
         ] {
-            assert_eq!(check(url), Err(Refusal::NotLocal), "{url}");
+            assert_eq!(check(rest), Err(Refusal::NotLocal), "{rest}");
         }
-        // A name Windows would read as another file, or as a device.
+        // An open on a host the user hasn't chosen serves nothing from it.
+        let stranger = open_of(r"\\attacker.invalid\s\x.html");
+        assert_eq!(checks(&stranger, "x.html"), Err(Refusal::UntrustedHost));
+        for rest in ["run.exe", "notes.md", "notes.txt", "README"] {
+            assert_eq!(check(rest), Err(Refusal::WrongType), "{rest}");
+        }
+        // What `..` in an open's folder would reach is outside it: the folder is normalised when
+        // the open is minted, and the path checked against it after normalising.
+        let climbing = PageScope {
+            folder: r"S:\Notes\My Vault\artifacts\..".to_owned(),
+            ..open()
+        };
+        assert_eq!(checks(&climbing, "a.css"), Err(Refusal::Outside));
+    }
+
+    /// A URL of no open, an open no window has, and the old drive and share URLs: 404, before any
+    /// path is decided or the file system touched, and never shared.
+    #[test]
+    fn a_request_outside_every_open_is_404_untouched() {
         for url in [
-            "/d/s/Notes/My%20Vault/work./a.html",
-            "/d/s/Notes/My%20Vault/..%20/a.html",
-            "/d/s/Notes/My%20Vault/CON.html",
+            "/d/s/Notes/My%20Vault/artifacts/report.html",
+            "/u/nas/share/notes/brief.pdf",
+            "/o/t1",
+            "/o//report.html",
+            "/report.html",
+            "/",
         ] {
-            assert_eq!(check(url), Err(Refusal::NotLocal), "{url}");
+            let response = serve(url, SCRIPT, no_scope, no_decision, no_reads, no_options);
+            assert_eq!(response, PageResponse::empty(404), "{url}");
+            assert!(!response.shared);
         }
-        assert_eq!(
-            check("/u/attacker.invalid/s/x.html"),
-            Err(Refusal::UntrustedHost)
+        let response = serve(
+            "/o/0123abcd/report.html",
+            SCRIPT,
+            opens,
+            no_decision,
+            no_reads,
+            no_options,
         );
-        for url in [
-            "/d/s/Notes/My%20Vault/run.exe",
-            "/d/s/Notes/My%20Vault/notes.md",
-            "/d/s/Notes/My%20Vault/README",
-        ] {
-            assert_eq!(check(url), Err(Refusal::WrongType), "{url}");
-        }
-        for url in [
-            "/d/c/Windows/Web/a.html",
-            "/d/s/Notes/My%20Vaults/a.pdf",
-            "/u/nas/share/other/a.pdf",
-        ] {
-            assert_eq!(check(url), Err(Refusal::OutsideLibrary), "{url}");
-        }
+        assert_eq!(response, PageResponse::empty(404));
+        let response = response.into_http();
+        assert_eq!(header(&response, "Access-Control-Allow-Origin"), None);
     }
 
     #[test]
     fn refusals_never_touch_the_file_system() {
         for (url, status) in [
-            ("/d/s/Notes/My%20Vault/..%2F..%2Fsecret.txt", 403),
-            ("/d/s/Notes/..%2FMy%20Vault%2Fa.html", 403),
-            ("/d/c/Windows/Web/a.html", 403),
-            ("/u/attacker.invalid/s/x.pdf", 403),
-            ("/d/s/Notes/My%20Vault/%FF.html", 403),
-            ("/d/s/Notes/My%20Vault/run.exe", 404),
-            ("/d/s/Notes/My%20Vault/notes.md", 404),
+            ("/o/t1/..%2F..%2Fsecret.txt", 403),
+            ("/o/t1/..%2Fnotes%2Fx.css", 403),
+            ("/o/t1/%FF.html", 403),
+            ("/o/t1/run.exe", 404),
+            ("/o/t1/notes.md", 404),
         ] {
-            let response = serve(url, check, no_reads, no_options);
-            assert_eq!(response, PageResponse::empty(status), "{url}");
+            let response = serve(url, SCRIPT, opens, check_open, no_reads, no_options);
+            assert_eq!(response, PageResponse::empty(status).shared(), "{url}");
         }
+    }
+
+    fn check_open(open: &PageScope, rest: &str) -> Result<PageFile, Refusal> {
+        decide(open, rest, &trust())
     }
 
     #[test]
     fn an_allowed_file_is_read_up_to_its_types_cap() {
+        let pdf = |token: &str| (token == "t1").then(|| open_of(r"S:\Notes\My Vault\brief.pdf"));
         let response = serve(
-            "/d/s/Notes/My%20Vault/artifacts/brief.pdf",
-            check,
-            |path, cap| {
-                assert_eq!(path, Path::new(r"S:\Notes\My Vault\artifacts\brief.pdf"));
+            "/o/t1/brief.pdf?v=2#page=1",
+            None,
+            pdf,
+            check_open,
+            |_, path, cap| {
+                assert_eq!(path, Path::new(r"S:\Notes\My Vault\brief.pdf"));
                 assert_eq!(cap, 100 * 1024 * 1024);
                 Ok(b"%PDF".to_vec())
             },
@@ -459,13 +609,16 @@ mod tests {
                 content_type: Some("application/pdf".to_owned()),
                 policy: None,
                 report_only: None,
+                shared: false,
                 body: b"%PDF".to_vec(),
             }
         );
         let page = serve(
-            "/d/s/Notes/My%20Vault/report.htm",
-            check,
-            |_, cap| {
+            "/o/t1/report.htm",
+            Some("iframe"),
+            opens,
+            check_open,
+            |_, _, cap| {
                 assert_eq!(cap, 20 * 1024 * 1024);
                 Ok(b"<p>Hi</p>".to_vec())
             },
@@ -474,26 +627,32 @@ mod tests {
         assert_eq!(page.content_type.as_deref(), Some("text/html"));
         assert!(page.body.ends_with(b"</script><p>Hi</p>"));
         let missing = serve(
-            "/d/s/Notes/My%20Vault/gone.css",
-            check,
-            |_, _| Err(io::ErrorKind::NotFound.into()),
+            "/o/t1/gone.css",
+            SCRIPT,
+            opens,
+            check_open,
+            |_, _, _| Err(io::ErrorKind::NotFound.into()),
             no_options,
         );
-        assert_eq!(missing, PageResponse::empty(404));
+        assert_eq!(missing, PageResponse::empty(404).shared());
         let large = serve(
-            "/d/s/Notes/My%20Vault/huge.pdf",
-            check,
-            |_, _| Err(io::ErrorKind::FileTooLarge.into()),
+            "/o/t1/huge.json",
+            SCRIPT,
+            opens,
+            check_open,
+            |_, _, _| Err(io::ErrorKind::FileTooLarge.into()),
             no_options,
         );
-        assert_eq!(large, PageResponse::empty(413));
+        assert_eq!(large, PageResponse::empty(413).shared());
         let denied = serve(
-            "/d/s/Notes/My%20Vault/locked.png",
-            check,
-            |_, _| Err(io::ErrorKind::PermissionDenied.into()),
+            "/o/t1/locked.png",
+            SCRIPT,
+            opens,
+            check_open,
+            |_, _, _| Err(io::ErrorKind::PermissionDenied.into()),
             no_options,
         );
-        assert_eq!(denied, PageResponse::empty(403));
+        assert_eq!(denied, PageResponse::empty(403).shared());
     }
 
     #[test]
@@ -507,13 +666,13 @@ mod tests {
         );
     }
 
-    /// Every type served carries a sandboxing CSP but a PDF, and none lets another origin read it.
-    /// A page may run scripts in its sandbox (`sandbox allow-scripts`); nothing else may.
+    /// Every type served carries a sandboxing CSP but a PDF. A page may run scripts in its sandbox
+    /// (`sandbox allow-scripts`); nothing else may.
     #[test]
-    fn every_type_but_a_pdf_is_sandboxed_and_none_is_shared() {
+    fn every_type_but_a_pdf_is_sandboxed() {
         for &(ext, content_type, served) in TYPES {
-            let url = format!("/d/s/Notes/My%20Vault/a.{ext}");
-            let response = serve(&url, check, reads(b"x"), full).into_http();
+            let url = format!("/o/t1/a.{ext}");
+            let response = serve(&url, None, opens, check_open, reads(b"x"), full).into_http();
             assert_eq!(response.status(), 200, "{ext}");
             assert_eq!(
                 header(&response, "Content-Type").as_deref(),
@@ -527,7 +686,6 @@ mod tests {
                 header(&response, "Cache-Control").as_deref(),
                 Some("no-cache")
             );
-            assert_eq!(header(&response, "Access-Control-Allow-Origin"), None);
             let policy = header(&response, "Content-Security-Policy");
             match served {
                 Served::Pdf => assert_eq!(policy, None, "{ext}"),
@@ -549,34 +707,140 @@ mod tests {
                 }
             }
         }
-        // Refusals too.
+        // Refusals are sandboxed too.
         for status in [403, 404, 413] {
             let response = PageResponse::empty(status).into_http();
             assert_eq!(response.status(), status);
-            assert_eq!(header(&response, "Access-Control-Allow-Origin"), None);
             assert!(header(&response, "Content-Security-Policy")
                 .unwrap_or_default()
                 .ends_with("; sandbox"));
         }
     }
 
+    /// Within its open, the page may read what it loads as a module script or a font
+    /// (`Access-Control-Allow-Origin: null`), and only that: never what its scripts `fetch`, nor
+    /// anything asked for without saying what for.
+    #[test]
+    fn a_page_reads_only_its_module_scripts_and_fonts() {
+        let acao = |url: &str, dest: Option<&str>| {
+            let response = serve(url, dest, opens, check_open, reads(b"x"), full).into_http();
+            header(&response, "Access-Control-Allow-Origin")
+        };
+        for (url, dest) in [("/o/t1/app.mjs", "script"), ("/o/t1/body.woff2", "font")] {
+            assert_eq!(acao(url, Some(dest)).as_deref(), Some("null"), "{url}");
+        }
+        for (url, dest) in [
+            ("/o/t1/data.json", Some("empty")),
+            ("/o/t1/app.mjs", Some("empty")),
+            ("/o/t1/style.css", Some("style")),
+            ("/o/t1/report.html", Some("iframe")),
+            ("/o/t1/app.mjs", None),
+            ("/o/t1/body.woff2", None),
+        ] {
+            assert_eq!(acao(url, dest), None, "{url} {dest:?}");
+        }
+        // A refusal within the open, to a script, says so to it; outside an open, never.
+        let refused = serve(
+            "/o/t1/..%2Fx.mjs",
+            SCRIPT,
+            opens,
+            check_open,
+            no_reads,
+            no_options,
+        );
+        assert!(refused.shared);
+        let stranger = serve(
+            "/o/t9/x.mjs",
+            SCRIPT,
+            opens,
+            no_decision,
+            no_reads,
+            no_options,
+        );
+        assert!(!stranger.shared);
+    }
+
+    /// A file's real path, junctions and links resolved, must be in the real path of its open's
+    /// folder: in any letter case, through a drive or a share, each in its verbatim form.
+    #[test]
+    fn a_real_path_is_within_its_folders_by_their_verbatim_forms() {
+        let within = |file: &str, folder: &str| real_within(Path::new(file), Path::new(folder));
+        assert!(within(
+            r"\\?\C:\Vault\artifacts\a.css",
+            r"\\?\C:\Vault\artifacts"
+        ));
+        assert!(within(
+            r"\\?\c:\vault\ARTIFACTS\img\a.png",
+            r"\\?\C:\Vault\artifacts\"
+        ));
+        assert!(within(
+            r"\\?\UNC\nas\share\notes\a.css",
+            r"\\?\UNC\nas\share\notes"
+        ));
+        for (file, folder) in [
+            (r"\\?\C:\Vault\secret\a.css", r"\\?\C:\Vault\artifacts"),
+            (r"\\?\C:\Vault\artifactsx\a.css", r"\\?\C:\Vault\artifacts"),
+            (r"\\?\D:\Vault\artifacts\a.css", r"\\?\C:\Vault\artifacts"),
+            (
+                r"\\?\UNC\nas\share\notesx\a.css",
+                r"\\?\UNC\nas\share\notes",
+            ),
+            (
+                r"\\?\UNC\evil\share\notes\a.css",
+                r"\\?\UNC\nas\share\notes",
+            ),
+        ] {
+            assert!(!within(file, folder), "{file} in {folder}");
+        }
+    }
+
+    /// The bridge goes into the open's own page alone, with the open's key; any other page served
+    /// through the open (one the frame navigated to) has neither.
+    #[test]
+    fn only_the_opens_own_page_gets_the_bridge_and_its_key() {
+        let html = b"<head><title>Other</title>";
+        let own = serve(
+            "/o/t1/report.html",
+            None,
+            opens,
+            check_open,
+            reads(html),
+            full,
+        );
+        let body = String::from_utf8(own.body).unwrap();
+        assert!(body.contains("<script nonce=\""), "{body}");
+        assert!(body.contains("\"k1\""), "{body}");
+        let other = serve(
+            "/o/t1/other.html",
+            None,
+            opens,
+            check_open,
+            reads(html),
+            |_, _| PageOptions {
+                mode: HtmlPages::Full,
+                report: None,
+                key: None,
+            },
+        );
+        assert_eq!(other.body, html);
+    }
+
     /// The acceptance cases: an SVG and JSON are sandboxed, a PDF isn't, and a page runs only
     /// scripts, in its sandbox.
     #[test]
     fn svg_json_pdf_and_page_policies() {
-        let policy = |url: &str| serve(url, check, reads(b"x"), full).into_http();
-        let svg = policy("/d/s/Notes/My%20Vault/a.svg");
+        let policy = |url: &str| serve(url, None, opens, check_open, reads(b"x"), full).into_http();
+        let svg = policy("/o/t1/a.svg");
         assert!(header(&svg, "Content-Security-Policy")
             .unwrap()
             .contains("sandbox"));
-        let pdf = policy("/d/s/Notes/My%20Vault/a.pdf");
+        let pdf = policy("/o/t1/a.pdf");
         assert_eq!(header(&pdf, "Content-Security-Policy"), None);
-        let json = policy("/d/s/Notes/My%20Vault/a.json");
+        let json = policy("/o/t1/a.json");
         assert!(header(&json, "Content-Security-Policy")
             .unwrap()
             .contains("sandbox"));
-        assert_eq!(header(&json, "Access-Control-Allow-Origin"), None);
-        let html = policy("/d/s/Notes/My%20Vault/a.html");
+        let html = policy("/o/t1/a.html");
         assert!(header(&html, "Content-Security-Policy")
             .unwrap()
             .starts_with("sandbox allow-scripts; default-src 'self' https:"));
@@ -596,31 +860,37 @@ mod tests {
         let html = b"<!doctype html><html><head><title>Report</title></head><body>x</body></html>";
         let served = |options: PageOptions| {
             serve(
-                "/d/s/Notes/My%20Vault/report.html",
-                check,
+                "/o/t1/report.html",
+                None,
+                opens,
+                check_open,
                 reads(html),
-                || options,
+                |_, path| {
+                    assert_eq!(path, Path::new(r"S:\Notes\My Vault\artifacts\report.html"));
+                    options
+                },
             )
         };
-        let page = served(full());
+        let page = served(full(&open(), Path::new("")));
         let body = String::from_utf8(page.body.clone()).unwrap();
         assert!(body.starts_with("<!doctype html><html><head><script nonce=\""));
-        assert!(body.contains(BRIDGE));
+        assert!(body.contains(&bridge_for("k1")));
         assert!(body.ends_with("</script><title>Report</title></head><body>x</body></html>"));
         let nonce = nonce_of(&page.body);
         let policy = page_policy(HtmlPages::Full, &nonce, Some("t1"));
         assert_eq!(page.policy, Some(policy.enforced));
         assert_eq!(page.report_only, policy.report_only);
-        let response = served(full()).into_http();
+        let response = served(full(&open(), Path::new(""))).into_http();
         assert!(header(&response, "Content-Security-Policy-Report-Only")
             .unwrap()
             .ends_with("report-uri http://lxpage.localhost/__csp-report?t=t1"));
         // A fresh nonce for every response.
-        assert_ne!(nonce_of(&served(full()).body), nonce);
+        assert_ne!(nonce_of(&served(full(&open(), Path::new(""))).body), nonce);
         // Without its scripts: the bridge alone runs, by its nonce.
         let still = served(PageOptions {
             mode: HtmlPages::Static,
             report: None,
+            key: Some("k1".to_owned()),
         });
         let nonce = nonce_of(&still.body);
         assert!(still
@@ -634,8 +904,10 @@ mod tests {
     #[test]
     fn a_page_keeps_the_charset_it_declares() {
         let page = serve(
-            "/d/s/Notes/My%20Vault/report.html",
-            check,
+            "/o/t1/report.html",
+            None,
+            opens,
+            check_open,
             reads(b"<html><head><meta charset=\"Windows-1252\"><title>Caf\xe9</title>"),
             full,
         );
@@ -657,8 +929,10 @@ mod tests {
         );
         let page: &'static [u8] = page.leak();
         let response = serve(
-            "/d/s/Notes/My%20Vault/report.html",
-            check,
+            "/o/t1/report.html",
+            None,
+            opens,
+            check_open,
             reads(page),
             full,
         )
@@ -672,17 +946,24 @@ mod tests {
         assert!(body.ends_with("</script><title>Café</title>"), "{body}");
     }
 
-    /// A report is a POST of a CSP report, of at most 64 KiB; its host, if it names one, is taken.
+    /// A report is a POST of a CSP report, of at most 64 KiB; its load, if it names a host, is
+    /// taken, blocked or not as the report says.
     #[test]
     fn a_policy_report_is_taken_only_as_the_browser_sends_one() {
-        let body = br#"{"csp-report":{"blocked-uri":"https://cdn.example.test/lib.js"}}"#;
+        let body = br#"{"csp-report":{"blocked-uri":"https://cdn.example.test/lib.js","disposition":"enforce"}}"#;
         let mut taken = Vec::new();
-        let response = report("POST", Some("application/csp-report"), body, |host| {
-            taken.push(host);
+        let response = report("POST", Some("application/csp-report"), body, |load| {
+            taken.push(load);
         });
         assert_eq!(response.status, 204);
-        assert_eq!(taken, ["cdn.example.test"]);
-        let never = |_: String| panic!("taken");
+        assert_eq!(
+            taken,
+            [ReportedLoad {
+                host: "cdn.example.test".to_owned(),
+                blocked: true,
+            }]
+        );
+        let never = |_: ReportedLoad| panic!("taken");
         assert_eq!(
             report("GET", Some("application/csp-report"), body, never).status,
             405

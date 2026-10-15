@@ -12,9 +12,16 @@ import type { TaskStats } from "./TaskStats";
  */
 export type DocPayload = { path: string, kind: DocKind, 
 /**
- * Where the frame loads an HTML page or a PDF from; `None` for every other kind.
+ * Where the frame loads an HTML page or a PDF from: a URL of this open's own
+ * (`http://lxpage.localhost/o/<token>/<file name>`), which reaches the file's folder and
+ * below. `None` for every other kind.
  */
-frameUrl: string | null, title: string, html: string, outline: Array<OutlineItem>, frontmatter: Frontmatter | null, tasks: TaskStats, wordCount: number, 
+frameUrl: string | null, 
+/**
+ * The key an HTML page's bridge signs its messages with: the UI takes none without it.
+ * `None` for every other kind.
+ */
+bridgeKey: string | null, title: string, html: string, outline: Array<OutlineItem>, frontmatter: Frontmatter | null, tasks: TaskStats, wordCount: number, 
 /**
  * Last modified, in milliseconds since the Unix epoch.
  */

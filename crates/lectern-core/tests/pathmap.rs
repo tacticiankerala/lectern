@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::PathForms;
 use lectern_core::library::pathmap::{
-    page_path, page_url, split_line_suffix, LineRef, Mapped, PathMapper, PAGE_ORIGIN,
+    page_path, page_token, page_url, split_line_suffix, LineRef, Mapped, PathMapper, PAGE_ORIGIN,
 };
 
 fn mapper(mappings: &[(&str, &str)]) -> PathMapper {
@@ -547,142 +547,167 @@ fn literal_forms_map_linux_and_mounted_paths_without_the_index() {
     assert_eq!(m.literal_forms("notes/plan.md"), path_forms(None, None));
 }
 
-/// The page protocol's URL path for `path`, without the origin.
-fn page_url_path(path: &str) -> String {
-    let url = page_url(Path::new(path)).unwrap_or_else(|| panic!("no page URL for {path}"));
-    url.strip_prefix(PAGE_ORIGIN)
-        .unwrap_or_else(|| panic!("{url} isn't on the page origin"))
-        .to_owned()
-}
-
+/// An open's URL names its token and the page's file name alone: the page's folder is the
+/// open's, never in the URL.
 #[test]
-fn page_urls_are_hierarchical_with_each_segment_encoded() {
+fn an_opens_url_names_its_token_and_the_pages_file_name() {
     assert_eq!(
-        page_url(Path::new(r"X:\a\b c.html")).as_deref(),
-        Some("http://lxpage.localhost/d/x/a/b%20c.html")
+        page_url("t1", Path::new(r"X:\a\b c.html")).as_deref(),
+        Some("http://lxpage.localhost/o/t1/b%20c.html")
     );
     assert_eq!(
-        page_url(Path::new(r"\\host\share\x.pdf")).as_deref(),
-        Some("http://lxpage.localhost/u/host/share/x.pdf")
+        page_url("t1", Path::new(r"\\host\share\x.pdf")).as_deref(),
+        Some("http://lxpage.localhost/o/t1/x.pdf")
     );
     // Only RFC 3986's unreserved characters stay as they are.
     assert_eq!(
-        page_url_path(r"S:\Notes\C#\100%\Café 日本\a #1 (draft)~v2_x-y.html"),
-        "/d/s/Notes/C%23/100%25/Caf%C3%A9%20%E6%97%A5%E6%9C%AC/a%20%231%20%28draft%29~v2_x-y.html"
+        page_url(
+            "t1",
+            Path::new(r"S:\Notes\C#\a #1 (draft)~v2_x-y Café 日本 100%.html")
+        )
+        .as_deref(),
+        Some(
+            "http://lxpage.localhost/o/t1/\
+             a%20%231%20%28draft%29~v2_x-y%20Caf%C3%A9%20%E6%97%A5%E6%9C%AC%20100%25.html"
+        )
     );
     // Either separator.
-    assert_eq!(page_url_path("S:/Notes/a.pdf"), "/d/s/Notes/a.pdf");
-    assert_eq!(page_url_path("//nas/share/a.pdf"), "/u/nas/share/a.pdf");
-}
-
-#[test]
-fn page_urls_round_trip() {
+    assert_eq!(
+        page_url("t1", Path::new("S:/Notes/a.pdf")).as_deref(),
+        Some("http://lxpage.localhost/o/t1/a.pdf")
+    );
+    // A name the open's path would refuse has no URL.
     for path in [
-        r"X:\a\b c.html",
-        r"S:\Notes\My Vault\artifacts\brief.pdf",
-        r"S:\Notes\C#\100%\Café 日本\a #1.html",
-        r"S:\Notes\50% off; [x] & {y} = 'z'!.html",
-        r"\\nas\share\notes\x.pdf",
-        r"\\Host.Example\Share $\img\a b.png",
-        // Roots, which no type check will serve, but which map all the same.
+        "",
         r"X:\",
-        r"\\nas\share",
+        r"X:\a\",
+        r"X:\CON.html",
+        r"X:\a\work.",
+        r"X:\a\a.html ",
+        r"X:\a\..",
+        "S:/Notes/a.html:stream",
     ] {
-        assert_eq!(
-            page_path(&page_url_path(path)).as_deref(),
-            Some(path),
-            "{path}"
-        );
+        assert_eq!(page_url("t1", Path::new(path)), None, "{path:?}");
     }
 }
 
+/// A request on the page protocol names an open by its token, then the path below the open's
+/// folder, still encoded; its query and fragment are dropped. The old forms name none.
 #[test]
-fn page_paths_ignore_the_query_and_fragment() {
+fn a_page_request_names_its_open_and_the_path_below_it() {
+    assert_eq!(page_token("/o/t1/report.html"), Some(("t1", "report.html")));
     assert_eq!(
-        page_path("/d/s/Notes/brief.pdf?v=3#page=2").as_deref(),
-        Some(r"S:\Notes\brief.pdf")
+        page_token("/o/0123abcd/img/a%20b.png?v=2#page=1"),
+        Some(("0123abcd", "img/a%20b.png"))
     );
-    assert_eq!(
-        page_path("/d/s/Notes/a%3Fb%23c.html#x").as_deref(),
-        None,
-        "a decoded ? is refused"
-    );
-    assert_eq!(
-        page_path("/u/nas/share/report.html#top").as_deref(),
-        Some(r"\\nas\share\report.html")
-    );
-    // Without the leading slash too.
-    assert_eq!(page_path("d/s/a.pdf").as_deref(), Some(r"S:\a.pdf"));
-}
-
-#[test]
-fn page_paths_refuse_what_decodes_to_another_place() {
+    assert_eq!(page_token("/o/t1/a%3Fb.html"), Some(("t1", "a%3Fb.html")));
     for url in [
-        // Climbing, as written or encoded: each segment is decoded once, then checked.
-        "/d/s/Notes/..%2F..%2Fsecret.txt",
-        "/d/s/Notes/../secret.txt",
-        "/d/s/Notes/%2E%2E/secret.txt",
-        "/d/s/Notes/./a.html",
-        "/d/s/Notes/%2e/a.html",
-        "/d/s/Notes/..%5Csecret.txt",
-        // Another drive or a stream, smuggled into a segment.
-        "/d/s/Notes/%3A%5CWindows%5Cwin.ini",
-        "/d/s/Notes/a.html%3Astream",
-        "/d/s/a%2Fb.html",
-        // NUL, control characters and the names Windows forbids.
-        "/d/s/a%00b.html",
-        "/d/s/a%0Ab.html",
-        "/d/s/a%1Fb.html",
-        "/d/s/a%3Cb.html",
-        "/d/s/a%3Eb.html",
-        "/d/s/a%22b.html",
-        "/d/s/a%7Cb.html",
-        "/d/s/a%3Fb.html",
-        "/d/s/a%2Ab.html",
-        // Empty segments.
-        "/d/s//a.html",
-        "/d/s/a.html/",
-        "/u/nas//share/a.html",
-        // A missing or malformed drive, host or share.
+        "/d/s/Notes/a.html",
+        "/u/nas/share/a.pdf",
+        "/o",
+        "/o/",
+        "/o/t1",
+        "/o/t1/",
+        "/o//a.html",
+        "o/t1/a.html",
+        "/O/t1/a.html",
+        "/__csp-report",
         "",
-        "/",
-        "/d",
-        "/d/",
-        "/d//a.html",
-        "/d/ss/a.html",
-        "/d/1/a.html",
-        "/d/%73/a.html",
-        "/u",
-        "/u/nas",
-        "/u//share/a.html",
-        "/u/%3F/UNC/nas/a.html",
-        "/u/./share/a.html",
-        "/x/s/a.html",
-        "/D/s/a.html",
-        // Not UTF-8 once decoded.
-        "/d/s/%FF%FE.html",
     ] {
-        assert_eq!(page_path(url), None, "{url}");
+        assert_eq!(page_token(url), None, "{url}");
     }
 }
 
+/// The path below an open is decoded a segment at a time, once, under the open's folder, and each
+/// segment is checked after decoding: nothing climbs out, switches drive or names a device.
 #[test]
-fn only_drive_and_unc_paths_have_page_urls() {
-    for path in [
-        "notes/a.html",
-        "/home/me/a.html",
-        r"X:a.html",
-        "X:",
-        r"\\?\C:\a.html",
-        r"\\.\pipe\a",
-        r"\\nas",
-        r"\\nas\",
-        r"X:\a\..\b.html",
-        r"X:\a\.\b.html",
-        r"X:\a\\b.html",
-        r"X:\a.html:stream",
+fn segments_under_an_opens_folder_are_decoded_once_then_checked() {
+    let folder = r"S:\Notes\My Vault\artifacts";
+    assert_eq!(
+        page_path(folder, "report.html").as_deref(),
+        Some(r"S:\Notes\My Vault\artifacts\report.html")
+    );
+    assert_eq!(
+        page_path(folder, "img/a%20b.png").as_deref(),
+        Some(r"S:\Notes\My Vault\artifacts\img\a b.png")
+    );
+    assert_eq!(
+        page_path(folder, "C%23/100%25/Caf%C3%A9%20%E6%97%A5%E6%9C%AC.css").as_deref(),
+        Some(r"S:\Notes\My Vault\artifacts\C#\100%\Café 日本.css")
+    );
+    assert_eq!(page_path(r"X:\", "a.html").as_deref(), Some(r"X:\a.html"));
+    assert_eq!(
+        page_path(r"\\nas\share", "x.pdf").as_deref(),
+        Some(r"\\nas\share\x.pdf")
+    );
+    for rest in [
+        // Climbing, as written or encoded.
+        "..%2F..%2Fsecret.txt",
+        "../secret.txt",
+        "%2E%2E/secret.txt",
+        "./a.html",
+        "%2e/a.html",
+        "..%5Csecret.txt",
+        "..%20/a.html",
+        // Another drive or a stream, smuggled into a segment.
+        "%3A%5CWindows%5Cwin.ini",
+        "C%3A%5Ca.html",
+        "a.html%3Astream",
+        "a%2Fb.html",
+        // NUL, control characters and the characters Windows forbids.
+        "a%00b.html",
+        "%00",
+        "a%0Ab.html",
+        "a%1Fb.html",
+        "a%3Cb.html",
+        "a%3Eb.html",
+        "a%22b.html",
+        "a%7Cb.html",
+        "a%3Fb.html",
+        "a%2Ab.html",
+        // Devices, and names Windows reads without their trailing dot or space.
+        "CON",
+        "con.html",
+        "img/COM1.png",
+        "AUX.css",
+        "lpt%C2%B9.png",
+        "work./a.html",
+        "a.html.",
+        "a.html%20",
+        // Empty segments, and nothing at all.
         "",
+        "a//b.html",
+        "a.html/",
+        "/a.html",
+        // Not UTF-8 once decoded.
+        "%FF%FE.html",
     ] {
-        assert_eq!(page_url(Path::new(path)), None, "{path:?}");
+        assert_eq!(page_path(folder, rest), None, "{rest}");
+    }
+    // Names a device's only look like.
+    assert!(page_path(folder, "console.html").is_some());
+    assert!(page_path(folder, "com10.png").is_some());
+}
+
+/// An open's URL leads back to its page, under the page's folder.
+#[test]
+fn an_opens_url_leads_back_to_its_page() {
+    for (folder, name) in [
+        (r"X:\a", "b c.html"),
+        (r"S:\Notes\C#\100%", "Café 日本 #1.html"),
+        (r"S:\Notes", "50% off; [x] & {y} = 'z'!.html"),
+        (r"\\nas\share\notes", "x.pdf"),
+        (r"X:\", "a.pdf"),
+    ] {
+        let page = format!(r"{}\{name}", folder.trim_end_matches('\\'));
+        let url = page_url("t1", Path::new(&page)).unwrap_or_else(|| panic!("{page}"));
+        let path = url.strip_prefix(PAGE_ORIGIN).unwrap();
+        let (token, rest) = page_token(path).unwrap();
+        assert_eq!(token, "t1");
+        assert_eq!(
+            page_path(folder, rest).as_deref(),
+            Some(page.as_str()),
+            "{page}"
+        );
     }
 }

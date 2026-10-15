@@ -22,7 +22,8 @@ use ts_rs::TS;
 
 use crate::frontmatter::{parse_frontmatter, Frontmatter, PropValue};
 use crate::library::scan::frontmatter_yaml;
-use crate::library::{path_key, DocKind, LibraryIndex};
+use crate::library::{doc_kind, path_key, DocKind, LibraryIndex};
+use crate::render::file_title;
 use crate::text::decode;
 
 /// Matching lines returned for one file.
@@ -491,10 +492,14 @@ fn name_matches(re: &Regex, rel: &str, root: &Path) -> bool {
     }
 }
 
-/// A cheap stand-in for the rendered title, since documents are never rendered to search them:
-/// the frontmatter `title`, else the first `# ` line outside code fences, else the file name
-/// without its extension. Only files in the results get a title, once per version.
+/// A cheap stand-in for the rendered title, since documents are never rendered to search them: a
+/// text file's is its file name, as the reader's is; a note's is the frontmatter `title`, else the
+/// first `# ` line outside code fences, else the file name without its extension. Only files in
+/// the results get a title, once per version.
 fn title_of(text: &str, path: &Path) -> String {
+    if doc_kind(&path.to_string_lossy()) == Some(DocKind::Text) {
+        return file_title(path);
+    }
     let (yaml, body) = split_frontmatter(text);
     yaml.and_then(frontmatter_title)
         .or_else(|| first_heading(body))

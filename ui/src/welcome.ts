@@ -160,3 +160,22 @@ export function renderError(host: HTMLElement, error: OpenError, actions: ErrorA
     ),
   );
 }
+
+/**
+ * In place of a page that keeps navigating its own frame (frame-view.ts): what happened, and its
+ * default app a click away.
+ */
+export function renderNavigatingAway(host: HTMLElement, openWithDefaultApp: () => void): void {
+  host.replaceChildren(
+    h(
+      "div",
+      { class: "state state-error", role: "alert" },
+      h("h1", { class: "state-title" }, "This page keeps navigating away."),
+      h(
+        "div",
+        { class: "state-actions" },
+        button("Open in default app", openWithDefaultApp, { primary: true }),
+      ),
+    ),
+  );
+}

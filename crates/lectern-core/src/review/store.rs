@@ -81,6 +81,8 @@ pub enum StoreError {
     Conflict,
     /// Lectern won't change this sidecar; the text says why.
     ReadOnly(String),
+    /// The note is an HTML page, and the text its bridge reported didn't come with the change.
+    NoPageText,
     Io(io::Error),
 }
 
@@ -90,6 +92,9 @@ impl fmt::Display for StoreError {
             Self::Op(e) => e.fmt(f),
             Self::Conflict => f.write_str("Couldn't save the comment: the file kept changing."),
             Self::ReadOnly(message) => f.write_str(message),
+            Self::NoPageText => f.write_str(
+                "The page hasn't reported its text yet, so its comments can't be placed.",
+            ),
             Self::Io(e) => write!(f, "Couldn't save the comment: {e}"),
         }
     }
@@ -100,7 +105,9 @@ impl std::error::Error for StoreError {}
 /// Applies `op` to the sidecar at `sidecar` and saves it, creating the sidecar if there's none: a
 /// file that is already there is changed only when [`load`] would show it writable.
 /// `source` is the note's text, read as its kind's (see [`NoteText::of_note`]), and `now` the time
-/// to record on a new comment. See [`apply_op_on`], which this calls with that text.
+/// to record on a new comment. See [`apply_op_on`], which this calls with that text. An HTML page's
+/// text is what its bridge reported, not its source: it is refused here, untouched, and takes
+/// [`apply_op_on`].
 pub fn apply_op(
     sidecar: &Path,
     note_name: &str,
@@ -108,13 +115,8 @@ pub fn apply_op(
     op: &ReviewOp,
     now: &str,
 ) -> Result<(Review, u32), StoreError> {
-    apply_op_on(
-        sidecar,
-        note_name,
-        &NoteText::of_note(note_name, source),
-        op,
-        now,
-    )
+    let note = NoteText::of_note(note_name, source).ok_or(StoreError::NoPageText)?;
+    apply_op_on(sidecar, note_name, &note, op, now)
 }
 
 /// Applies `op` to the sidecar at `sidecar` and saves it, as [`apply_op`] does, against `note`,

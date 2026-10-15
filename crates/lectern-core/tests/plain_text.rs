@@ -146,12 +146,16 @@ fn the_text_map_reads_the_rendered_blocks() {
 #[test]
 fn a_notes_text_follows_its_kind() {
     let source = "# Plan\n\nShip *it*.\n";
-    let text = TextMap::of_note("plan.txt", source);
+    let text = TextMap::of_note("plan.txt", source).unwrap();
     assert_eq!(text.text(), "# Plan Ship *it*.");
     assert!(text.headings().is_empty());
-    let text = TextMap::of_note("PLAN.TXT", source);
+    let text = TextMap::of_note("PLAN.TXT", source).unwrap();
     assert_eq!(text.text(), "# Plan Ship *it*.");
-    let note = TextMap::of_note("plan.md", source);
+    let note = TextMap::of_note("plan.md", source).unwrap();
     assert_eq!(note.text(), "Plan Ship it.");
     assert_eq!(note.heading_path_at(3), ["Plan"]);
+    // A page's text is what its bridge reports, never its source read as a note.
+    for name in ["report.html", "old.HTM"] {
+        assert!(TextMap::of_note(name, "<h1>Plan</h1>").is_none(), "{name}");
+    }
 }

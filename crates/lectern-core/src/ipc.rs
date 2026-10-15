@@ -187,8 +187,13 @@ pub struct Crumb {
 pub struct DocPayload {
     pub path: String,
     pub kind: DocKind,
-    /// Where the frame loads an HTML page or a PDF from; `None` for every other kind.
+    /// Where the frame loads an HTML page or a PDF from: a URL of this open's own
+    /// (`http://lxpage.localhost/o/<token>/<file name>`), which reaches the file's folder and
+    /// below. `None` for every other kind.
     pub frame_url: Option<String>,
+    /// The key an HTML page's bridge signs its messages with: the UI takes none without it.
+    /// `None` for every other kind.
+    pub bridge_key: Option<String>,
     pub title: String,
     pub html: String,
     pub outline: Vec<OutlineItem>,
@@ -431,20 +436,25 @@ pub struct DocChanged {
     pub path: String,
 }
 
-/// Event payload: what an open HTML page has loaded from the web, or tried to and was blocked, as
-/// the browser's policy reports tell it. `token` names the open it is for (the page's frame URL
-/// carries it); `hosts` grows in the order they were first reported, up to its cap.
+/// Event payload: what an open HTML page has loaded from the web, and what it tried to load and was
+/// blocked from, as the browser's policy reports tell it. `token` names the open it is for (the
+/// page's frame URL carries it); each list of hosts grows in the order they were first reported, up
+/// to its cap.
 #[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct PageLoads {
     pub token: String,
-    /// The first hosts reported, at most 50.
+    /// The first hosts the page loaded from, at most 50.
     pub hosts: Vec<String>,
-    /// How many hosts have been reported in all: more than `hosts` names once it is full.
+    /// How many hosts it loaded from in all: more than `hosts` names once it is full.
     pub count: u32,
-    /// The page was served without the web (`offline` or `static`): these loads were blocked.
-    pub blocked: bool,
+    /// The first hosts a load from was blocked, at most 50.
+    pub blocked_hosts: Vec<String>,
+    /// How many hosts a load from was blocked in all.
+    pub blocked_count: u32,
+    /// The page was served without the web (`offline` or `static`): Preferences can let it load.
+    pub offline: bool,
 }
 
 /// Where the keyboard focus is, as the UI tells Rust: in Lectern's own page, or inside the frame

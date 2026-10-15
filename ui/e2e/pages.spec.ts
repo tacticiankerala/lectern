@@ -1,7 +1,8 @@
 // HTML pages in their sandboxed frame, with Lectern's bridge in them as the dev server serves them
 // (dev/serve.mjs), as `lxpage` does: the outline, find, links, what each HTML pages setting lets a
-// page do, the notice of what a page loads, the theme, and keys from inside the frame (which only
-// Rust sees, so the fake sends them on request).
+// page do, the notice of what a page loads, the theme, keys from inside the frame (which only Rust
+// sees, so the fake sends them on request), what a page loads from its own folder, and a page
+// that navigates its own frame.
 import { expect, test, type Page } from "@playwright/test";
 import { fixturePath, launch, openFixture } from "./util";
 
@@ -43,8 +44,13 @@ test("a page shows in its sandbox, styled by its own sheet, its headings in the 
 }) => {
   await openFixture(page, "artifacts/report.html");
   await expect(frame(page)).toHaveAttribute("sandbox", "allow-scripts");
+  const src = await frame(page).getAttribute("src");
   await reported(page);
   await expect(outline(page)).toHaveText(["Weekly report", "Results", "Next steps"]);
+  // Its own load, and its style sheet's and script's, are no navigation of its frame.
+  await page.waitForTimeout(500);
+  await expect(page.locator("#lx-toasts .toast")).toHaveCount(0);
+  expect(await frame(page).getAttribute("src")).toBe(src);
   await expect(inside(page).locator("h1")).toHaveCSS("color", "rgb(0, 110, 110)");
   // The second heading: the frame scrolls it to the top, and the bridge says how far that is.
   await outline(page).nth(1).click();
@@ -97,8 +103,8 @@ test("a page that loads from the web says from where, or, offline, that it was b
   await expect(notice(page).locator(".page-notice-text")).toHaveText(
     "This page loads from cdn.example.test",
   );
+  // The setting takes effect at once: the page opens again under it.
   await htmlPages(page, "offline");
-  await page.keyboard.press("F5");
   await expect(frame(page)).toHaveAttribute("src", /lxmode=offline/);
   await expect(notice(page).locator(".page-notice-text")).toHaveText(
     "Blocked loads from cdn.example.test",
@@ -133,7 +139,7 @@ test("a link in a page opens the page it leads to, and Back returns; a web link 
   await inside(page).getByRole("link", { name: "survey site" }).click();
   await expect
     .poll(() => page.evaluate(() => window.__fake.followed.map((t) => `${t.kind} ${t.target}`)))
-    .toContain("external https://example.com");
+    .toContain("external https://example.com/");
   await expect(page).toHaveTitle("report.html — Lectern");
   expect(await frame(page).getAttribute("src")).toBe(before);
   await expect(inside(page).locator("h1")).toHaveText("Weekly report");
@@ -162,6 +168,18 @@ test("a message from another window, or one over 2 MB, changes nothing and throw
     .evaluate(() => {
       parent.postMessage(
         { lx: 1, type: "blocks", headings: [], blocks: [{ text: "x".repeat(3 * 1024 * 1024) }] },
+        "*",
+      );
+      // A page's script forging its bridge's `ready`, without the open's key.
+      parent.postMessage(
+        {
+          lx: 1,
+          type: "ready",
+          headings: [{ level: 1, text: "Forged", id: "forged", offset: 0 }],
+          blocks: [{ text: "Forged", headingLevel: 1 }],
+          scroll: { fraction: 0, top: 0 },
+          dark: false,
+        },
         "*",
       );
     });
@@ -312,4 +330,124 @@ test("Ctrl+Alt+M inside a page, as Rust sends it, comments on the words selected
     "Rendered by script",
   );
   await expect.poll(() => painted(page, "comment")).toEqual(["Rendered by script"]);
+});
+
+test("a page's module script imports the module beside it, but can't read the file", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/chart/index.html");
+  await expect(inside(page).locator("p", { hasText: "Charted" })).toHaveText(
+    "Charted 3 invented readings.",
+  );
+  await expect(inside(page).locator("p", { hasText: "file beside it" })).toHaveText(
+    "Couldn't read the file beside it.",
+  );
+  await htmlPages(page, "offline");
+  await expect(frame(page)).toHaveAttribute("src", /lxmode=offline/);
+  await expect(inside(page).locator("p", { hasText: "Charted" })).toHaveText(
+    "Charted 3 invented readings.",
+  );
+});
+
+/** The toasts on screen. */
+function toasts(page: Page) {
+  return page.locator("#lx-toasts .toast");
+}
+
+/** What the guard says in place of a page that keeps navigating away. */
+function guard(page: Page) {
+  return page.locator("#lx-doc .state");
+}
+
+test("a page that refreshes itself elsewhere is opened again, then let go", async ({ page }) => {
+  const path = fixturePath("artifacts/refresh.html");
+  await openFixture(page, "artifacts/refresh.html");
+  await expect(toasts(page)).toContainText([
+    "This page tried to open another page; open it from Lectern instead.",
+  ]);
+  await expect(guard(page).locator(".state-title")).toHaveText("This page keeps navigating away.");
+  await expect(frame(page)).toHaveCount(0);
+  await expect(page).toHaveTitle("refresh.html — Lectern");
+  await guard(page).getByRole("button", { name: "Open in default app" }).click();
+  await expect
+    .poll(() => page.evaluate(() => window.__fake.followed.at(-1)))
+    .toEqual({ kind: "file", target: path, line: null, anchor: null });
+  // Nothing of the other page was taken as this one's text.
+  expect(await page.evaluate((p) => window.__fake.coreText(p), path)).not.toContain(
+    "second invented page",
+  );
+});
+
+test("a page whose script sends its frame elsewhere shows again, and is let go the next time", async ({
+  page,
+}) => {
+  const path = fixturePath("artifacts/redirect.html");
+  await openFixture(page, "artifacts/redirect.html");
+  expect((await reported(page)).text).toContain("Survey index");
+  const first = await frame(page).getAttribute("src");
+  await inside(page).getByRole("button", { name: "Next page" }).click();
+  await expect(toasts(page)).toContainText([
+    "This page tried to open another page; open it from Lectern instead.",
+  ]);
+  // The page Lectern meant, at a URL of a new open.
+  await expect(frame(page)).not.toHaveAttribute("src", first ?? "");
+  const token = (src: string | null) => /\/o\/([^/]+)\//.exec(src ?? "")?.[1];
+  expect(token(await frame(page).getAttribute("src"))).not.toBe(token(first));
+  await expect(inside(page).locator("h1")).toHaveText("Survey index");
+  expect((await reported(page)).text).toContain("Survey index");
+  await expect(guard(page)).toHaveCount(0);
+  // Again, within 10 seconds: let go.
+  await inside(page).getByRole("button", { name: "Next page" }).click();
+  await expect(guard(page).locator(".state-title")).toHaveText("This page keeps navigating away.");
+  await expect(guard(page).getByRole("button", { name: "Open in default app" })).toBeVisible();
+  const text = await page.evaluate((p) => window.__fake.coreText(p), path);
+  expect(text).toContain("Survey index");
+  expect(text).not.toContain("second invented page");
+});
+
+test("a page that leaves for another before it has loaded is pulled back", async ({ page }) => {
+  await openFixture(page, "artifacts/leaving.html");
+  await expect(toasts(page)).toContainText([
+    "This page tried to open another page; open it from Lectern instead.",
+  ]);
+  // It leaves again at once: let go.
+  await expect(guard(page).locator(".state-title")).toHaveText("This page keeps navigating away.");
+  await expect(page).toHaveTitle("leaving.html — Lectern");
+});
+
+test("a page that is ready, then leaves before its own load, is pulled back", async ({ page }) => {
+  await openFixture(page, "artifacts/late-leaving.html");
+  await reported(page);
+  await expect(toasts(page)).toContainText([
+    "This page tried to open another page; open it from Lectern instead.",
+  ]);
+  await expect(guard(page).locator(".state-title")).toHaveText("This page keeps navigating away.");
+});
+
+test("a page that fakes its own load, then leaves, is pulled back", async ({ page }) => {
+  await openFixture(page, "artifacts/faking.html");
+  await reported(page);
+  await expect(toasts(page)).toContainText([
+    "This page tried to open another page; open it from Lectern instead.",
+  ]);
+  await expect(guard(page).locator(".state-title")).toHaveText("This page keeps navigating away.");
+});
+
+test("a page that loads itself again is read again, with no toast and no guard", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/self-refresh.html");
+  await reported(page);
+  const src = await frame(page).getAttribute("src");
+  const loadedAt = () =>
+    inside(page)
+      .locator("body")
+      .evaluate(() => performance.timeOrigin);
+  const first = await loadedAt();
+  await expect.poll(loadedAt, { timeout: 5000 }).not.toBe(first);
+  await page.waitForTimeout(2500);
+  await expect(toasts(page)).toHaveCount(0);
+  await expect(guard(page)).toHaveCount(0);
+  expect(await frame(page).getAttribute("src")).toBe(src);
+  await expect(outline(page)).toHaveText(["Live board"]);
 });

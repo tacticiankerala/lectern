@@ -43,7 +43,7 @@ test("quick open finds a page by name", async ({ page }) => {
   await expect(frame(page)).toHaveAttribute("sandbox", "allow-scripts");
   await expect(frame(page)).toHaveAttribute(
     "src",
-    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/report\.html\?t=t\d+&lxmode=full&v=\d+$/,
+    /^\/__page\/o\/t\d+-[0-9a-f]+\/report\.html\?lxmode=full&v=\d+$/,
   );
 });
 
@@ -69,7 +69,7 @@ test("a PDF shows in an unsandboxed frame that fills the pane, and F5 loads it a
   expect(await frame(page).getAttribute("sandbox")).toBeNull();
   await expect(frame(page)).toHaveAttribute(
     "src",
-    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/brief\.pdf\?v=\d+#page=1$/,
+    /^\/__page\/o\/t\d+-[0-9a-f]+\/brief\.pdf\?v=\d+#page=1$/,
   );
   const fit = await page.evaluate(() => {
     const pane = document.getElementById("lx-doc-pane");

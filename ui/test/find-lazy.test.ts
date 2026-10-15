@@ -1,6 +1,6 @@
-// The find bar's module loads on first use. A page or a PDF opened while it loads gets no finder:
-// the find bar only searches Lectern's own document. A file of its own, as the module is held back
-// for every test in it.
+// The find bar's module loads on first use. Find asked for on a note doesn't open once a page or a
+// PDF has opened while the module loaded: it was asked for what was on screen then. A file of its
+// own, as the module is held back for every test in it.
 import { describe, expect, it, vi } from "vitest";
 import { FakeBackend } from "../dev/backend-fake";
 import { App } from "../src/app";

@@ -103,7 +103,9 @@ fn the_text_is_the_blocks_joined_as_the_bridge_joins_them() {
 }
 
 /// Every block is on the line its leading text is first found on, after the block before it, and
-/// the body's text is looked for in the body: the title repeating the first heading isn't it.
+/// the body's text is looked for in the body: the title repeating the first heading isn't it. Text
+/// under 8 characters (most table cells) isn't looked for, unless it is a heading: it takes the
+/// line of the block before it.
 #[test]
 fn each_block_is_on_the_line_its_leading_text_is_on() {
     let map = TextMap::from_blocks(&report_blocks(), REPORT);
@@ -124,10 +126,10 @@ fn each_block_is_on_the_line_its_leading_text_is_on() {
             ),
         ]
     );
-    // Table cells, short as they are, follow one another along their rows.
+    // Of the table's cells, only "Sign-ups" and "Conversion" are long enough to look for.
     assert_eq!(
         lines(&map)[4..16],
-        [14, 14, 14, 15, 15, 15, 16, 16, 16, 17, 17, 17]
+        [12, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14]
     );
     // A link inside the paragraph comes after its first 40 characters.
     assert_eq!(lines(&map)[16..18], [19, 20]);
@@ -160,10 +162,10 @@ fn a_block_not_in_the_source_takes_the_line_before_it() {
 /// least 8 characters, places the block.
 #[test]
 fn inline_markup_leaves_a_shorter_prefix_to_find() {
-    let source = "<body>\n<p>Intro.</p>\n\n<p>Sign-ups <strong>rose</strong> steadily.</p>\n<p>Tide <em>tables</em> by hour.</p>\n";
+    let source = "<body>\n<p>Intro paragraph.</p>\n\n<p>Sign-ups <strong>rose</strong> steadily.</p>\n<p>Tide <em>tables</em> by hour.</p>\n";
     let map = TextMap::from_blocks(
         &[
-            block("Intro."),
+            block("Intro paragraph."),
             block("Sign-ups rose steadily."),
             // Markup inside its shortest prefix ("Tide tables"): not found, it takes the line
             // before it.
@@ -177,10 +179,10 @@ fn inline_markup_leaves_a_shorter_prefix_to_find() {
 /// The source's `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;` are the characters the page shows.
 #[test]
 fn the_five_entities_are_read_as_their_characters() {
-    let source = "<body>\n<p>Intro.</p>\n<p>Q&amp;A on &lt;tags&gt;, &quot;quotes&quot; and &#39;marks&#39;</p>\n<p>Salt &amp;amp; pepper</p>\n";
+    let source = "<body>\n<p>Intro paragraph.</p>\n<p>Q&amp;A on &lt;tags&gt;, &quot;quotes&quot; and &#39;marks&#39;</p>\n<p>Salt &amp;amp; pepper</p>\n";
     let map = TextMap::from_blocks(
         &[
-            block("Intro."),
+            block("Intro paragraph."),
             block("Q&A on <tags>, \"quotes\" and 'marks'"),
             // Decoded once: `&amp;amp;` is `&amp;`.
             block("Salt &amp; pepper"),

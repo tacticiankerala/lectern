@@ -15,7 +15,6 @@ const PDF = "C:\\V\\artifacts\\brief.pdf";
 
 const READY = {
   type: "ready",
-  title: "Weekly report",
   headings: [
     { level: 1, text: "Weekly report", id: "lx-heading-1", offset: 0 },
     { level: 2, text: "Results", id: "results", offset: 14 },
@@ -121,6 +120,10 @@ async function started(
   const app = new App(fake, appRoot());
   await app.start();
   await app.open(initial, { push: true });
+  app.on("doc", () => {
+    key = app.state.doc?.bridgeKey ?? null;
+  });
+  key = app.state.doc?.bridgeKey ?? null;
   return { fake, app };
 }
 
@@ -141,8 +144,18 @@ function posts(): Record<string, unknown>[] {
   return sent;
 }
 
-/** A message from the page's bridge: posted by the frame's own window, unless `source` says. */
-async function bridge(data: Record<string, unknown>, source?: Window | null): Promise<void> {
+/** The open's bridge key, as the page on screen has it. */
+let key: string | null = null;
+
+/**
+ * A message from the page's bridge, signed with its open's key: posted by the frame's own
+ * window, unless `source` says, and with the key, unless `signed` is false.
+ */
+async function bridge(
+  data: Record<string, unknown>,
+  source?: Window | null,
+  signed = true,
+): Promise<void> {
   // The page's module loads on first use.
   await vi.waitFor(() => {
     expect(document.querySelector(".page-notice")).not.toBeNull();
@@ -151,10 +164,15 @@ async function bridge(data: Record<string, unknown>, source?: Window | null): Pr
   await settle(5);
   window.dispatchEvent(
     new MessageEvent("message", {
-      data: { lx: 1, ...data },
+      data: { lx: 1, ...data, ...(signed ? { key } : {}) },
       source: source === undefined ? frame().contentWindow : source,
     }),
   );
+}
+
+/** The frame's document loaded, as another's or its own does. */
+function loaded(): void {
+  frame().dispatchEvent(new Event("load"));
 }
 
 function press(init: KeyboardEventInit): void {
@@ -167,6 +185,16 @@ function outlineLinks(): HTMLAnchorElement[] {
   return [...document.querySelectorAll<HTMLAnchorElement>("#lx-outline-pane a")];
 }
 
+/** `rest` as the browser resolves it in the page on screen: under its open's URL. */
+function inPage(rest: string): string {
+  return new URL(rest, new URL(frame().getAttribute("src") ?? "", location.href)).href;
+}
+
+/** The toasts on screen. */
+function toasts(): string[] {
+  return [...document.querySelectorAll(".toast")].map((t) => t.textContent);
+}
+
 afterEach(() => {
   Reflect.deleteProperty(navigator, "userActivation");
 });
@@ -177,7 +205,7 @@ describe("an HTML page", () => {
     expect(frame().getAttribute("sandbox")).toBe("allow-scripts");
     expect(frame().style.colorScheme).toBe("light");
     expect(frame().getAttribute("src")).toMatch(
-      /^\/__page\/d\/c\/V\/artifacts\/report\.html\?t=[^&]+&lxmode=full&v=\d+$/,
+      /^\/__page\/o\/t\d+-[0-9a-f]+\/report\.html\?lxmode=full&v=\d+$/,
     );
     const sent = posts();
     await bridge(READY);
@@ -186,6 +214,26 @@ describe("an HTML page", () => {
     expect(frame().style.colorScheme).toBe("dark");
     // The page paints in the new theme's colours.
     expect(sent.filter((m) => m.type === "theme")).toHaveLength(2);
+  });
+
+  it("scrolls to the heading clicked in the outline, of two that share an id", async () => {
+    await started();
+    const sent = posts();
+    await bridge({
+      ...READY,
+      headings: [
+        { level: 2, text: "Notes", id: "notes", offset: 0 },
+        { level: 2, text: "Notes", id: "notes", offset: 6 },
+      ],
+      blocks: [
+        { text: "Notes", headingLevel: 2 },
+        { text: "Notes", headingLevel: 2 },
+      ],
+    });
+    outlineLinks()[1]?.click();
+    expect(sent).toContainEqual({ lx: 1, type: "scroll-to", offset: 6 });
+    expect(sent).not.toContainEqual({ lx: 1, type: "scroll-to", offset: 0 });
+    expect(outlineLinks()[1]?.closest("li")?.classList.contains("active")).toBe(true);
   });
 
   it("lists its headings in the outline, and a click scrolls the page to one", async () => {
@@ -314,7 +362,7 @@ describe("an HTML page", () => {
     });
     const { fake, app } = await started();
     await bridge(READY);
-    await bridge({ type: "link", href: "other.html" });
+    await bridge({ type: "link", href: inPage("other.html") });
     await vi.waitFor(() => {
       expect(app.state.doc?.path).toBe(OTHER);
     });
@@ -322,9 +370,9 @@ describe("an HTML page", () => {
     expect(app.state.doc?.path).toBe(PAGE);
     const before = frame();
     await bridge(READY);
-    await bridge({ type: "link", href: "https://example.com" });
+    await bridge({ type: "link", href: "https://example.com/" });
     await vi.waitFor(() => {
-      expect(fake.followed.map((t) => t.target)).toContain("https://example.com");
+      expect(fake.followed.map((t) => t.target)).toContain("https://example.com/");
     });
     expect(fake.followed.at(-1)?.kind).toBe("external");
     expect(app.state.doc?.path).toBe(PAGE);
@@ -633,6 +681,221 @@ describe("an HTML page", () => {
       anchor: { quote: "Rendered by" },
       text: "Which script?",
     });
+  });
+
+  it("opens again with a fresh token when another page fills its frame, and is let go when that keeps happening", async () => {
+    const { fake, app } = await started();
+    expect(key).toMatch(/^[0-9a-z-]+$/);
+    await bridge(WITH_TEXT);
+    const first = frame().getAttribute("src");
+    // Its own load, its ready and its bridge's load before it; then a load nothing of the open's
+    // follows.
+    await bridge({ type: "loaded" });
+    loaded();
+    loaded();
+    await vi.waitFor(
+      () => {
+        expect(frame().getAttribute("src")).not.toBe(first);
+      },
+      { timeout: 3000 },
+    );
+    expect(toasts()).toContain(
+      "This page tried to open another page; open it from Lectern instead.",
+    );
+    expect(app.state.doc?.path).toBe(PAGE);
+    const token = (src: string | null) => /\/o\/([^/]+)\//.exec(src ?? "")?.[1];
+    expect(token(frame().getAttribute("src"))).not.toBe(token(first));
+    // Within 10 seconds, again: the pane says so instead.
+    loaded();
+    const guard = await vi.waitFor(
+      () => {
+        const found = document.querySelector<HTMLElement>("#lx-doc .state");
+        if (!found) throw new Error("no guard");
+        return found;
+      },
+      { timeout: 3000 },
+    );
+    expect(guard.querySelector(".state-title")?.textContent).toBe(
+      "This page keeps navigating away.",
+    );
+    expect(document.querySelector("iframe.lx-frame")).toBeNull();
+    guard.querySelector<HTMLButtonElement>("button")?.click();
+    await vi.waitFor(() => {
+      expect(fake.followed.at(-1)).toEqual({
+        kind: "file",
+        target: PAGE,
+        line: null,
+        anchor: null,
+      });
+    });
+  }, 10_000);
+
+  it("reads a page that loads itself again, its ready after its load, with no toast", async () => {
+    await started();
+    await bridge(WITH_TEXT);
+    const src = frame().getAttribute("src");
+    await bridge({ type: "loaded" });
+    loaded();
+    // It loads itself again: the frame's load first, then its own ready and load.
+    loaded();
+    await settle(50);
+    await bridge({ ...WITH_TEXT, blocks: [...WITH_TEXT.blocks, { text: "Refreshed" }] });
+    await bridge({ type: "loaded" });
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(toasts()).toEqual([]);
+    expect(frame().getAttribute("src")).toBe(src);
+    expect(document.querySelector("#lx-doc .state")).toBeNull();
+  }, 10_000);
+
+  it("takes no message without its open's key, a forged ready included", async () => {
+    await started();
+    await bridge(READY);
+    await bridge(
+      {
+        ...READY,
+        headings: [{ level: 1, text: "Forged", id: "forged", offset: 0 }],
+        blocks: [{ text: "Forged", headingLevel: 1 }],
+      },
+      undefined,
+      false,
+    );
+    await bridge({ ...READY, blocks: [{ text: "Guessed" }], key: "a-guess" }, undefined, false);
+    await bridge(
+      {
+        type: "blocks",
+        headings: [{ level: 1, text: "Forged", id: "forged", offset: 0 }],
+        blocks: [{ text: "Forged", headingLevel: 1 }],
+      },
+      undefined,
+      false,
+    );
+    await settle(600);
+    expect(outlineLinks().map((a) => a.textContent)).toEqual([
+      "Weekly report",
+      "Results",
+      "Next steps",
+    ]);
+  });
+
+  it("waits for a navigation the reader started before it opens a page whose frame was taken", async () => {
+    const { fake, app } = await started();
+    await bridge(WITH_TEXT);
+    await bridge({ type: "loaded" });
+    loaded();
+    const gate = deferred();
+    const original = fake.openDocument.bind(fake);
+    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path) => {
+      if (path === A) await gate.promise;
+      return original(path);
+    });
+    const going = app.open(A, { push: true });
+    loaded();
+    await vi.waitFor(
+      () => {
+        expect(toasts()).toContain(
+          "This page tried to open another page; open it from Lectern instead.",
+        );
+      },
+      { timeout: 3000 },
+    );
+    gate.resolve();
+    await going;
+    await settle(20);
+    expect(app.state.doc?.path).toBe(A);
+    expect(opens.mock.calls.map(([p]) => p)).not.toContain(PAGE);
+  }, 10_000);
+
+  it("opens again when another page fills its frame once more after 10 seconds", async () => {
+    await started();
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000_000);
+    await bridge(READY);
+    await bridge({ type: "loaded" });
+    loaded();
+    const first = frame();
+    loaded();
+    await vi.waitFor(
+      () => {
+        expect(frame()).not.toBe(first);
+      },
+      { timeout: 3000 },
+    );
+    now.mockReturnValue(1_000_000 + 10_001);
+    const second = frame();
+    loaded();
+    await vi.waitFor(
+      () => {
+        expect(frame()).not.toBe(second);
+      },
+      { timeout: 3000 },
+    );
+    expect(document.querySelector("#lx-doc .state")).toBeNull();
+    now.mockRestore();
+  }, 10_000);
+
+  it("pulls back a page that said it was ready, then left before its own load", async () => {
+    const { app } = await started();
+    await bridge(WITH_TEXT);
+    const first = frame().getAttribute("src");
+    // Another page's load, its bridge's load never having come.
+    loaded();
+    await vi.waitFor(
+      () => {
+        expect(frame().getAttribute("src")).not.toBe(first);
+      },
+      { timeout: 3000 },
+    );
+    expect(toasts()).toContain(
+      "This page tried to open another page; open it from Lectern instead.",
+    );
+    expect(app.state.doc?.path).toBe(PAGE);
+  }, 10_000);
+
+  it("pairs its frame's load with its bridge's, in either order", async () => {
+    await started();
+    const src = frame().getAttribute("src");
+    // The frame's load first; then the page's own ready and load.
+    loaded();
+    await settle(50);
+    await bridge(READY);
+    await bridge({ type: "loaded" });
+    // And again, the bridge's load first.
+    await bridge({ ...READY, blocks: [{ text: "Again" }] });
+    await bridge({ type: "loaded" });
+    loaded();
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(toasts()).toEqual([]);
+    expect(frame().getAttribute("src")).toBe(src);
+  }, 10_000);
+
+  it("says its comments are loading until it has reported its text", async () => {
+    await started();
+    document.querySelector<HTMLElement>("#lx-tab-comments")?.click();
+    const empty = () => document.querySelector("#lx-comments-pane .comments-empty")?.textContent;
+    await vi.waitFor(() => {
+      expect(empty()).toBe("Loading comments…");
+    });
+    await bridge(WITH_TEXT);
+    await vi.waitFor(() => {
+      expect(empty()).toBe("No comments yet. Select text in the page to comment on it.");
+    });
+  });
+
+  it("opens again under a new HTML pages setting, changed here or in another window", async () => {
+    const { fake, app } = await started();
+    await bridge(READY);
+    expect(frame().getAttribute("src")).toContain("lxmode=full");
+    fake.settingsElsewhere({ htmlPages: "offline" });
+    await vi.waitFor(() => {
+      expect(frame().getAttribute("src")).toContain("lxmode=offline");
+    });
+    app.updateSettings({ htmlPages: "static" });
+    await vi.waitFor(() => {
+      expect(frame().getAttribute("src")).toContain("lxmode=static");
+    });
+    expect(toasts()).not.toContain(
+      "This page tried to open another page; open it from Lectern instead.",
+    );
   });
 
   it("tells Rust whether the focus is inside a page's or a PDF's frame", async () => {

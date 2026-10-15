@@ -1,7 +1,7 @@
 // The frame an HTML page or a PDF shows in: it fills the document pane in place of the document
 // (`#lx-doc-pane.framed`). The frame is in the page before its `src` is set, as WebView2 gives the
-// first document the frame's colour scheme only then. Every show loads a new URL (`&v=<n>`): only
-// a reload, never a change of hash, takes a PDF to a page or shows a change on disk.
+// first document the frame's colour scheme only then. Every show loads a new URL (`v=<n>` in its
+// query): only a reload, never a change of hash, takes a PDF to a page or shows a change on disk.
 //
 // A PDF's frame has no sandbox, which WebView2's viewer won't run in. A page's always has one that
 // allows scripts and never the same origin, and every response of the page protocol but a PDF's
@@ -11,8 +11,20 @@
 // to once the page is ready (its own saved place unless something else is asked for). Above a page,
 // a notice names what it loads from the web.
 //
+// Only messages signed with the open's key (`bridgeKey`) are taken: Rust puts it in the bridge of
+// the open's own page alone, so no page script can forge one, and no page the frame navigates to
+// has it. Every `load` of the frame must be paired with a signed `ready` and a signed `loaded`, the
+// bridge's own load of that document, each before it or within 2 seconds after it, in either order.
+// A load without them is another page in the frame (a script, `<meta http-equiv=refresh>`, a link
+// the page kept from its bridge, or a page that left before its own load): its session ends, and
+// the page Lectern meant to show is opened again with a fresh token, through the navigation queue,
+// so a navigation the reader started wins. A second within 10 seconds stops the loop: the pane
+// says so instead, with the page's default app a click away. A page that loads itself again sends
+// its `ready` and `loaded` again, and is read again.
+//
 // The keyboard focus inside a frame is the frame's own, so Rust is told whenever it goes in or out
 // (`trackFrameFocus`): only Rust sees the keys pressed there.
+import { samePath } from "./dom";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FrameFocus } from "./generated/FrameFocus";
 import type { PageLoads } from "./generated/PageLoads";
@@ -20,6 +32,10 @@ import type { PageFrame, PageHost } from "./page-frame";
 
 /** Where a PDF opens: no reading position is kept in one. */
 const PDF_START = "#page=1";
+/** A page that navigates its frame again within this long, in milliseconds, is let go. */
+const NAVIGATION_LOOP_MS = 10_000;
+/** How long a load of the frame waits for its page's signed `ready` and `loaded`, in ms. */
+const READY_WITHIN_MS = 2000;
 
 /** What a frame needs from the app. */
 export interface FrameHost extends PageHost {
@@ -27,6 +43,10 @@ export interface FrameHost extends PageHost {
   dark(): boolean;
   /** A frame came or went, so the keyboard focus may have moved out of one. */
   focusMoved(): void;
+  /** The page at `path` navigated its frame: it is to be opened again, as Lectern meant. */
+  navigatedAway(path: string): void;
+  /** The page at `path` keeps navigating its frame: the pane says so instead. */
+  keepsNavigatingAway(path: string): void;
 }
 
 /** `url` with `name=value` added to its query. */
@@ -51,6 +71,22 @@ export class FrameView {
     fraction: null,
     anchor: null,
   };
+  /** The page showing: what is opened again should it navigate its frame. */
+  private pagePath: string | null = null;
+  /** The key its bridge signs its messages with; none for a PDF. */
+  private key: string | null = null;
+  /** A signed `ready` came that no load of the frame has been paired with yet. */
+  private readySeen = false;
+  /** A signed `loaded` (the bridge's own load) came, not yet paired with a load of the frame. */
+  private loadedSeen = false;
+  /** A load of the frame waits for its signed `ready` and `loaded`. */
+  private loadWaiting = false;
+  /** How long it waits. */
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The page navigated its frame: nothing more is taken from it. */
+  private away = false;
+  /** The last page that navigated its frame, and when, for the loop guard. */
+  private lastAway: { path: string; at: number } | null = null;
 
   constructor(
     private readonly pane: HTMLElement,
@@ -93,12 +129,17 @@ export class FrameView {
     }
     this.pane.append(frame);
     this.frame = frame;
+    this.pagePath = page ? doc.path : null;
+    this.key = page ? doc.bridgeKey : null;
     // Where the reader left it, unless something else is asked for.
     this.start = { fraction: page ? (doc.position?.fraction ?? null) : null, anchor: null };
     this.version += 1;
     const src = withParam(url, "v", String(this.version));
     frame.src = page ? src : src + PDF_START;
     if (page) {
+      frame.addEventListener("load", () => {
+        this.loaded(frame);
+      });
       this.startPage(doc, frame);
     }
   }
@@ -114,6 +155,16 @@ export class FrameView {
     this.session = null;
     this.held = { messages: [], loads: [] };
     this.start = { fraction: null, anchor: null };
+    this.pagePath = null;
+    this.key = null;
+    this.away = false;
+    this.readySeen = false;
+    this.loadedSeen = false;
+    this.loadWaiting = false;
+    if (this.readyTimer !== null) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
     this.pane.classList.remove("framed");
     if (had) {
       this.host.focusMoved();
@@ -183,12 +234,94 @@ export class FrameView {
     );
   }
 
-  /** A message from a page's bridge: taken only from the frame's own window. */
-  private received(e: MessageEvent): void {
-    const win = this.frame?.contentWindow;
-    if (!win || e.source !== win || this.frame?.dataset.kind !== "page") {
+  /**
+   * `frame` loaded a document: the open's page when its signed `ready` and `loaded` came first, or
+   * come within `READY_WITHIN_MS`; another page otherwise.
+   */
+  private loaded(frame: HTMLIFrameElement): void {
+    if (frame !== this.frame || this.away) {
       return;
     }
+    this.loadWaiting = true;
+    if (!this.pair() && this.readyTimer === null) {
+      this.readyTimer = setTimeout(() => {
+        this.readyTimer = null;
+        this.navigated(frame);
+      }, READY_WITHIN_MS);
+    }
+  }
+
+  /** A signed message `type` came: a `ready` or a `loaded` counts toward a load of the frame. */
+  private signed(type: unknown): void {
+    if (type === "ready") {
+      this.readySeen = true;
+    } else if (type === "loaded") {
+      this.loadedSeen = true;
+    } else {
+      return;
+    }
+    this.pair();
+  }
+
+  /**
+   * Pairs the load of the frame waiting with its page's `ready` and `loaded`, once both came;
+   * true when it did.
+   */
+  private pair(): boolean {
+    if (!this.loadWaiting || !this.readySeen || !this.loadedSeen) {
+      return false;
+    }
+    this.loadWaiting = false;
+    this.readySeen = false;
+    this.loadedSeen = false;
+    if (this.readyTimer !== null) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
+    return true;
+  }
+
+  /**
+   * Another page fills `frame`, its session no longer the page's: the session ends, and the page
+   * is opened again, unless the same happened within `NAVIGATION_LOOP_MS`, when it is let go.
+   */
+  private navigated(frame: HTMLIFrameElement): void {
+    const path = this.pagePath;
+    if (frame !== this.frame || this.away || path === null) {
+      return;
+    }
+    this.away = true;
+    this.session?.dispose();
+    this.session = null;
+    this.held = { messages: [], loads: [] };
+    const now = Date.now();
+    const last = this.lastAway;
+    if (last !== null && samePath(last.path, path) && now - last.at < NAVIGATION_LOOP_MS) {
+      this.lastAway = null;
+      this.close();
+      this.host.keepsNavigatingAway(path);
+      return;
+    }
+    this.lastAway = { path, at: now };
+    this.host.navigatedAway(path);
+  }
+
+  /** A message from a page's bridge: taken only from the frame's own window, with the key. */
+  private received(e: MessageEvent): void {
+    const win = this.frame?.contentWindow;
+    if (!win || e.source !== win || this.frame?.dataset.kind !== "page" || this.away) {
+      return;
+    }
+    const data: unknown = e.data;
+    if (
+      this.key === null ||
+      typeof data !== "object" ||
+      data === null ||
+      (data as { key?: unknown }).key !== this.key
+    ) {
+      return;
+    }
+    this.signed((data as { type?: unknown }).type);
     if (this.session) {
       this.session.receive(e.data);
     } else {

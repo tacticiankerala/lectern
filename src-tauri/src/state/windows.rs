@@ -674,8 +674,8 @@ impl WindowState {
         }
         let watch = lock(&self.watch).take();
         drop(watch);
-        // Its pages' reports have no window to go to.
-        lock(&self.app.page_reports).forget(&self.label);
+        // Its pages' opens go with it: their URLs serve nothing, and their reports go nowhere.
+        lock(&self.app.page_opens).forget(&self.label);
     }
 
     pub(super) fn is_retired(&self) -> bool {

@@ -13,6 +13,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use lectern_core::library::path_key;
+use lectern_core::library::pathmap::is_device_name;
 use percent_encoding::percent_decode_str;
 
 use super::paths::path_string;
@@ -46,13 +47,19 @@ impl AssetScope {
     /// Whether the (normalised) `path` is inside an allowed folder.
     fn allows(&self, path: &str) -> bool {
         let key = path_key(Path::new(path));
-        self.roots.iter().chain(&self.opened).any(|folder| {
-            key == *folder
-                || key
-                    .strip_prefix(folder.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
+        self.roots
+            .iter()
+            .chain(&self.opened)
+            .any(|folder| key_within(&key, folder))
     }
+}
+
+/// Whether the path key `key` is the folder key `folder`, or inside it.
+pub(super) fn key_within(key: &str, folder: &str) -> bool {
+    key == folder
+        || key
+            .strip_prefix(folder)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Why a request was refused.
@@ -63,7 +70,8 @@ pub enum Refusal {
     UntrustedHost,
     /// Not a type the protocol serves: an image, for this one.
     WrongType,
-    OutsideLibrary,
+    /// Outside every folder the protocol serves from.
+    Outside,
 }
 
 /// A file the protocol may serve.
@@ -76,7 +84,7 @@ pub struct AssetFile {
 /// Decides whether `raw` (a percent-decoded request path) may be served, without touching the
 /// file system.
 pub fn decide(raw: &str, trust: &Trust, scope: &AssetScope) -> Result<AssetFile, Refusal> {
-    let (path, content_type) = admit(raw, trust, scope, content_type)?;
+    let (path, content_type) = admit(raw, trust, content_type, |path| scope.allows(path))?;
     Ok(AssetFile {
         path: PathBuf::from(path),
         content_type,
@@ -85,12 +93,13 @@ pub fn decide(raw: &str, trust: &Trust, scope: &AssetScope) -> Result<AssetFile,
 
 /// The checks every protocol that serves local files makes on `raw` (a decoded path), in order and
 /// without touching the file system: an absolute local path, on a trusted host, normalised, of a
-/// type `type_of` serves, and inside an allowed folder. The normalised path and its type.
+/// type `type_of` serves, and inside a folder it serves from (`inside`, given the normalised
+/// path). The normalised path and its type.
 pub(super) fn admit<T>(
     raw: &str,
     trust: &Trust,
-    scope: &AssetScope,
     type_of: impl FnOnce(&str) -> Option<T>,
+    inside: impl FnOnce(&str) -> bool,
 ) -> Result<(String, T), Refusal> {
     let path = shell::local_path(raw).ok_or(Refusal::NotLocal)?;
     if !trust.allows(path) {
@@ -98,8 +107,8 @@ pub(super) fn admit<T>(
     }
     let path = normalize(path).ok_or(Refusal::NotLocal)?;
     let kind = type_of(&path).ok_or(Refusal::WrongType)?;
-    if !scope.allows(&path) {
-        return Err(Refusal::OutsideLibrary);
+    if !inside(&path) {
+        return Err(Refusal::Outside);
     }
     Ok((path, kind))
 }
@@ -128,21 +137,6 @@ pub(super) fn normalize(path: &str) -> Option<String> {
         }
     }
     Some(format!("{prefix}\\{}", segments.join("\\")))
-}
-
-/// Whether a file name (extensions and all) names a DOS device.
-fn is_device_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    let upper = stem.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
-        && upper.chars().count() == 4
-        && upper
-            .chars()
-            .nth(3)
-            .is_some_and(|c| c.is_ascii_digit() || matches!(c, '¹' | '²' | '³')))
 }
 
 /// The `Content-Type` of an image, by extension; `None` for anything else.
@@ -316,20 +310,20 @@ mod tests {
     fn anything_outside_the_allowed_folders_is_refused() {
         assert_eq!(
             check(r"C:\Windows\Web\Screen\img100.jpg"),
-            Err(Refusal::OutsideLibrary)
+            Err(Refusal::Outside)
         );
         assert_eq!(
             check(r"S:\Notes\My Vault\devices\a.png"),
-            Err(Refusal::OutsideLibrary)
+            Err(Refusal::Outside)
         );
         assert_eq!(
             check(r"C:\Users\me\Downloads\other.png"),
-            Err(Refusal::OutsideLibrary)
+            Err(Refusal::Outside)
         );
         // `..` is applied before the prefix check.
         assert_eq!(
             check(r"S:\Notes\My Vault\dev\..\other\x.png"),
-            Err(Refusal::OutsideLibrary)
+            Err(Refusal::Outside)
         );
         assert_eq!(check(r"S:\..\..\x.png"), Err(Refusal::NotLocal));
     }

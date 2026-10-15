@@ -241,8 +241,8 @@ export class App {
     this.toasts = new Toasts(this.layout.toasts);
     this.view = new DocView(this.layout.doc, this);
     this.rightPanel = new RightPanel(this.layout.outline);
-    this.outline = new Outline(this.rightPanel.outlinePane, this.layout.docPane, (id) => {
-      this.view.scrollToAnchor(id);
+    this.outline = new Outline(this.rightPanel.outlinePane, this.layout.docPane, (id, index) => {
+      this.view.scrollToOutlineItem(id, index);
     });
     this.updateProgress = trackProgress(this.layout.docPane, this.layout.progress);
     this.layout.docPane.addEventListener(

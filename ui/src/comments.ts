@@ -33,9 +33,10 @@
 // - In focus mode the panel is hidden: the dots and the adding buttons hide too (comments.css) and
 //   clicks on highlighted text do nothing; the highlights stay.
 // - An HTML page takes comments on the text its bridge reports (comments-page.ts), with no dots or
-//   "+": its comments load only once it has reported its text, and again when its text changes
-//   while it has comments to find in it. Its bridge paints the highlights inside its frame, says
-//   when marked text is clicked, and scrolls to a comment's text.
+//   "+": its comments load only once it has reported its text (the Comments tab says they are
+//   loading until then), and again when its text changes while it has comments to find in it.
+//   Its bridge paints the highlights inside its frame, says when marked text is clicked, and
+//   scrolls to a comment's text.
 import type { Backend } from "./backend";
 import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
 import { pageSpan, type PageSurface } from "./comments-page";
@@ -109,6 +110,8 @@ export interface CommentsHost {
 
 const EMPTY = "No comments yet. Select text in the note, or hover a paragraph and press +.";
 const EMPTY_PAGE = "No comments yet. Select text in the page to comment on it.";
+/** What a page's Comments tab says until the page has reported its text. */
+const LOADING = "Loading comments…";
 /** Where a card scrolled to lands below the pane's top, in pixels. */
 const CARD_GAP = 12;
 /** How long the blocks a card went to stay flashed, in ms: its animation's (comments.css). */
@@ -299,9 +302,13 @@ export class CommentsController {
     const page = this.pageText();
     if (page === undefined) {
       // A page's comments are found in its text: they load once it has reported it (`onPage`).
-      this.pageWaiting = true;
+      if (!this.pageWaiting) {
+        this.pageWaiting = true;
+        this.render();
+      }
       return;
     }
+    const waited = this.pageWaiting;
     this.pageWaiting = false;
     const revision = this.pageRevision;
     let payload: ReviewPayload;
@@ -313,6 +320,8 @@ export class CommentsController {
     } catch (e) {
       if (gen === this.gen && this.showing(path)) {
         this.host.toast(String(e));
+        // Loading no longer.
+        if (waited) this.render();
       }
       return;
     }
@@ -621,6 +630,13 @@ export class CommentsController {
     }
     if (this.edit !== null && !this.editable(this.edit)) {
       this.edit = null;
+    }
+    if (this.pageWaiting && this.host.isPage()) {
+      // A page's comments are found in its text, which hasn't come yet.
+      this.head.hidden = true;
+      this.banner.hidden = true;
+      this.list.replaceChildren(h("p", { class: "comments-empty" }, LOADING));
+      return;
     }
     this.head.hidden = p === null;
     this.banner.hidden = p?.readOnly == null;

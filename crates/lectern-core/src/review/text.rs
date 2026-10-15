@@ -35,6 +35,10 @@ pub const MAX_PAGE_TEXT: usize = 2 * 1024 * 1024;
 const LEAD_MAX_CHARS: usize = 40;
 const LEAD_MIN_CHARS: usize = 8;
 
+/// How far past the first place a block's shortest leading text is a longer one is looked for, in
+/// bytes: a block isn't sought across the whole page for a few more words.
+const LOOK_AHEAD: usize = 64 * 1024;
+
 /// The most bytes of a page's HTML that placing its blocks searches, all searches together: a
 /// block not in the HTML (a script made it) searches the rest of it, so a page of many such blocks
 /// would otherwise cost blocks × HTML. Past it, the blocks left take the line of the last one
@@ -67,12 +71,13 @@ pub struct NoteText {
 }
 
 impl NoteText {
-    /// The text of the note named `note`, read as `source` ([`TextMap::of_note`]).
-    pub fn of_note(note: &str, source: &str) -> NoteText {
-        NoteText {
-            text: TextMap::of_note(note, source),
+    /// The text of the note named `note`, read as `source` ([`TextMap::of_note`]); `None` for an
+    /// HTML page, whose text is what its bridge reports ([`NoteText::of_page`]).
+    pub fn of_note(note: &str, source: &str) -> Option<NoteText> {
+        Some(NoteText {
+            text: TextMap::of_note(note, source)?,
             fingerprint: fingerprint(source),
-        }
+        })
     }
 
     /// The text of an HTML page whose bridge reported `blocks`, its HTML being `source`
@@ -223,7 +228,7 @@ impl TextMap {
             if text.is_empty() {
                 continue;
             }
-            if let Some(found) = lines.find(&text) {
+            if let Some(found) = lines.find(&text, block.heading_level.is_some()) {
                 line = found;
             }
             if let Some(level) = block.heading_level.filter(|l| (1..=6).contains(l)) {
@@ -244,12 +249,13 @@ impl TextMap {
 
     /// The text of the note named `note` (its file name or path), read as `source`, by its kind:
     /// a text file's paragraphs ([`TextMap::from_plain`]), else a note's blocks
-    /// ([`TextMap::build`]). An HTML page's text is what its bridge reports, which `source`
-    /// doesn't hold: it takes [`TextMap::from_blocks`] instead.
-    pub fn of_note(note: &str, source: &str) -> TextMap {
+    /// ([`TextMap::build`]). `None` for an HTML page: its text is what its bridge reports, which
+    /// `source` doesn't hold, so it takes [`TextMap::from_blocks`] instead.
+    pub fn of_note(note: &str, source: &str) -> Option<TextMap> {
         match doc_kind(note) {
-            Some(DocKind::Text) => Self::from_plain(source),
-            _ => Self::build(source),
+            Some(DocKind::Html) => None,
+            Some(DocKind::Text) => Some(Self::from_plain(source)),
+            _ => Some(Self::build(source)),
         }
     }
 
@@ -499,32 +505,57 @@ impl SourceLines {
         }
     }
 
-    /// The line where the block with the (normalised) text `text` is: the first place after the
-    /// last block found where its leading text (see [`leading_cuts`]) is, taking the longest of
-    /// its prefixes there. `None` when it isn't found, or isn't within what's left of
-    /// [`SEARCH_BUDGET`].
-    fn find(&mut self, text: &str) -> Option<u32> {
-        let cuts = leading_cuts(text);
+    /// The line where the block with the (normalised) text `text`, a heading or not, is, after the
+    /// last block found: where the longest of its leading texts (see [`leading_cuts`]) first is,
+    /// so a shorter one found earlier, where the rest of the block doesn't follow, never wins.
+    /// `None` when none is found within what's left of [`SEARCH_BUDGET`], or the text is too short
+    /// to look for.
+    ///
+    /// One pass finds them all: each place the shortest leading text is, in order, holds the
+    /// longest that matches there. The pass stops at the first place the longest of all is, else
+    /// [`LOOK_AHEAD`] past the first place the shortest is.
+    fn find(&mut self, text: &str, heading: bool) -> Option<u32> {
+        let cuts = leading_cuts(text, heading);
         let (&shortest, &longest) = (cuts.first()?, cuts.last()?);
         let left = SEARCH_BUDGET.saturating_sub(self.scanned);
         let end = self
             .html
             .floor_char_boundary(self.from.saturating_add(left).min(self.html.len()));
         let rest = self.html.get(self.from..end)?;
-        let Some(found) = rest.find(&text[..shortest]) else {
-            self.scanned += rest.len();
-            return None;
-        };
-        self.scanned += found + shortest;
+        let needle = &text[..shortest];
+        // The best place so far, and the leading text there.
+        let mut best: Option<(usize, usize)> = None;
+        let mut searched = rest.len();
+        let mut next = 0;
+        let mut window = rest;
+        while let Some(found) = window[next..].find(needle) {
+            let at = next + found;
+            if best.is_none() {
+                // Past the first place, a longer one is looked for only so far.
+                let end = rest.floor_char_boundary(at.saturating_add(LOOK_AHEAD).min(rest.len()));
+                window = &rest[..end];
+                searched = end;
+            }
+            let same = common_prefix_bytes(&rest[at..], &text[..longest]);
+            let cut = cuts
+                .iter()
+                .rev()
+                .copied()
+                .find(|&cut| cut <= same)
+                .unwrap_or(shortest);
+            if best.is_none_or(|(_, best)| cut > best) {
+                best = Some((at, cut));
+            }
+            if cut == longest {
+                searched = at + longest;
+                break;
+            }
+            next = at + rest[at..].chars().next().map_or(1, char::len_utf8);
+        }
+        self.scanned += searched;
+        let (found, cut) = best?;
         let at = self.from + found;
-        let same = common_prefix_bytes(&self.html[at..], &text[..longest]);
-        let matched = cuts
-            .iter()
-            .rev()
-            .copied()
-            .find(|&cut| cut <= same)
-            .unwrap_or(shortest);
-        self.from = at + matched;
+        self.from = at + cut;
         self.line = self
             .line
             .saturating_add(line_number(newlines(&self.html[self.counted..at])));
@@ -582,11 +613,12 @@ fn decode_entities(html: &str) -> String {
 }
 
 /// The prefixes of a page block's (normalised) text that it's looked for by in the page's HTML,
-/// as byte lengths, shortest first: those of at most 40 characters ending at a word boundary
-/// (before a space, or at the end of the text), of at least 8 characters unless the whole text is
-/// shorter. Text with no word boundary from its 8th to its 40th character (one long word, or a
-/// language written without spaces) is looked for by its first 40 characters.
-fn leading_cuts(text: &str) -> Vec<usize> {
+/// as byte lengths, shortest first: those of 8 to 40 characters ending at a word boundary (before a
+/// space, or at the end of the text). Text with no word boundary from its 8th to its 40th
+/// character (one long word, or a language written without spaces) is looked for by its first 40
+/// characters. Text under 8 characters has none, as it says too little to be found by, unless it
+/// is a `heading`, which is looked for by all of it.
+fn leading_cuts(text: &str, heading: bool) -> Vec<usize> {
     let mut cuts = Vec::new();
     for (chars, (at, c)) in text.char_indices().enumerate() {
         if c == ' ' && chars >= LEAD_MIN_CHARS {
@@ -600,7 +632,9 @@ fn leading_cuts(text: &str) -> Vec<usize> {
             return cuts;
         }
     }
-    cuts.push(text.len());
+    if heading || text.chars().count() >= LEAD_MIN_CHARS {
+        cuts.push(text.len());
+    }
     cuts
 }
 
@@ -630,14 +664,79 @@ mod tests {
         }
         source.push_str("</script>\n<p>Closing paragraph.</p>\n");
         let mut lines = SourceLines::new(&source);
-        assert_eq!(lines.find("Intro paragraph."), Some(2));
+        assert_eq!(lines.find("Intro paragraph.", false), Some(2));
         for i in 0..5000 {
-            assert_eq!(lines.find(&format!("Row {i} made by the script")), None);
+            assert_eq!(
+                lines.find(&format!("Row {i} made by the script"), false),
+                None
+            );
         }
         assert!(lines.scanned <= SEARCH_BUDGET, "{} bytes", lines.scanned);
         // Spent: nothing more is searched, even what is there.
-        assert_eq!(lines.find("Closing paragraph."), None);
+        assert_eq!(lines.find("Closing paragraph.", false), None);
         assert!(lines.scanned <= SEARCH_BUDGET, "{} bytes", lines.scanned);
+    }
+
+    /// A block is placed where its longest leading text is: a shorter one found earlier, where the
+    /// rest of the block doesn't follow, isn't where the block is.
+    #[test]
+    fn a_blocks_longest_leading_text_is_looked_for_first() {
+        let source = "<body>\n<nav>Conversion rates</nav>\n<p>Conversion dipped in week 3.</p>\n\
+                      <p>Conversion dipped in <em>week 4</em>.</p>\n";
+        let mut lines = SourceLines::new(source);
+        assert_eq!(lines.find("Conversion dipped in week 3.", false), Some(3));
+        // Markup splits this one: its longest leading text found whole is at a word boundary.
+        assert_eq!(lines.find("Conversion dipped in week 4.", false), Some(4));
+    }
+
+    /// A block shorter than 8 characters says too little to be looked for: it isn't, and nothing
+    /// is searched for it, unless it is a heading, which is looked for by all of its text.
+    #[test]
+    fn a_block_under_8_characters_is_not_looked_for_unless_a_heading() {
+        let source = "<body>\n<p>Intro paragraph.</p>\n<td>Results</td>\n<h2>Results</h2>\n";
+        let mut lines = SourceLines::new(source);
+        assert_eq!(lines.find("Intro paragraph.", false), Some(2));
+        let scanned = lines.scanned;
+        assert_eq!(lines.find("Results", false), None);
+        assert_eq!(lines.scanned, scanned);
+        let block = |text: &str, heading_level: Option<u8>| super::PageBlock {
+            text: text.to_owned(),
+            heading_level,
+        };
+        let map = super::TextMap::from_blocks(
+            &[
+                block("Intro paragraph.", None),
+                block("3", None),
+                block("Results", Some(2)),
+            ],
+            "<body>\n<p>Intro paragraph.</p>\n<td>3</td>\n<h2>Results</h2>\n",
+        );
+        // The cell takes the line of the block before it; the heading finds its own.
+        let lines: Vec<u32> = map.blocks.iter().map(|b| b.start_line).collect();
+        assert_eq!(lines, [2, 2, 4]);
+    }
+
+    /// Past the first place a block's shortest leading text is, a longer one is looked for no
+    /// further than 64 KiB: a block whose longer text is only far beyond goes where the shorter
+    /// was.
+    #[test]
+    fn a_longer_leading_text_is_looked_for_64_kib_past_the_shortest() {
+        let near = format!(
+            "<body>\n<p>Conversion rates</p>\n{}<p>Conversion dipped in week 3.</p>\n",
+            "<p>Filler.</p>\n".repeat(1000)
+        );
+        let mut lines = SourceLines::new(&near);
+        assert_eq!(
+            lines.find("Conversion dipped in week 3.", false),
+            Some(1003)
+        );
+        let far = format!(
+            "<body>\n<p>Conversion rates</p>\n{}<p>Conversion dipped in week 3.</p>\n",
+            "<p>Filler.</p>\n".repeat(10_000)
+        );
+        let mut lines = SourceLines::new(&far);
+        assert_eq!(lines.find("Conversion dipped in week 3.", false), Some(2));
+        assert!(lines.scanned <= 80 * 1024, "{} bytes", lines.scanned);
     }
 
     /// Within the budget, a block is found wherever it is.
@@ -647,7 +746,7 @@ mod tests {
         source.push_str(&"<p>Filler.</p>\n".repeat(10_000));
         source.push_str("<p>Closing paragraph.</p>\n");
         let mut lines = SourceLines::new(&source);
-        assert_eq!(lines.find("Missing paragraph."), None);
-        assert_eq!(lines.find("Closing paragraph."), Some(10_003));
+        assert_eq!(lines.find("Missing paragraph.", false), None);
+        assert_eq!(lines.find("Closing paragraph.", false), Some(10_003));
     }
 }

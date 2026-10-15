@@ -57,6 +57,7 @@ export function docPayload(
     path: A,
     kind: "markdown",
     frameUrl: null,
+    bridgeKey: null,
     title: "Aye",
     html: "",
     outline: [],

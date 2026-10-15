@@ -582,6 +582,24 @@ fn a_text_files_comment_anchors_against_its_paragraphs() {
     assert!(content.contains("\n> # Tide sync\n"), "{content}");
 }
 
+/// An HTML page's comments go on the text its bridge reported (`apply_op_on`): its source alone is
+/// refused, before anything is written, rather than read as a note.
+#[test]
+fn a_page_without_the_text_its_bridge_reported_takes_no_comment() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("report.html");
+    fs::write(&page, PAGE).unwrap();
+    let sidecar = sidecar_path(&page);
+    for name in ["report.html", "REPORT.HTM"] {
+        let Err(err) = store::apply_op(&sidecar, name, PAGE, &add_op(), NOW) else {
+            panic!("{name}: a page took a comment on its source");
+        };
+        assert!(matches!(err, StoreError::NoPageText), "{name}: {err:?}");
+    }
+    assert!(!sidecar.exists());
+    assert!(NoteText::of_note("report.html", PAGE).is_none());
+}
+
 /// An invented page, its sidecar's path in a temporary folder, and the page's text as its bridge
 /// reports it: a heading on line 4, and the same phrase on lines 6 and 8.
 const PAGE: &str = "<!doctype html>\n<title>Weekly report</title>\n<body>\n<h1>Weekly report</h1>\n<h2>Results</h2>\n<p>Sign-ups rose, but conversion dipped in week 3.</p>\n<h2>Next steps</h2>\n<p>Ask why conversion dipped in week 3.</p>\n";

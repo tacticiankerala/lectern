@@ -125,7 +125,7 @@ fn main() {
 
 /// The review text map of the note or text file at `rel`, block by block: lines and text.
 fn text_blocks_of(rel: &str, source: &str) -> Vec<(u32, u32, String)> {
-    let map = TextMap::of_note(rel, source);
+    let map = TextMap::of_note(rel, source).expect("a note or a text file has its text");
     map.blocks()
         .iter()
         .map(|b| (b.start_line, b.end_line, map.block_text(b).to_owned()))

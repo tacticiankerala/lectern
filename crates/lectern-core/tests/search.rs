@@ -184,6 +184,21 @@ fn text_files_are_searched_and_html_and_pdf_are_not() {
     assert!(search(&index, "Project brief").is_empty());
 }
 
+/// A text file is titled by its file name, as the reader titles it: a first line that looks like a
+/// heading, or frontmatter, is only text.
+#[test]
+fn a_text_file_is_titled_by_its_file_name() {
+    let (_tmp, index) = library(&[
+        ("plan.txt", b"# Not a heading\nmarker\n"),
+        ("front.TXT", b"---\ntitle: Not a title\n---\nmarker\n"),
+        ("plan.md", b"# Plan\nmarker\n"),
+    ]);
+    let results = search(&index, "marker");
+    assert_eq!(result(&results, "plan.txt").title, "plan.txt");
+    assert_eq!(result(&results, "front.TXT").title, "front.TXT");
+    assert_eq!(result(&results, "plan.md").title, "Plan");
+}
+
 #[test]
 fn name_match_beats_hit_count() {
     let (_tmp, index) = library(&[

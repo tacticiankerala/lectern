@@ -4,6 +4,29 @@
 
 const ALWAYS = "object-src 'none'; form-action 'none'; base-uri 'self'";
 
+/** Where the bridge takes its open's key, as `lectern_core::page::BRIDGE_KEY_SLOT`. */
+export const BRIDGE_KEY_SLOT = '"LECTERN_BRIDGE_KEY"';
+
+/**
+ * The key of the fake open `token`. The fake backend and the dev server keep nothing between
+ * them, so both work it out from the token, as no page would (an FNV-1a hash, twice).
+ */
+export function fakeBridgeKey(token) {
+  const hash = (seed) => {
+    let h = seed;
+    for (const c of token) {
+      h = Math.imul(h ^ (c.codePointAt(0) ?? 0), 16777619) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0");
+  };
+  return `k${hash(2166136261)}${hash(374761393)}`;
+}
+
+/** As `lectern_core::page::bridge_for`: the bridge with the open's key in its slot. */
+export function bridgeFor(bridge, key) {
+  return bridge.replace(BRIDGE_KEY_SLOT, JSON.stringify(key));
+}
+
 /**
  * As `lectern_core::page::page_policy`, its reports going to `reportOrigin`. Without an open to
  * report to, `full` gives the offline policy.
@@ -13,11 +36,11 @@ export function pagePolicy(mode, nonce, token, reportOrigin) {
   if (mode === "offline" || mode === "static" || report === null) {
     const scripts =
       mode === "static" ? `'nonce-${nonce}'` : "'self' 'unsafe-inline' 'unsafe-eval' blob:";
-    const enforced = `sandbox allow-scripts; default-src 'self' data: blob:; script-src ${scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; media-src 'self' data: blob:; frame-src 'none'; ${ALWAYS}`;
+    const enforced = `sandbox allow-scripts; default-src 'self' data: blob:; script-src ${scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' data: blob:; frame-src 'none'; ${ALWAYS}`;
     return { enforced: report ? `${enforced}; ${report}` : enforced, reportOnly: null };
   }
   return {
-    enforced: `sandbox allow-scripts; default-src 'self' https: data: blob:; script-src 'self' https: 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src https:; media-src 'self' https: data: blob:; frame-src https:; ${ALWAYS}`,
+    enforced: `sandbox allow-scripts; default-src 'self' https: data: blob:; script-src 'self' https: 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' https: 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src 'self' https:; media-src 'self' https: data: blob:; frame-src https:; ${ALWAYS}; ${report}`,
     reportOnly: `default-src 'self' data: blob: 'unsafe-inline' 'unsafe-eval'; ${report}`,
   };
 }

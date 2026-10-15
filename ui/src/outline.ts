@@ -13,17 +13,19 @@ export class Outline {
   constructor(
     private readonly host: HTMLElement,
     private readonly scroller: HTMLElement,
-    private readonly pick: (id: string) => void,
+    /** A heading was clicked: its id, and its place in the list (two may share an id). */
+    private readonly pick: (id: string, index: number) => void,
   ) {
     host.addEventListener("click", (e) => {
       const link = e.target instanceof Element ? e.target.closest("a") : null;
       const id = link?.dataset.id;
-      if (id === undefined) {
+      const index = Number(link?.dataset.index);
+      if (id === undefined || !Number.isInteger(index)) {
         return;
       }
       e.preventDefault();
-      this.mark(id);
-      this.pick(id);
+      this.markEntry(link?.closest("li") ?? null);
+      this.pick(id, index);
     });
   }
 
@@ -35,14 +37,20 @@ export class Outline {
     }
     const top = Math.min(...items.map((item) => item.level));
     const list = h("ul", { class: "outline-list" });
-    for (const item of items) {
+    for (const [index, item] of items.entries()) {
       const li = h("li");
       li.style.setProperty("--depth", String(item.level - top));
       // A heading of emoji alone has no id to scroll to.
       if (item.id === "") {
         li.append(h("span", {}, item.text));
       } else {
-        li.append(h("a", { href: "#", "data-id": item.id, title: item.text }, item.text));
+        li.append(
+          h(
+            "a",
+            { href: "#", "data-id": item.id, "data-index": String(index), title: item.text },
+            item.text,
+          ),
+        );
         this.entries.set(item.id, li);
       }
       list.append(li);
@@ -117,7 +125,11 @@ export class Outline {
   }
 
   private mark(id: string): void {
-    const li = this.entries.get(id);
+    this.markEntry(this.entries.get(id) ?? null);
+  }
+
+  /** Marks `li`, the entry of the heading being read, and keeps it in view in the pane. */
+  private markEntry(li: HTMLLIElement | null): void {
     if (!li || li === this.active) {
       return;
     }

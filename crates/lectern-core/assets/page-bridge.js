@@ -1,19 +1,31 @@
-// Lectern's page bridge. Lectern inserts it at the top of every HTML page it shows
+// Lectern's page bridge. Lectern inserts it at the top of the HTML page an open shows
 // (lectern_core::page), where it runs before the page's own scripts, in the page's sandboxed frame,
 // even when the page's scripts are off. It speaks to Lectern only by postMessage, in plain objects
-// tagged `lx: 1`, and listens to nothing but its parent window.
+// tagged `lx: 1` and signed with its open's key, and listens to nothing but its parent window.
+// Lectern takes no message without the key, which Rust writes into the bridge's slot for it
+// (`LECTERN_BRIDGE_KEY` below) as it serves the page: the bridge keeps it in its closure and takes
+// its own script element out of the page before any page script runs, so no page script can read
+// it or forge a message.
 //
-// To Lectern: `ready` once the page has loaded (its title, headings, text blocks, scroll state and
-// colour scheme), `blocks` again when the page changes, `selection` (with the box of its last line,
-// to place Lectern's Comment button by), `scroll`, `scheme`, `link` for a clicked link, which
-// Lectern follows by its own rules instead of the frame, and `comment-click` with the offset of a
-// plain click on text a comment marks.
+// To Lectern: `ready` once the page has loaded (its headings, text blocks, scroll state and colour
+// scheme; after the next animation frame, or a moment, when the window is in the background and
+// draws none), `loaded` once its window's `load` comes (Lectern pairs it with its frame's `load`,
+// so a page that leaves before its own load is told apart): each once a document, on the browser's
+// own DOMContentLoaded and load, never ones a page fakes. Then `blocks` again when the page changes,
+// `selection` (with the box of its last line, to place Lectern's Comment button by; held while a
+// pointer is down, so a drag is told once, as it ends, or as the window loses the focus, or after
+// 3 seconds), `scroll`, `scheme`, `link` for a
+// clicked link (its URL as the browser resolves it, `<base>` and all, caught before the page's own
+// handlers can hide it), which Lectern follows by its own rules instead of the frame, and
+// `comment-click` with the offset of a plain click on text a comment marks.
 // From Lectern: `theme` (the highlight colours), `paint` and `clear` (highlights by layer), and
 // `scroll-to` (a fraction of the page, or an offset into its text).
 //
 // A place restored by fraction is held while the page grows (images loading), until the reader
 // scrolls or a few seconds pass. When the page rebuilds nodes but keeps its text, the highlights
-// are painted again on the new ones. Scrolling to an offset opens the closed `<details>` hiding it.
+// are painted again on the new ones. Scrolling to an offset opens the closed `<details>` hiding it,
+// and scrolls every scrolling box around it, not only the page. A heading without an id gets one
+// made up by its place among those without, so a rebuilt page lists the same ids.
 // Each reading of the page maps its text to the page once, in segments, which endpoints are looked
 // up in by binary search.
 //
@@ -24,14 +36,18 @@
 // elements hold no text.
 //
 // The page can post to Lectern itself, so Lectern trusts none of this: it checks every message.
-(function (window) {
+(function (window, key) {
   "use strict";
 
+  var document = window.document;
+  // Out of the page before any page script can read the key from it.
+  if (document.currentScript) {
+    document.currentScript.remove();
+  }
   var parent = window.parent;
   if (!parent || parent === window) {
     return;
   }
-  var document = window.document;
 
   /** The most text reported, in UTF-16 code units: whole blocks up to it. */
   var MAX_TEXT = 2 * 1024 * 1024;
@@ -43,17 +59,22 @@
   var SETTLE_MS = 5000;
   /** How long the selection must stay put before it is reported. */
   var SELECTION_MS = 100;
+  /** How long a pointer may stay down before the selection it holds is reported all the same. */
+  var HOLD_MS = 3000;
+  /** How long `ready` waits for an animation frame: a window in the background draws none. */
+  var READY_FALLBACK_MS = 100;
   /** How far below the top an offset scrolled to lands, in pixels. */
   var TOP_GAP = 12;
   /** The highlight layers Lectern paints, with their priorities: find's over comments'. */
   var LAYERS = { comment: 0, "comment-focus": 1, find: 2, "find-current": 3 };
   /** The most ranges painted in one layer. */
   var MAX_RANGES = 10000;
-  /** What the outline lists at most: headings, each heading's text, an id (else none) and the title. */
+  /** What the outline lists at most: headings, each heading's text, and an id (else none). */
   var MAX_HEADINGS = 5000;
   var MAX_HEADING_TEXT = 300;
   var MAX_ID = 200;
-  var MAX_TITLE = 1000;
+  /** SVG's namespace for an old `xlink:href`. */
+  var XLINK = "http://www.w3.org/1999/xlink";
 
   /** Elements that hold no text. */
   var SKIP = {
@@ -113,10 +134,13 @@
   };
   var HEADING = /^h([1-6])$/;
 
+  /**
+   * Sends `message` to Lectern, tagged and signed with the key. A new object, its fields defined
+   * rather than set, so no setter a page puts on `Object.prototype` sees the key.
+   */
   function post(message) {
-    message.lx = 1;
     try {
-      parent.postMessage(message, "*");
+      parent.postMessage({ ...message, lx: 1, key: key }, "*");
     } catch (e) {
       // Lectern is gone; nothing to tell.
     }
@@ -151,8 +175,8 @@
 
   /** The page's text: `{ text, blocks }`, each block `{ el, pieces, start, text, level }`. */
   var model = { text: "", blocks: [] };
-  /** Numbers the ids made up for headings that have none. */
-  var headingIds = 0;
+  /** The ids made up here, by heading: one the page has since changed is the page's own. */
+  var madeUp = new WeakMap();
 
   /**
    * Calls `visit(out, node, off, width, text)` for each run of a block's text, from its pieces (text
@@ -318,25 +342,31 @@
   }
 
   /**
-   * The headings, each once, with an id (one is made up where it has none; one too long to list
-   * goes as none) and its offset, as many as the outline lists.
+   * The headings, each once, with an id and its offset, as many as the outline lists. A heading
+   * without an id of its own gets `lx-heading-<n>`, numbered by its place among those without one
+   * (past any the page uses itself), so a page that rebuilds its headings lists the same ids; one
+   * too long to list goes as none.
    */
   function headingList() {
     var seen = new Set();
     var list = [];
+    var unnamed = 0;
     for (var i = 0; i < model.blocks.length && list.length < MAX_HEADINGS; i++) {
       var block = model.blocks[i];
       if (block.level === 0 || seen.has(block.el)) {
         continue;
       }
       seen.add(block.el);
-      if (!block.el.id) {
+      if (!block.el.id || block.el.id === madeUp.get(block.el)) {
         var id;
         do {
-          headingIds++;
-          id = "lx-heading-" + headingIds;
-        } while (document.getElementById(id));
-        block.el.id = id;
+          unnamed++;
+          id = "lx-heading-" + unnamed;
+        } while (!isOwnId(id, block.el));
+        if (block.el.id !== id) {
+          block.el.id = id;
+        }
+        madeUp.set(block.el, id);
       }
       list.push({
         level: block.level,
@@ -346,6 +376,12 @@
       });
     }
     return list;
+  }
+
+  /** Whether `id` is free for `el`: no other element has it. */
+  function isOwnId(id, el) {
+    var holder = document.getElementById(id);
+    return holder === null || holder === el;
   }
 
   /** The block holding text offset `offset`; at a space between two blocks, `after` picks the next. */
@@ -535,7 +571,6 @@
     reported = signature(headings);
     post({
       type: "ready",
-      title: document.title.slice(0, MAX_TITLE),
       headings: headings,
       blocks: blockList(),
       scroll: scrollState(),
@@ -593,9 +628,19 @@
 
   var selectionTimer = null;
   var hadSelection = false;
+  /** A pointer is down: the selection is being dragged, and told once the pointer is up. */
+  var pointerDown = false;
+  /** The selection changed while the pointer was down. */
+  var selectionHeld = false;
+  /** Lets the selection go should the pointer stay down. */
+  var holdTimer = null;
 
   function selectionChanged() {
     window.clearTimeout(selectionTimer);
+    if (pointerDown) {
+      selectionHeld = true;
+      return;
+    }
     selectionTimer = window.setTimeout(function () {
       var selection = window.getSelection();
       var range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
@@ -627,6 +672,34 @@
         },
       });
     }, SELECTION_MS);
+  }
+
+  function pointerPressed(e) {
+    if (e.isPrimary !== false) {
+      pointerDown = true;
+      window.clearTimeout(holdTimer);
+      holdTimer = window.setTimeout(release, HOLD_MS);
+    }
+  }
+
+  function pointerReleased(e) {
+    if (e.isPrimary !== false) {
+      release();
+    }
+  }
+
+  /** The pointer is up, gone with the focus, or down too long: a selection held is told now. */
+  function release() {
+    window.clearTimeout(holdTimer);
+    holdTimer = null;
+    if (!pointerDown) {
+      return;
+    }
+    pointerDown = false;
+    if (selectionHeld) {
+      selectionHeld = false;
+      selectionChanged();
+    }
   }
 
   var scrollQueued = false;
@@ -687,28 +760,55 @@
   }
 
   /**
-   * A click on a link: Lectern follows it instead, unless it is the page's own to handle. A click
-   * elsewhere may be on text a comment marks.
+   * The URL a link leads to, as the browser resolves it (against `<base>` too): an HTML link's
+   * `href`, or an SVG link's `href` or `xlink:href` resolved against the document's base. Null
+   * when it has none.
+   */
+  function linkUrl(link) {
+    if (typeof link.href === "string") {
+      return link.hasAttribute("href") ? link.href : null;
+    }
+    var raw = link.getAttribute("href");
+    if (raw === null) {
+      raw = link.getAttributeNS(XLINK, "href");
+    }
+    if (raw === null) {
+      return null;
+    }
+    try {
+      return new URL(raw, document.baseURI).href;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * A click on a link: Lectern follows it instead, unless it is the page's own to handle (an
+   * in-page anchor, or `javascript:`). Caught on the way down, before the page's own handlers, so
+   * none can hide it. A click elsewhere may be on text a comment marks.
    */
   function clicked(e) {
-    if (e.defaultPrevented || e.button !== 0) {
+    if (e.button !== 0) {
       return;
     }
     var target = e.target;
-    var link =
-      target && typeof target.closest === "function" ? target.closest("a[href], area[href]") : null;
-    if (!link) {
+    var link = target && typeof target.closest === "function" ? target.closest("a, area") : null;
+    var raw = link ? link.getAttribute("href") || link.getAttributeNS(XLINK, "href") : null;
+    if (raw === null) {
       clickedMark(e);
       return;
     }
-    var href = link.getAttribute("href") || "";
-    var trimmed = href.trim();
+    var trimmed = raw.trim();
     // In-page anchors scroll the page; `javascript:` links are the page's own code.
     if (trimmed === "" || trimmed.charAt(0) === "#" || /^javascript:/i.test(trimmed)) {
       return;
     }
+    var url = linkUrl(link);
+    if (url === null) {
+      return;
+    }
     e.preventDefault();
-    post({ type: "link", href: href });
+    post({ type: "link", href: url });
   }
 
   // ---- What Lectern asks ----
@@ -826,7 +926,6 @@
   }
 
   function scrollTo(message) {
-    var scroller = document.scrollingElement || document.documentElement;
     if (typeof message.fraction === "number" && isFinite(message.fraction)) {
       var fraction = Math.min(1, Math.max(0, message.fraction));
       toFraction(fraction);
@@ -843,19 +942,77 @@
       return;
     }
     openAround(range.startContainer);
-    if (typeof range.getBoundingClientRect !== "function") {
+    var node = range.startContainer;
+    var el = node.nodeType === 1 ? node : node.parentElement;
+    if (
+      !el ||
+      typeof el.scrollIntoView !== "function" ||
+      typeof range.getBoundingClientRect !== "function"
+    ) {
       return;
     }
-    var box = range.getBoundingClientRect();
-    var view = window.innerHeight;
     if (message.reveal === true) {
-      if (box.top >= 0 && box.bottom <= view) {
-        return;
+      if (!inSight(el, range.getBoundingClientRect())) {
+        // Through every scrolling box around it, the page's own and those inside it.
+        el.scrollIntoView({ block: "center", inline: "nearest" });
+        var box = range.getBoundingClientRect();
+        if (!inSight(el, box)) {
+          // A block taller than its box: the text itself to the middle.
+          nudge(el, box, function (view) {
+            return (view.height - box.height) / 2;
+          });
+        }
       }
-      scroller.scrollTop = scroller.scrollTop + box.top - (view - box.height) / 2;
       return;
     }
-    scroller.scrollTop = scroller.scrollTop + box.top - TOP_GAP;
+    el.scrollIntoView({ block: "start", inline: "nearest" });
+    var top = range.getBoundingClientRect();
+    nudge(el, top, function () {
+      return TOP_GAP;
+    });
+  }
+
+  /** The box that scrolls `el`: the nearest around it that scrolls, else the page. */
+  function scrollerOf(el) {
+    for (var up = el.parentElement; up && up !== document.body; up = up.parentElement) {
+      var style = window.getComputedStyle(up);
+      if (
+        style !== null &&
+        /(auto|scroll)/.test(style.overflowY) &&
+        up.scrollHeight > up.clientHeight
+      ) {
+        return up;
+      }
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  /** Scrolls the box around `el` so `box` (in the viewport) sits `at(view)` below its top. */
+  function nudge(el, box, at) {
+    var scroller = scrollerOf(el);
+    var page = scroller === document.scrollingElement || scroller === document.documentElement;
+    var view = page ? { top: 0, height: window.innerHeight } : scroller.getBoundingClientRect();
+    scroller.scrollTop = scroller.scrollTop + box.top - view.top - at(view);
+  }
+
+  /**
+   * Whether `box` (in the viewport) shows: in the window, and in each box around `el` that clips.
+   */
+  function inSight(el, box) {
+    if (box.top < 0 || box.bottom > window.innerHeight) {
+      return false;
+    }
+    for (var up = el.parentElement; up && up !== document.body; up = up.parentElement) {
+      var style = window.getComputedStyle(up);
+      if (style === null || (style.overflowY === "visible" && style.overflowX === "visible")) {
+        continue;
+      }
+      var clip = up.getBoundingClientRect();
+      if (box.top < clip.top || box.bottom > clip.bottom) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** Opens the closed `<details>` that hide `node`: those it is in, outside their summary. */
@@ -900,7 +1057,11 @@
   }
 
   window.addEventListener("message", received);
-  window.addEventListener("click", clicked);
+  document.addEventListener("click", clicked, true);
+  window.addEventListener("pointerdown", pointerPressed, true);
+  window.addEventListener("pointerup", pointerReleased, true);
+  window.addEventListener("pointercancel", pointerReleased, true);
+  window.addEventListener("blur", release);
   window.addEventListener("scroll", scrolled, { passive: true });
   // What grows the page (an image, a font, the page's own load) puts a held place back, until the
   // reader takes over.
@@ -919,12 +1080,57 @@
       post({ type: "scheme", dark: dark() });
     });
   }
+  // The handshake, `ready` and `loaded`, goes once for each document, and only on the browser's
+  // own DOMContentLoaded and load: a page that fakes them gets nothing more said. Its text changing
+  // later goes out as `blocks`.
+  var started = false;
+  var loadedSent = false;
+
   function start() {
-    window.requestAnimationFrame(ready);
+    if (started) {
+      return;
+    }
+    started = true;
+    var said = false;
+    function go() {
+      if (!said) {
+        said = true;
+        ready();
+      }
+    }
+    window.requestAnimationFrame(go);
+    window.setTimeout(go, READY_FALLBACK_MS);
   }
+
+  function loaded() {
+    if (!loadedSent) {
+      loadedSent = true;
+      post({ type: "loaded" });
+    }
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
+    document.addEventListener("DOMContentLoaded", function (e) {
+      if (e.isTrusted) {
+        start();
+      }
+    });
   } else {
     start();
   }
-})(window);
+  // The page has loaded: its document's own `load`, caught first, before any page script's
+  // listener can stop it.
+  if (document.readyState === "complete") {
+    loaded();
+  } else {
+    window.addEventListener(
+      "load",
+      function (e) {
+        if (e.isTrusted && (e.target === document || e.target === window)) {
+          loaded();
+        }
+      },
+      true,
+    );
+  }
+})(window, "LECTERN_BRIDGE_KEY");
