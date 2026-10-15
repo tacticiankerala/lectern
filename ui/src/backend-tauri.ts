@@ -12,6 +12,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -110,6 +111,10 @@ export class TauriBackend implements Backend {
 
   follow(target: FollowTarget): Promise<FollowResult> {
     return invoke("follow", { target });
+  }
+
+  pathForms(raw: string, literal: boolean): Promise<PathForms> {
+    return invoke("path_forms", { raw, literal });
   }
 
   revealInExplorer(path: string): Promise<void> {

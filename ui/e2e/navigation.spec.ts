@@ -320,9 +320,14 @@ test("the context menu copies a path and removes a root", async ({ page, context
   await launch(page);
   await row(page, "memory").locator(".tree-name").click({ button: "right" });
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem")).toHaveText(["Reveal in Explorer", "Copy path"]);
-  await menu.getByRole("menuitem", { name: "Copy path" }).click();
+  await expect(menu.getByRole("menuitem")).toHaveText([
+    "Reveal in Explorer",
+    "Copy Windows path",
+    "Copy WSL path",
+  ]);
+  await menu.getByRole("menuitem", { name: "Copy Windows path" }).click();
   await expect(menu).toHaveCount(0);
+  await expect(page.locator("#lx-toasts .toast").last()).toContainText("Copied the Windows path");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(fixturePath("memory"));
 
   const offline = page.locator(".lib-root-head", { hasText: "notes" });

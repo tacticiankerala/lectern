@@ -17,7 +17,7 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 
 - **Your notes as a library.** Add folders and browse them in the sidebar, or collapse it to give the page the room. Click any breadcrumb to pick a nearby file or folder from a list that goes away once you've chosen. A folder with a README shows that README's `status:` as a badge.
 - **Faithful rendering.** GitHub-flavoured Markdown: tables, task lists, footnotes, alerts, raw HTML (made safe), and highlighted code. Frontmatter shows as a tidy properties strip, with a count of done tasks.
-- **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations.
+- **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations. Right-click one to copy its Windows or WSL path.
 - **Find anything.** Quick open by name, search across the whole library, and find in the page.
 - **Made for reading.** Eight themes, five bundled fonts or any font you have, and control over size, line height and width. An outline, a reading-progress line, and a focus mode.
 - **Keeps your place.** Lectern remembers where you were in every document. When a file changes on disk it reloads in place, and back and forward work the way they do in a browser.
@@ -139,7 +139,8 @@ status: active
 | Ctrl+Alt+M | Comment on the selected text, or on the block at the top of the view |
 | F11 | Focus mode |
 | Ctrl+E | Open the document in your editor |
-| Ctrl+Shift+C | Copy the document's path |
+| Ctrl+Shift+C | Copy the Windows path of the selected path, the focused link or the document |
+| Ctrl+Shift+L | Copy the WSL path of the same, ready for a WSL terminal |
 | F5 or Ctrl+R | Reload |
 | Ctrl+, | Preferences |
 | Ctrl+N | New window, which lists the workspaces |

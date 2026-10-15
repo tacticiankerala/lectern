@@ -1,12 +1,25 @@
-// What the user asks for: shortcuts, the header's buttons and menus, the sidebar's context menu,
-// quick open, Preferences, find in page, full-text search, update checks, About and the breadcrumb
-// chooser (all loaded on first use), focus mode, the sidebars' visibility and widths, showing or
-// hiding the review comments, a new window and quitting.
+// What the user asks for: shortcuts, the header's buttons and menus, the sidebar's and links'
+// context menus, copying paths in Windows or WSL form, quick open, Preferences, find in page,
+// full-text search, update checks, About and the breadcrumb chooser (all loaded on first use),
+// focus mode, the sidebars' visibility and widths, showing or hiding the review comments, a new
+// window and quitting.
 import type { About } from "./about";
 import type { App } from "./app";
+import {
+  COPIED,
+  NO_FORM,
+  TOAST_PATH_CHARS,
+  inNoteOrComment,
+  linkPath,
+  middleTruncate,
+  shortcutPath,
+  type PathForm,
+  type PathToCopy,
+} from "./copy-path";
 import type { CrumbChooser } from "./crumb-chooser";
 import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
+import type { PathForms } from "./generated/PathForms";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
 import { NARROW } from "./library-controller";
@@ -104,6 +117,9 @@ export class Actions {
     app.on("workspaces", () => {
       this.preferences?.syncWorkspaces();
     });
+    app.layout.app.addEventListener("contextmenu", (e) => {
+      this.linkMenu(e);
+    });
     for (const handle of app.layout.app.querySelectorAll<HTMLElement>(".resizer")) {
       const side = handle.dataset.for;
       if (side === "library" || side === "outline") {
@@ -158,8 +174,13 @@ export class Actions {
         return true;
       case "open-editor":
         return this.openInEditor();
-      case "copy-path":
-        return this.copyPath();
+      case "copy-windows-path":
+      case "copy-wsl-path": {
+        const target = shortcutPath(this.app.layout.doc, this.app.nav.currentPath());
+        if (target === null) return false;
+        void this.copyPath(target, action === "copy-wsl-path" ? "wsl" : "windows");
+        return true;
+      }
       case "reload":
         // Handled either way: WebView2 would reload the whole page.
         this.reload();
@@ -479,10 +500,20 @@ export class Actions {
           },
         },
         {
-          label: "Copy path",
+          label: "Copy Windows path",
           keys: "Ctrl+Shift+C",
           disabled: path === null,
-          run: () => this.copyPath(),
+          run: () => {
+            if (path !== null) void this.copyPath({ path, literal: true }, "windows");
+          },
+        },
+        {
+          label: "Copy WSL path",
+          keys: "Ctrl+Shift+L",
+          disabled: path === null,
+          run: () => {
+            if (path !== null) void this.copyPath({ path, literal: true }, "wsl");
+          },
         },
         {
           label: "Reload",
@@ -518,7 +549,7 @@ export class Actions {
   async contextMenu(e: MouseEvent, path: string, isRoot: boolean): Promise<void> {
     const entries: MenuEntry[] = [
       { label: "Reveal in Explorer", run: () => void this.app.reveal(path) },
-      { label: "Copy path", run: () => void this.copyText(path) },
+      ...this.copyItems({ path, literal: true }),
     ];
     if (isRoot) {
       entries.push("separator", {
@@ -527,6 +558,41 @@ export class Actions {
       });
     }
     await this.openMenu(entries, { x: e.clientX, y: e.clientY });
+  }
+
+  /**
+   * A link's menu, in a note or a comment: a resolved one opens, copies its exact target in either
+   * form or reveals it; a broken one written as an absolute path copies that text. Any other link
+   * keeps the default menu.
+   */
+  private linkMenu(e: MouseEvent): void {
+    const link = e.target instanceof Element ? e.target.closest("a") : null;
+    const found = link && inNoteOrComment(link, this.app.layout.doc) ? linkPath(link) : null;
+    if (!link || !found) {
+      return;
+    }
+    e.preventDefault();
+    const entries: MenuEntry[] = found.literal
+      ? [
+          {
+            label: "Open",
+            run: () => {
+              this.app.view.follow(link);
+            },
+          },
+          ...this.copyItems(found),
+          { label: "Reveal in Explorer", run: () => void this.app.reveal(found.path) },
+        ]
+      : this.copyItems(found);
+    void this.openMenu(entries, { x: e.clientX, y: e.clientY });
+  }
+
+  /** The menu items that copy `target` in Windows and in WSL form. */
+  private copyItems(target: PathToCopy): MenuEntry[] {
+    return [
+      { label: "Copy Windows path", run: () => void this.copyPath(target, "windows") },
+      { label: "Copy WSL path", run: () => void this.copyPath(target, "wsl") },
+    ];
   }
 
   /**
@@ -607,23 +673,30 @@ export class Actions {
     return true;
   }
 
-  /** Copies the path on screen; false when there is none. */
-  private copyPath(): boolean {
-    const path = this.app.nav.currentPath();
-    if (path === null) {
-      return false;
-    }
-    void this.copyText(path);
-    return true;
-  }
-
-  private async copyText(text: string): Promise<void> {
+  /**
+   * Copies `target` in `form`, as Rust works it out, and names it in a toast. A path with no such
+   * form copies nothing, and the toast says so.
+   */
+  private async copyPath(target: PathToCopy, form: PathForm): Promise<void> {
+    let forms: PathForms;
     try {
-      await navigator.clipboard.writeText(text);
-      this.app.toast("Copied the path");
+      forms = await this.app.backend.pathForms(target.path, target.literal);
+    } catch (e) {
+      this.app.toast(String(e));
+      return;
+    }
+    const path = forms[form];
+    if (path === null) {
+      this.app.toast(NO_FORM[form]);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
     } catch {
       this.app.toast("Couldn't copy to the clipboard");
+      return;
     }
+    this.app.toast(COPIED[form], middleTruncate(path, TOAST_PATH_CHARS));
   }
 
   /** Reads the document again, keeping the place; a file that failed to open is retried. */

@@ -40,7 +40,9 @@ describe("actionFor", () => {
       [{ key: "b", ctrlKey: true }, "toggle-library"],
       [{ key: "O", ctrlKey: true, shiftKey: true }, "toggle-outline"],
       [{ key: "e", ctrlKey: true }, "open-editor"],
-      [{ key: "C", ctrlKey: true, shiftKey: true }, "copy-path"],
+      // The path in Windows form, and in WSL form.
+      [{ key: "C", ctrlKey: true, shiftKey: true }, "copy-windows-path"],
+      [{ key: "L", ctrlKey: true, shiftKey: true }, "copy-wsl-path"],
       [{ key: "F5" }, "reload"],
       // WebView2 would otherwise reload the whole page.
       [{ key: "r", ctrlKey: true }, "reload"],

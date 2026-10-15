@@ -3,6 +3,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use lectern_core::ipc::PathForms;
 use lectern_core::library::pathmap::{split_line_suffix, LineRef, Mapped, PathMapper};
 
 fn mapper(mappings: &[(&str, &str)]) -> PathMapper {
@@ -334,4 +335,212 @@ fn to_wsl_handles_wsl_unc_and_drives() {
 #[test]
 fn to_wsl_gives_none_for_other_unc() {
     assert_eq!(mapper(&[]).to_wsl(Path::new(r"\\nas\share\a.md")), None);
+}
+
+fn ubuntu() -> PathMapper {
+    PathMapper {
+        wsl_distro: Some("Ubuntu".into()),
+        ..PathMapper::default()
+    }
+}
+
+fn path_forms(windows: Option<&str>, wsl: Option<&str>) -> PathForms {
+    PathForms {
+        windows: windows.map(str::to_owned),
+        wsl: wsl.map(str::to_owned),
+    }
+}
+
+#[test]
+fn forms_of_a_drive_path_and_its_mount() {
+    let plan = path_forms(
+        Some(r"S:\Notes\My Vault\plan.md"),
+        Some("/mnt/s/Notes/My Vault/plan.md"),
+    );
+    assert_eq!(ubuntu().forms(r"S:\Notes\My Vault\plan.md", None), plan);
+    assert_eq!(ubuntu().forms("/mnt/s/Notes/My Vault/plan.md", None), plan);
+}
+
+#[test]
+fn forms_of_a_wsl_share_path() {
+    for raw in [
+        r"\\wsl.localhost\Ubuntu\home\me\a.md",
+        r"\\wsl$\Ubuntu\home\me\a.md",
+    ] {
+        assert_eq!(
+            ubuntu().forms(raw, None),
+            path_forms(Some(raw), Some("/home/me/a.md")),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn forms_of_a_linux_path_go_through_the_distro() {
+    assert_eq!(
+        ubuntu().forms("/home/me/a.md", None),
+        path_forms(
+            Some(r"\\wsl.localhost\Ubuntu\home\me\a.md"),
+            Some("/home/me/a.md")
+        )
+    );
+}
+
+#[test]
+fn forms_follow_a_user_mapping_both_ways() {
+    let m = mapper(&[("/home/me/shared", r"\\nas\share")]);
+    let x = path_forms(Some(r"\\nas\share\x.md"), Some("/home/me/shared/x.md"));
+    assert_eq!(m.forms("/home/me/shared/x.md", None), x);
+    assert_eq!(m.forms(r"\\nas\share\x.md", None), x);
+}
+
+#[test]
+fn forms_of_an_unmapped_share_have_no_wsl_form() {
+    assert_eq!(
+        ubuntu().forms(r"\\nas\share\x.md", None),
+        path_forms(Some(r"\\nas\share\x.md"), None)
+    );
+}
+
+#[test]
+fn forms_drop_line_suffixes_anchors_quotes_and_backticks() {
+    let plan = path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"));
+    for raw in [
+        r"`S:\Notes\plan.md:12`",
+        r"S:\Notes\plan.md:12:5",
+        r"S:\Notes\plan.md#L12",
+        r"S:\Notes\plan.md#next-steps",
+        r#"  "S:\Notes\plan.md"  "#,
+        "'S:\\Notes\\plan.md'\n",
+    ] {
+        assert_eq!(ubuntu().forms(raw, None), plan, "{raw:?}");
+    }
+    // A `#` inside a folder name is part of the path.
+    assert_eq!(
+        ubuntu().forms(r"C:\src\C#\app.cs", None),
+        path_forms(Some(r"C:\src\C#\app.cs"), Some("/mnt/c/src/C#/app.cs"))
+    );
+}
+
+#[test]
+fn forms_keep_a_hash_in_a_file_name() {
+    // Only a fragment after a file name with an extension is an anchor.
+    let meeting = path_forms(
+        Some(r"S:\Notes\Meeting #3.md"),
+        Some("/mnt/s/Notes/Meeting #3.md"),
+    );
+    assert_eq!(ubuntu().forms(r"S:\Notes\Meeting #3.md", None), meeting);
+    assert_eq!(
+        ubuntu().forms(r"S:\Notes\Meeting #3.md#agenda", None),
+        meeting
+    );
+    assert_eq!(
+        ubuntu().forms("/home/me/Issue #12 fix.md", None),
+        path_forms(
+            Some(r"\\wsl.localhost\Ubuntu\home\me\Issue #12 fix.md"),
+            Some("/home/me/Issue #12 fix.md")
+        )
+    );
+}
+
+#[test]
+fn forms_of_a_relative_path_are_none() {
+    for raw in ["notes/plan.md", "`plan.md:12`", ""] {
+        assert_eq!(ubuntu().forms(raw, None), path_forms(None, None), "{raw:?}");
+    }
+}
+
+#[test]
+fn forms_come_from_the_index_in_memory_never_the_disk() {
+    let (tmp, root) = common::vault_copy();
+    let ix = common::index_of(&root);
+    // The files are gone; the index still knows them, and nothing looks at the disk.
+    drop(tmp);
+    assert!(!root.exists());
+    let forms = ubuntu().forms("/home/me/shared/vault/work/alpha/README.md", Some(&ix));
+    assert_eq!(
+        forms.windows,
+        Some(
+            common::native_join(&root, "work/alpha/README.md")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+}
+
+#[test]
+fn literal_forms_never_recover_a_moved_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("Notes");
+    fs::create_dir_all(root.join("project")).unwrap();
+    fs::write(root.join("project").join("README.md"), "# Project\n").unwrap();
+    let ix = common::index_of(&root);
+    let archived = r"C:\Notes\.archive\project\README.md";
+    // As text, a path the index doesn't hold finds where the file moved to...
+    assert_eq!(
+        ubuntu().forms(archived, Some(&ix)).windows,
+        Some(
+            common::native_join(&root, "project/README.md")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    // ...but an exact path, such as the open file outside the index, is copied as it is.
+    assert_eq!(
+        ubuntu().literal_forms(archived),
+        path_forms(
+            Some(archived),
+            Some("/mnt/c/Notes/.archive/project/README.md")
+        )
+    );
+}
+
+#[test]
+fn literal_forms_keep_hashes_and_line_numbers_in_names() {
+    for (path, wsl) in [
+        (
+            r"S:\Notes\plan.md#draft.md",
+            "/mnt/s/Notes/plan.md#draft.md",
+        ),
+        (r"S:\Notes\v1.0#archive", "/mnt/s/Notes/v1.0#archive"),
+        (
+            r"S:\Notes\v1.0#archive\x.md",
+            "/mnt/s/Notes/v1.0#archive/x.md",
+        ),
+    ] {
+        assert_eq!(
+            ubuntu().literal_forms(path),
+            path_forms(Some(path), Some(wsl)),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        ubuntu().literal_forms("/home/me/logs/run:12"),
+        path_forms(
+            Some(r"\\wsl.localhost\Ubuntu\home\me\logs\run:12"),
+            Some("/home/me/logs/run:12")
+        )
+    );
+    // Text written as a path still loses its line anchor.
+    assert_eq!(
+        ubuntu().forms(r"S:\Notes\plan.md#L12", None),
+        path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"))
+    );
+}
+
+#[test]
+fn literal_forms_map_linux_and_mounted_paths_without_the_index() {
+    let m = PathMapper {
+        wsl_distro: Some("Ubuntu".into()),
+        ..mapper(&[("/home/me/shared", r"\\nas\share")])
+    };
+    assert_eq!(
+        m.literal_forms("/home/me/shared/x.md"),
+        path_forms(Some(r"\\nas\share\x.md"), Some("/home/me/shared/x.md"))
+    );
+    assert_eq!(
+        m.literal_forms("/mnt/s/Notes/plan.md"),
+        path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"))
+    );
+    assert_eq!(m.literal_forms("notes/plan.md"), path_forms(None, None));
 }

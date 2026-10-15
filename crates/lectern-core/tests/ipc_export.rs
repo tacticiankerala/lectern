@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
     DocPayload, EditorPref, FollowResult, Measure, OpenError, OpenErrorKind, OpenResult, OpenWhere,
-    RecentEntry, RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen,
+    PathForms, RecentEntry, RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen,
     WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::library::MARKDOWN_EXTENSIONS;
@@ -70,6 +70,7 @@ fn ts_bindings_exported() {
         "OpenWhere",
         "WorkspaceOutcome",
         "OpenRequest",
+        "PathForms",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -232,6 +233,22 @@ fn ts_numbers_are_numbers_and_patches_are_partial() {
         "type SettingsSnapshot = { settings: Settings, rev: number, };"
     );
     assert!(decl::<StartupPayload>().contains("settingsRev: number,"));
+}
+
+#[test]
+fn path_forms_are_two_optional_strings() {
+    let decl = decl::<PathForms>();
+    assert!(decl.starts_with("type PathForms = {"), "{decl}");
+    assert!(decl.contains("windows: string | null,"), "{decl}");
+    assert!(decl.contains("wsl: string | null,"), "{decl}");
+    assert_eq!(
+        serde_json::to_value(PathForms {
+            windows: Some(r"\\nas\share\x.md".to_owned()),
+            wsl: None,
+        })
+        .unwrap(),
+        json!({"windows": r"\\nas\share\x.md", "wsl": null})
+    );
 }
 
 #[test]

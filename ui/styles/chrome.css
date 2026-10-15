@@ -1459,6 +1459,18 @@ body.resizing {
   animation: toast-in 0.16s ease-out;
 }
 
+/* A copied path, below its toast's message. */
+.toast-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-family: var(--code-font);
+  font-size: 0.9em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;

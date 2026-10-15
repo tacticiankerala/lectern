@@ -14,6 +14,9 @@
 // workspace here answers `reload`, and with `persist` the model survives the page reload that
 // follows.
 //
+// A path's Windows and WSL forms follow core's rules for drives, `/mnt/<x>`, WSL shares and Linux
+// paths, for exact paths and for text, with Ubuntu as the WSL distribution, but no user mappings.
+//
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
 // lines; one seeded as moved stays moved while its current text is there; anything else is
@@ -23,6 +26,7 @@ import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
+import { trimPath } from "../src/copy-path";
 import { MARKDOWN_PATH } from "../src/dom";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
@@ -38,6 +42,7 @@ import type { FollowTarget } from "../src/generated/FollowTarget";
 import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
+import type { PathForms } from "../src/generated/PathForms";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
 import type { ReviewOp } from "../src/generated/ReviewOp";
@@ -493,6 +498,58 @@ function wslPath(path: string): string | null {
     : null;
 }
 
+/** The WSL distribution the fake maps Linux paths through, as `\\wsl.localhost\<distro>\…`. */
+const FAKE_DISTRO = "Ubuntu";
+
+/**
+ * Text written as a path, as core's `bare_path` leaves it: trimmed, without a trailing `#anchor`
+ * (only after a file name with an extension, so `Meeting #3.md` keeps its `#`), `:line`,
+ * `:line:col` or `#Lline`.
+ */
+function bareText(raw: string): string {
+  let path = trimPath(raw);
+  const hash = path.lastIndexOf("#");
+  if (
+    hash >= 0 &&
+    !/[\\/]/.test(path.slice(hash + 1)) &&
+    /[^\\/]\.[A-Za-z0-9]+$/.test(path.slice(0, hash))
+  ) {
+    path = path.slice(0, hash);
+  }
+  // A trailing `:line` or `:line:col`, unless only a drive letter would be left.
+  const line = /^(.+?)(?::\d+){1,2}$/.exec(path)?.[1];
+  return line !== undefined && !/^[A-Za-z]$/.test(line) ? line : path;
+}
+
+/**
+ * As core's `PathMapper::forms` and `literal_forms`, without user mappings or the index. Text
+ * (`literal` false) is trimmed, and loses a trailing `#anchor` (after a file name with an
+ * extension), `:line` or `#Lline`; an exact path is taken as it is. Then a drive or UNC path is
+ * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path goes through
+ * `FAKE_DISTRO`; the WSL form is a WSL share's Linux path or a drive's `/mnt/<x>/…`.
+ */
+function pathForms(raw: string, literal: boolean): PathForms {
+  const path = literal ? raw : bareText(raw);
+  const parts = (rest: string) => rest.split(/[\\/]/).filter((part) => part !== "");
+  const mnt = /^\/mnt\/([A-Za-z])(?:\/(.*))?$/.exec(path);
+  let windows: string | null = null;
+  if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(path)) {
+    windows = path;
+  } else if (mnt) {
+    windows = `${(mnt[1] ?? "").toUpperCase()}:\\${parts(mnt[2] ?? "").join("\\")}`;
+  } else if (path.startsWith("/")) {
+    windows = ["\\\\wsl.localhost", FAKE_DISTRO, ...parts(path)].join("\\");
+  }
+  if (windows === null) {
+    return { windows, wsl: null };
+  }
+  const share = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/][^\\/]+(.*)$/i.exec(windows);
+  const wsl = share
+    ? `/${parts(share[1] ?? "").join("/")}`
+    : wslPath(windows.replaceAll("/", "\\"));
+  return { windows, wsl };
+}
+
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
   readonly windowCalls: WindowCall[] = [];
@@ -773,6 +830,10 @@ export class FakeBackend implements Backend, FakeControl {
       });
     }
     return Promise.resolve({ action: "notFound", message: `Couldn't find ${target.target}` });
+  }
+
+  pathForms(raw: string, literal: boolean): Promise<PathForms> {
+    return Promise.resolve(pathForms(raw, literal));
   }
 
   revealInExplorer(): Promise<void> {

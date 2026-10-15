@@ -6,6 +6,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use super::resolve::{library_suffix_match, moved_file_match};
 use super::LibraryIndex;
+use crate::ipc::PathForms;
 
 /// Maps absolute paths found in notes (Linux, WSL, other machines) to local files.
 #[derive(Debug, Clone, Default)]
@@ -137,6 +138,68 @@ impl PathMapper {
             .max_by_key(|&(len, ..)| len)
             .map(|(_, linux, rest)| linux_join(linux, rest))
     }
+
+    /// Both forms of the text `raw`, written as a path (a selection, or a broken link's text), for
+    /// pasting into a terminal. Surrounding whitespace, quotes and backticks, and a trailing
+    /// `:line`, `#Lline` or `#anchor`, are dropped first. The Windows form is where
+    /// [`PathMapper::map`] puts it, verified or not, so it may be the file a moved note's link
+    /// finds; the WSL form is [`PathMapper::to_wsl`] of that. A relative path has neither. Only
+    /// strings and the in-memory index are consulted, never the disk, so it answers at once even
+    /// for a path on a share that stalls.
+    pub fn forms(&self, raw: &str, index: Option<&LibraryIndex>) -> PathForms {
+        let windows = match self.map(&bare_path(raw), index) {
+            Mapped::Verified(path) | Mapped::Unverified(path) => Some(path),
+            Mapped::Unresolved => None,
+        };
+        self.both_forms(windows)
+    }
+
+    /// Both forms of `path`, an exact path on this machine (the open file, a tree row, a resolved
+    /// link's target), for pasting into a terminal. Nothing is trimmed or dropped, since a `#` or
+    /// `:12` there is part of a name, and no index is consulted, so the file is never swapped for
+    /// another. The Windows form is `path` itself when it is a Windows path, else where
+    /// [`PathMapper::map`] puts it without an index; the WSL form is [`PathMapper::to_wsl`] of that.
+    pub fn literal_forms(&self, path: &str) -> PathForms {
+        let windows = if is_windows_absolute(path) {
+            Some(PathBuf::from(path))
+        } else {
+            match self.map(path, None) {
+                Mapped::Verified(path) | Mapped::Unverified(path) => Some(path),
+                Mapped::Unresolved => None,
+            }
+        };
+        self.both_forms(windows)
+    }
+
+    /// `windows` and its WSL form, as strings.
+    fn both_forms(&self, windows: Option<PathBuf>) -> PathForms {
+        PathForms {
+            wsl: windows.as_deref().and_then(|path| self.to_wsl(path)),
+            windows: windows.map(|path| path.to_string_lossy().into_owned()),
+        }
+    }
+}
+
+/// `raw` without surrounding whitespace, quotes or backticks, and without a trailing `#anchor`,
+/// `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name with an extension
+/// (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs` keep theirs.
+fn bare_path(raw: &str) -> String {
+    let quoted =
+        |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’');
+    let path = raw.trim_matches(quoted);
+    let path = match path.rsplit_once('#') {
+        Some((file, anchor)) if !anchor.contains(['/', '\\']) && has_extension(file) => file,
+        _ => path,
+    };
+    split_line_suffix(path).path
+}
+
+/// Whether the last component of `path` is a file name with an extension, such as `plan.md`.
+fn has_extension(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
 }
 
 /// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`.
