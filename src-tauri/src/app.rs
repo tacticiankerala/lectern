@@ -24,11 +24,11 @@ use tauri::{
 
 use crate::events::TauriHost;
 use crate::state::{
-    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, PageResponse, Profile, Slot, Timings,
-    WatchControl, WindowState,
+    App, AssetResponse, Boot, Early, HeldLaunches, OpenQueue, PageRequest, PageResponse, Profile,
+    Slot, Timings, WatchControl, WindowState,
 };
 use crate::updater::{self, Updates};
-use crate::{commands, navigate, win};
+use crate::{accelerators, commands, navigate, win};
 
 /// The label of the first window, as in `tauri.conf.json`.
 pub const MAIN_WINDOW: &str = "main";
@@ -112,15 +112,30 @@ pub fn run(context: tauri::Context, launch: Launch) {
             });
         })
         // HTML pages and PDFs in a frame, and what a page loads, at
-        // `http://lxpage.localhost/d/<drive>/…` or `…/u/<host>/<share>/…`.
+        // `http://lxpage.localhost/d/<drive>/…` or `…/u/<host>/<share>/…`; and the browser's
+        // reports on what a page loaded, at `/__csp-report`.
         .register_asynchronous_uri_scheme_protocol("lxpage", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
-            let path = request.uri().path().to_owned();
+            let (parts, body) = request.into_parts();
+            let method = parts.method.as_str().to_owned();
+            let path = parts.uri.path().to_owned();
+            let query = parts.uri.query().map(str::to_owned);
+            let content_type = parts
+                .headers
+                .get(tauri::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             // As for images: the checks are in memory, and only an allowed file is read, off the
             // main thread.
             tauri::async_runtime::spawn_blocking(move || {
                 let response = match app.try_state::<Arc<App>>() {
-                    Some(state) => state.serve_page(&path),
+                    Some(state) => state.page_request(&PageRequest {
+                        method: &method,
+                        path: &path,
+                        query: query.as_deref(),
+                        content_type: content_type.as_deref(),
+                        body: &body,
+                    }),
                     None => PageResponse::refused(),
                 };
                 responder.respond(response.into_http());
@@ -162,6 +177,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::set_workspace_theme,
             commands::quit,
             commands::set_unsaved,
+            commands::set_frame_focus,
             commands::close_window,
         ])
         .on_window_event(on_window_event)
@@ -274,6 +290,7 @@ fn main_window_config(handle: &AppHandle) -> Option<WindowConfig> {
 
 /// Builds a window from `config`, its page guarded so it never leaves Lectern's own page or opens
 /// a window (`navigate`): an unsandboxed frame, the PDF viewer, can navigate the top-level page.
+/// Lectern's shortcuts reach it from inside a frame too (`accelerators`).
 fn build_from_config(handle: &AppHandle, config: &WindowConfig) -> tauri::Result<WebviewWindow> {
     let build = &handle.config().build;
     // Where Tauri loads the page from (its `get_app_url`).
@@ -285,7 +302,10 @@ fn build_from_config(handle: &AppHandle, config: &WindowConfig) -> tauri::Result
         _ => None,
     };
     let app = navigate::app_url(served_from, config.use_https_scheme);
-    navigate::guard(WebviewWindowBuilder::from_config(handle, config)?, app).build()
+    let window =
+        navigate::guard(WebviewWindowBuilder::from_config(handle, config)?, app).build()?;
+    accelerators::watch(&window);
+    Ok(window)
 }
 
 /// Brings the window `label` forward, unminimised. A window still waiting for its first paint

@@ -1,0 +1,26 @@
+/* The invented weekly report's styles: its sections a screen apart, so the page scrolls. */
+body {
+  margin: 2em;
+  font-family: Georgia, serif;
+}
+
+h1 {
+  color: rgb(0, 110, 110);
+}
+
+h2 {
+  margin-top: 90vh;
+}
+
+td,
+th {
+  padding: 0.2em 0.6em;
+  border: 1px solid #999;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #222;
+    color: #ddd;
+  }
+}

@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use lectern_core::ipc::{DocChanged, LibraryPayload, OpenRequest, SettingsSnapshot};
+use lectern_core::ipc::{
+    DocChanged, FrameKey, LibraryPayload, OpenRequest, PageLoads, SettingsSnapshot,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget};
 
@@ -29,6 +31,10 @@ pub const WORKSPACES_CHANGED: &str = "workspaces-changed";
 /// The window's close button was pressed while its UI holds comment text that isn't saved yet,
 /// so it stayed open (no payload): the UI asks whether to let the text go.
 pub const CLOSE_REQUESTED: &str = "close-requested";
+/// The open HTML page loaded from the web, or was blocked from it (`PageLoads`).
+pub const PAGE_LOADS: &str = "page-loads";
+/// One of Lectern's shortcuts was pressed while the focus was inside a frame (`FrameKey`).
+pub const FRAME_KEY: &str = "frame-key";
 
 /// Which windows an event is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +59,8 @@ pub enum UiEvent {
     SettingsChanged(SettingsSnapshot),
     WorkspacesChanged,
     CloseRequested,
+    PageLoads(PageLoads),
+    FrameKey(FrameKey),
 }
 
 /// What the app state needs from Tauri.
@@ -88,6 +96,8 @@ impl Host for TauriHost {
             UiEvent::SettingsChanged(settings) => emit(app, target, SETTINGS_CHANGED, settings),
             UiEvent::WorkspacesChanged => emit(app, target, WORKSPACES_CHANGED, ()),
             UiEvent::CloseRequested => emit(app, target, CLOSE_REQUESTED, ()),
+            UiEvent::PageLoads(loads) => emit(app, target, PAGE_LOADS, loads),
+            UiEvent::FrameKey(key) => emit(app, target, FRAME_KEY, key),
         }
     }
 

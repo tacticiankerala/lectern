@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::ipc::{EditorPref, Measure, RecentEntry, SavedPosition, Settings, ThemeId, ThemeMode};
+use crate::ipc::{
+    EditorPref, HtmlPages, Measure, RecentEntry, SavedPosition, Settings, ThemeId, ThemeMode,
+};
 use crate::library::path_key;
 
 const FONT_SIZE: (u8, u8) = (12, 32);
@@ -47,6 +49,7 @@ impl Default for Settings {
             sidebar_font_size: 13,
             review_comments: true,
             comments_visible: true,
+            html_pages: HtmlPages::Full,
         }
     }
 }

@@ -173,11 +173,18 @@ impl WindowState {
             readme_in(index, dir)
         });
         let doc = &rendered.doc;
+        // A page's frame URL names this open, for the reports on what the page loads.
+        let frame_url = match (&rendered.frame_url, rendered.kind) {
+            (Some(url), DocKind::Html) => {
+                Some(format!("{url}?t={}", self.app.open_page(&self.label)))
+            }
+            (url, _) => url.clone(),
+        };
         DocPayload {
             position: lock(&self.app.state).reading.position(&path_text).cloned(),
             path: path_text,
             kind: rendered.kind,
-            frame_url: rendered.frame_url.clone(),
+            frame_url,
             title: doc.title.clone(),
             html: doc.html.clone(),
             outline: doc.outline.clone(),
@@ -445,10 +452,21 @@ mod tests {
             };
             assert_eq!(doc.kind, kind);
             let url = doc.frame_url.expect("a frame URL");
-            assert_eq!(Some(&url), page_url(path).as_ref());
-            let served = f.app.serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap());
+            // A page's names its open, for its reports; a PDF's is the file's alone.
+            let (file, query) = match url.split_once('?') {
+                Some((file, query)) => (file, Some(query)),
+                None => (url.as_str(), None),
+            };
+            assert_eq!(Some(file), page_url(path).as_deref());
+            assert_eq!(
+                query.is_some_and(|q| q.starts_with("t=")),
+                kind == DocKind::Html
+            );
+            let served = f
+                .app
+                .serve_page(file.strip_prefix(PAGE_ORIGIN).unwrap(), query);
             assert_eq!(served.status, 200, "{url}");
-            assert_eq!(served.body, fs::read(path).unwrap());
+            assert!(served.body.ends_with(&fs::read(path).unwrap()), "{url}");
             assert_eq!(doc.html, "");
             assert!(doc.outline.is_empty());
             assert!(doc.frontmatter.is_none());
@@ -476,7 +494,9 @@ mod tests {
         };
         let url = doc.frame_url.expect("a frame URL");
         assert_eq!(Some(&url), page_url(&pdf).as_ref());
-        let served = f.app.serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap());
+        let served = f
+            .app
+            .serve_page(url.strip_prefix(PAGE_ORIGIN).unwrap(), None);
         assert_eq!(served.status, 200, "{url}");
     }
 

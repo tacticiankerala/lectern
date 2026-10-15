@@ -2,7 +2,8 @@
 // with the CSS Custom Highlight API (`find`, and `find-current` for the chosen one), so nothing is
 // added to the document or splits its text. Typing searches again after a pause, Enter and
 // Shift+Enter move through the matches, Esc closes. It searches again whenever the document
-// re-renders. Loaded on first use.
+// re-renders. An HTML page in its frame is searched through the text its bridge reports, and its
+// bridge paints the matches and scrolls to them (page-frame.ts). Loaded on first use.
 import { h } from "./dom";
 
 /** The most matches highlighted; past it the count reads "5000+". */
@@ -105,6 +106,46 @@ export function findRanges(root: HTMLElement, query: string, limit = Infinity): 
   return ranges;
 }
 
+/** A stretch of a page's text, by UTF-16 offsets: `start` up to, not including, `end`. */
+export interface Span {
+  start: number;
+  end: number;
+}
+
+/**
+ * The matches of `query` in a page's `text` (its blocks, starting at `starts`, joined by single
+ * spaces), in order and without overlaps, at most `limit` of them: as `findRanges`, smart case and
+ * any whitespace matching any other, and never across two blocks.
+ */
+export function findSpans(
+  text: string,
+  starts: readonly number[],
+  query: string,
+  limit = Infinity,
+): Span[] {
+  if (query.trim() === "") {
+    return [];
+  }
+  const exact = /\p{Uppercase}/u.test(query);
+  // By UTF-16 code unit, as the offsets count.
+  const chars = fold(text.replace(/\s/g, " "), exact).split("");
+  // The space joining each block to the one before it stands for a break no query can hold.
+  for (const at of starts) {
+    if (at > 0) chars[at - 1] = BREAK;
+  }
+  const haystack = chars.join("");
+  const needle = fold(query.replace(/\s/g, " "), exact);
+  const spans: Span[] = [];
+  for (
+    let at = haystack.indexOf(needle);
+    at !== -1 && spans.length < limit;
+    at = haystack.indexOf(needle, at + needle.length)
+  ) {
+    spans.push({ start: at, end: at + needle.length });
+  }
+  return spans;
+}
+
 /**
  * `s` lower-cased, unless `exact`, keeping each character where it was: the few that lower-case to
  * two (İ) stay as they are.
@@ -140,10 +181,26 @@ function nodeAt(starts: number[], at: number): number {
   return lo - 1;
 }
 
+/** An HTML page in its frame, which find searches through its text (page-frame.ts). */
+export interface FindPage {
+  /** The page's text: its blocks joined by single spaces. */
+  readonly text: string;
+  /** Where each block starts in `text`. */
+  readonly starts: readonly number[];
+  /** Where the view's top is in the text: the start of the block there. */
+  readonly top: number;
+  paint(layer: "find" | "find-current", spans: Span[]): void;
+  clear(layer: "find" | "find-current"): void;
+  /** Scrolls the text at `offset` to the middle, if it is out of sight. */
+  reveal(offset: number): void;
+}
+
 /** What the find bar needs from the app. */
 export interface FindHost {
   /** The document on screen, or null when there is none (the welcome screen, an error). */
   doc(): HTMLElement | null;
+  /** The HTML page on screen, searched through its text instead; null for anything else. */
+  page(): FindPage | null;
   readonly scroller: HTMLElement;
   /** Scrolls so `el`'s top sits `at` pixels below the pane's top, held while layout settles. */
   placeAt(el: HTMLElement, at: number): void;
@@ -175,6 +232,10 @@ export class FindBar {
   private readonly input: HTMLInputElement;
   private readonly counter: HTMLElement;
   private ranges: Range[] = [];
+  /** The matches in the HTML page last searched (`searched`). */
+  private spans: Span[] = [];
+  /** The HTML page last searched, whose highlights its bridge paints; null for the document. */
+  private searched: FindPage | null = null;
   /** More matches than were highlighted. */
   private more = false;
   private current = -1;
@@ -238,7 +299,7 @@ export class FindBar {
 
   /** How many matches are highlighted. */
   get count(): number {
-    return this.ranges.length;
+    return this.searched ? this.spans.length : this.ranges.length;
   }
 
   /** The current match's index, or -1 without one. */
@@ -282,6 +343,7 @@ export class FindBar {
       CSS.highlights.delete("find");
       CSS.highlights.delete("find-current");
     }
+    this.clearPage();
     this.input.blur();
     if (this.returnFocus instanceof HTMLElement && this.returnFocus.isConnected) {
       this.returnFocus.focus({ preventScroll: true });
@@ -317,6 +379,12 @@ export class FindBar {
    */
   private run(reveal: boolean, near?: Element): void {
     this.cancel();
+    const page = this.host.page();
+    if (page) {
+      this.runPage(page, reveal);
+      return;
+    }
+    this.clearPage();
     const doc = this.host.doc();
     const found = doc ? findRanges(doc, this.input.value, MAX_MATCHES + 1) : [];
     this.more = found.length > MAX_MATCHES;
@@ -344,17 +412,60 @@ export class FindBar {
     }
   }
 
+  /**
+   * Searches the HTML page's text for the input's text and has its bridge paint the matches. The
+   * first match from the top of the view down becomes current; with `reveal`, it is scrolled into
+   * view if out of sight.
+   */
+  private runPage(page: FindPage, reveal: boolean): void {
+    if (supported()) {
+      CSS.highlights.delete("find");
+      CSS.highlights.delete("find-current");
+    }
+    this.ranges = [];
+    this.searched = page;
+    const found = findSpans(page.text, page.starts, this.input.value, MAX_MATCHES + 1);
+    this.more = found.length > MAX_MATCHES;
+    this.spans = this.more ? found.slice(0, MAX_MATCHES) : found;
+    this.current = -1;
+    if (this.spans.length > 0) {
+      const below = this.spans.findIndex((span) => span.end > page.top);
+      this.current = below < 0 ? 0 : below;
+    }
+    page.paint("find", this.spans);
+    this.showCurrent();
+    const span = this.spans[this.current];
+    if (reveal && span) {
+      page.reveal(span.start);
+    }
+  }
+
+  /** Has the HTML page last searched take its matches away. */
+  private clearPage(): void {
+    if (this.searched) {
+      this.searched.clear("find");
+      this.searched.clear("find-current");
+      this.searched = null;
+      this.spans = [];
+    }
+  }
+
   /** Moves to the next or previous match, wrapping around, and scrolls it to the middle. */
   private step(by: 1 | -1): void {
     if (this.timer !== null) {
       this.run(false);
     }
-    const n = this.ranges.length;
+    const n = this.count;
     if (n === 0) {
       return;
     }
     this.current = (this.current + by + n) % n;
     this.showCurrent();
+    const span = this.searched ? this.spans[this.current] : undefined;
+    if (span) {
+      this.searched?.reveal(span.start);
+      return;
+    }
     const range = this.ranges[this.current];
     if (range) {
       this.reveal(range);
@@ -363,6 +474,10 @@ export class FindBar {
 
   /** Paints the current match and shows where it is among them. */
   private showCurrent(): void {
+    if (this.searched) {
+      const span = this.spans[this.current];
+      this.searched.paint("find-current", span ? [span] : []);
+    }
     const range = this.ranges[this.current];
     if (supported()) {
       if (range) {
@@ -375,10 +490,10 @@ export class FindBar {
     }
     if (this.input.value.trim() === "") {
       this.counter.textContent = "";
-    } else if (this.ranges.length === 0) {
+    } else if (this.count === 0) {
       this.counter.textContent = "No results";
     } else {
-      const total = `${String(this.ranges.length)}${this.more ? "+" : ""}`;
+      const total = `${String(this.count)}${this.more ? "+" : ""}`;
       this.counter.textContent = `${String(this.current + 1)} / ${total}`;
     }
   }

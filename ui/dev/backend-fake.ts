@@ -4,7 +4,11 @@
 // Full-text search matches the fixtures' notes and text files, which `build.mjs --fake` inlines, as
 // Rust does: smart case, line by line. Each document's kind comes from core, through the export. A
 // page or a PDF loads into its frame from the dev server (`/__page/…`, dev/serve.mjs), as it would
-// from `lxpage`.
+// from `lxpage`: a page with the bridge in it, under the *HTML pages* setting's policy, which its
+// frame URL tells the server (`lxmode`), and a token naming the open. The browser's reports of
+// what a page loads don't reach the fake, so it tells them itself, from the hosts each page fixture
+// names (`pageHosts`), as Rust would. Keys pressed inside a frame, which only Rust sees, come from
+// `frameKey`.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -42,6 +46,8 @@ import type { EntryView } from "../src/generated/EntryView";
 import type { FileHits } from "../src/generated/FileHits";
 import type { FollowResult } from "../src/generated/FollowResult";
 import type { FollowTarget } from "../src/generated/FollowTarget";
+import type { FrameFocus } from "../src/generated/FrameFocus";
+import type { FrameKey } from "../src/generated/FrameKey";
 import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
@@ -79,6 +85,8 @@ export interface Fixtures {
   sources?: Record<string, string>;
   /** Core's review text for each document, by path: `[startLine, endLine, text]` per block. */
   textBlocks?: Record<string, [number, number, string][]>;
+  /** The hosts each HTML page loads from the web, by path; `build.mjs --fake` adds them. */
+  pageHosts?: Record<string, string[]>;
 }
 
 export interface FakeOptions {
@@ -155,6 +163,10 @@ const WORKSPACES_KEY = "lx-fake-workspaces";
 const FEATURE_OFF = "Review comments are turned off in Preferences.";
 /** As Rust, the reason a PDF shows no comments. */
 const NOT_ON_A_PDF = "PDFs don't take comments.";
+/** As Rust, the reason a page shows no comments yet. */
+const NOT_YET_ON_PAGES = "Comments on pages arrive in Task 5.";
+/** How long after a page opens the fake tells what it loads, as the browser's reports would. */
+const PAGE_LOADS_MS = 30;
 /** As core: a workspace's name is at most 60 characters. */
 const MAX_NAME_CHARS = 60;
 /**
@@ -260,6 +272,15 @@ export interface FakeControl {
    * not in the model, a new workspace is added with it), then `workspaces-changed` is sent.
    */
   workspacesElsewhere(id: string, change: Partial<Omit<FakeWorkspace, "id">>): void;
+  /**
+   * A key pressed inside a frame, as Rust reports one of Lectern's (`frame-key`); the modifiers not
+   * given aren't held.
+   */
+  frameKey(key: Pick<FrameKey, "key" | "code"> & Partial<FrameKey>): void;
+  /** Every `follow`, in order. */
+  readonly followed: FollowTarget[];
+  /** Where the UI said the keyboard focus was, each time it said, in order. */
+  readonly frameFocus: FrameFocus[];
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -572,6 +593,8 @@ function pathForms(raw: string, literal: boolean): PathForms {
 
 export class FakeBackend implements Backend, FakeControl {
   readonly marks: PerfMark[] = [];
+  readonly followed: FollowTarget[] = [];
+  readonly frameFocus: FrameFocus[] = [];
   readonly windowCalls: WindowCall[] = [];
   unsavedElsewhere: string[] = [];
   readonly unsavedReports: boolean[] = [];
@@ -604,6 +627,8 @@ export class FakeBackend implements Backend, FakeControl {
   private readonly textBlocks = new Map<string, [number, number, string][]>();
   private reviewCount = 0;
   private reviewFailure: string | null = null;
+  /** Numbers each page opened, for its token. */
+  private pageOpens = 0;
   /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
   /** The settings revision: bumped by every change to the settings or a workspace's theme. */
@@ -844,15 +869,22 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(results);
   }
 
-  /** `doc` targets open, with the anchor passed through as written, as Rust does. */
+  /**
+   * `doc` targets open, and `path` targets the fake has, with the anchor passed through as written,
+   * as Rust does; web and mail links go out.
+   */
   follow(target: FollowTarget): Promise<FollowResult> {
-    if (target.kind === "doc") {
+    this.followed.push(structuredClone(target));
+    if (target.kind === "doc" || (target.kind === "path" && this.docs.has(key(target.target)))) {
       return Promise.resolve({
         action: "openDoc",
-        path: target.target,
+        path: this.docs.get(key(target.target))?.path ?? target.target,
         anchor: target.anchor,
         line: target.line,
       });
+    }
+    if (target.kind === "external" && /^(https?|mailto):/i.test(target.target)) {
+      return Promise.resolve({ action: "opened" });
     }
     return Promise.resolve({ action: "notFound", message: `Couldn't find ${target.target}` });
   }
@@ -982,6 +1014,9 @@ export class FakeBackend implements Backend, FakeControl {
     if (this.kinds.get(key(path)) === "pdf") {
       throw new Error(NOT_ON_A_PDF);
     }
+    if (this.kinds.get(key(path)) === "html") {
+      throw new Error(NOT_YET_ON_PAGES);
+    }
     const existing = this.reviews.get(key(path));
     if (existing?.readOnly) {
       throw new Error(existing.readOnly);
@@ -1107,11 +1142,17 @@ export class FakeBackend implements Backend, FakeControl {
       noteWslPath: review ? review.noteWslPath : wslPath(path),
       sidecarWslPath: review ? review.sidecarWslPath : wslPath(sidecarOf(path)),
       exists: review !== undefined,
-      readOnly: this.kinds.get(key(path)) === "pdf" ? NOT_ON_A_PDF : (review?.readOnly ?? null),
+      readOnly: this.refusal(path) ?? review?.readOnly ?? null,
       comments,
       unreadable: structuredClone(review?.unreadable ?? []),
       openCount: comments.filter((c) => c.status !== "resolved" && c.status !== "dismissed").length,
     };
+  }
+
+  /** As Rust, why `path` shows no comments: a PDF, or (for now) a page. */
+  private refusal(path: string): string | null {
+    const kind = this.kinds.get(key(path));
+    return kind === "pdf" ? NOT_ON_A_PDF : kind === "html" ? NOT_YET_ON_PAGES : null;
   }
 
   getSettings(): Promise<SettingsSnapshot> {
@@ -1339,6 +1380,15 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  setFrameFocus(focus: FrameFocus): Promise<void> {
+    this.frameFocus.push(focus);
+    return Promise.resolve();
+  }
+
+  frameKey(pressed: Pick<FrameKey, "key" | "code"> & Partial<FrameKey>): void {
+    this.emit("frame-key", { ctrl: false, shift: false, alt: false, ...pressed });
+  }
+
   closeWindow(): Promise<void> {
     this.windowCalls.push({ call: "closeWindow" });
     return Promise.resolve();
@@ -1477,12 +1527,39 @@ export class FakeBackend implements Backend, FakeControl {
     return { status: "ok", doc: this.payload(found.path, found.doc, found.mtimeMs) };
   }
 
+  /**
+   * Where a page or a PDF loads into its frame from: a page's URL names its open, by a token, and
+   * the *HTML pages* setting, for the dev server. A page whose fixture loads from the web tells it
+   * a moment later, as Rust tells what the browser reports.
+   */
+  private frameUrl(path: string, kind: DocKind): string | null {
+    const url = pageUrl(path);
+    if (url === null || kind !== "html") {
+      return kind === "pdf" ? url : null;
+    }
+    const token = `t${String(++this.pageOpens)}`;
+    const mode = this.settings.htmlPages;
+    const hosts =
+      Object.entries(this.fixtures.pageHosts ?? {}).find(([p]) => key(p) === key(path))?.[1] ?? [];
+    if (hosts.length > 0) {
+      setTimeout(() => {
+        this.emit("page-loads", {
+          token,
+          hosts: [...hosts],
+          count: hosts.length,
+          blocked: mode !== "full",
+        });
+      }, PAGE_LOADS_MS);
+    }
+    return `${url}?t=${token}&lxmode=${mode}`;
+  }
+
   private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
     const kind = this.kinds.get(key(path)) ?? "markdown";
     return {
       path,
       kind,
-      frameUrl: kind === "html" || kind === "pdf" ? pageUrl(path) : null,
+      frameUrl: this.frameUrl(path, kind),
       title: doc.title,
       html: doc.html,
       outline: doc.outline,

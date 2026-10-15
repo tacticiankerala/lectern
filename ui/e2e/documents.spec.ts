@@ -43,7 +43,7 @@ test("quick open finds a page by name", async ({ page }) => {
   await expect(frame(page)).toHaveAttribute("sandbox", "allow-scripts");
   await expect(frame(page)).toHaveAttribute(
     "src",
-    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/report\.html\?v=\d+$/,
+    /^\/__page\/d\/c\/Fixtures\/vault\/artifacts\/report\.html\?t=t\d+&lxmode=full&v=\d+$/,
   );
 });
 

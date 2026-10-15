@@ -23,6 +23,7 @@ const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
 const NOT_A_NOTE: &str = "Comments can only be added to notes and text files.";
 const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
+const NOT_YET_ON_PAGES: &str = "Comments on pages arrive in Task 5.";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -39,6 +40,7 @@ impl Target {
     fn refusal(&self) -> Option<&'static str> {
         match doc_kind(&self.note_name) {
             Some(DocKind::Pdf) => Some(NOT_ON_A_PDF),
+            Some(DocKind::Html) => Some(NOT_YET_ON_PAGES),
             Some(DocKind::Markdown | DocKind::Text) if !is_sidecar_name(&self.note_name) => None,
             _ => Some(NOT_A_NOTE),
         }
@@ -335,13 +337,13 @@ mod tests {
         );
     }
 
-    /// A page takes no comments yet, a PDF never does (and says so), and a sidecar takes none of
-    /// its own.
+    /// A page takes no comments yet (and says when it will), a PDF never does (and says so), and a
+    /// sidecar takes none of its own.
     #[test]
     fn refuses_a_page_a_pdf_or_a_sidecar() {
         let f = fixture(profile(&[]), FakeHost::default());
         for (name, reason) in [
-            ("a/tide.html", NOT_A_NOTE),
+            ("a/tide.html", "Comments on pages arrive in Task 5."),
             ("b/plan.review.md", NOT_A_NOTE),
             ("c/PLAN.Review.MD", NOT_A_NOTE),
             ("d/brief.pdf", "PDFs don't take comments."),

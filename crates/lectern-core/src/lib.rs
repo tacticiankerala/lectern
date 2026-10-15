@@ -2,9 +2,11 @@
 
 pub mod cache;
 pub mod cli;
+pub mod frame_keys;
 pub mod frontmatter;
 pub mod ipc;
 pub mod library;
+pub mod page;
 pub mod perf;
 pub mod render;
 pub mod review;

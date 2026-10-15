@@ -2,7 +2,8 @@
 // app.css, index.html and fonts/.
 // The fake build inlines dev/fixtures.json, which `npm run fixtures` writes, with the text of each
 // note and text file from fixtures/vault added for the fake's full-text search, which reads no
-// HTML pages or PDFs, as Rust's doesn't.
+// HTML pages or PDFs, as Rust's doesn't, and the web hosts each HTML page loads from, which the
+// fake tells as Rust tells what the browser reports.
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -24,10 +25,16 @@ if (fake) {
   const data = JSON.parse(await readFile(fixtures, "utf8"));
   const vault = path.join(root, "../fixtures/vault");
   data.sources = {};
+  data.pageHosts = {};
   for (const doc of Object.keys(data.docs)) {
     const kind = data.kinds?.[doc] ?? "markdown";
-    if (kind !== "markdown" && kind !== "text") continue;
     const rel = doc.slice(data.root.length + 1).split("\\");
+    if (kind === "html") {
+      const page = await readFile(path.join(vault, ...rel), "utf8");
+      const hosts = [...page.matchAll(/\bsrc="https:\/\/([^/"]+)\//g)].map((m) => m[1]);
+      if (hosts.length > 0) data.pageHosts[doc] = [...new Set(hosts)];
+    }
+    if (kind !== "markdown" && kind !== "text") continue;
     data.sources[doc] = await readFile(path.join(vault, ...rel), "utf8");
   }
   define.__LX_FIXTURES__ = JSON.stringify(data);
@@ -50,6 +57,7 @@ const lazy = [
   "crumb-chooser",
   "comments",
   "workspace-menu",
+  "page-frame",
 ];
 await esbuild.build({
   entryPoints: [entry],

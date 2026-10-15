@@ -803,6 +803,7 @@ describe("Preferences", () => {
       "Theme",
       "Status badges",
       "Reading",
+      "HTML pages",
       "Path mappings",
       "Editor",
       "Updates",

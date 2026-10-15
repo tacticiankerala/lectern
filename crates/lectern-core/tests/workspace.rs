@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
-    EditorPref, Measure, PathMapping, Settings, SettingsPatch, ThemeId, ThemeMode,
+    EditorPref, HtmlPages, Measure, PathMapping, Settings, SettingsPatch, ThemeId, ThemeMode,
 };
 use lectern_core::store::State;
 use lectern_core::workspace::{
@@ -833,6 +833,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
             show_status_badges: Some(false),
             sidebar_font_size: Some(2),
             review_comments: Some(false),
+            html_pages: Some(HtmlPages::Static),
             ..SettingsPatch::default()
         },
     );
@@ -856,6 +857,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
     assert!(!shared.show_status_badges);
     assert_eq!(shared.sidebar_font_size, 11);
     assert!(!shared.review_comments);
+    assert_eq!(shared.html_pages, HtmlPages::Static);
 }
 
 // Open routing.

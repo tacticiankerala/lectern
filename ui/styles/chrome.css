@@ -313,6 +313,60 @@ body.focus #lx-doc-pane.framed {
   border: 0;
 }
 
+/* What an HTML page loads from the web, or was blocked from (page-frame.ts): a slim bar above its
+   frame, gone in focus mode. */
+.page-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 8px 3px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  color: var(--fg-muted);
+  font: var(--ui-size) / 1.45 var(--ui-font);
+}
+
+.page-notice[hidden],
+body.focus .page-notice {
+  display: none;
+}
+
+.page-notice-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.page-notice-prefs {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.page-notice-dismiss {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.page-notice-dismiss:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
 /* The banner and the properties strip share the document's column: their width is measured in the
    reading font, their content set in the chrome's. */
 #lx-banner,

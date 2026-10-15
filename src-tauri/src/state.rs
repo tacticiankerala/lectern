@@ -12,9 +12,9 @@
 //!
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
 //! `lifecycle`, `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`,
-//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus` and `update_check`, and a
-//! window's `workspace`, `layout`, `placement` and `watch`, are leaves: nothing else is locked
-//! while one is held.
+//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus`, `update_check` and
+//! `page_reports`, and a window's `workspace`, `layout`, `placement`, `watch` and `frame_focus`,
+//! are leaves: nothing else is locked while one is held.
 //! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
 //! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
 //! with nothing else held, and stays held while the grammars' release is told, which then may
@@ -49,12 +49,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use lectern_core::cache::RenderCache;
-use lectern_core::ipc::{OpenRequest, Settings, SettingsPatch, SettingsSnapshot};
+use lectern_core::frame_keys::{decide, KeyDecision, Modifiers};
+use lectern_core::ipc::{
+    FrameFocus, HtmlPages, OpenRequest, PageLoads, Settings, SettingsPatch, SettingsSnapshot,
+};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::library::LibraryIndex;
+use lectern_core::page::{PageReports, ReportSend, REPORT_PATH};
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::{BackgroundRelease, StartupWarmUp};
 use lectern_core::render::RenderedDoc;
@@ -69,7 +74,7 @@ use tauri::Window;
 pub use self::assets::AssetResponse;
 pub use self::doc::{render_file, Early, EarlyDoc};
 pub use self::open_queue::{HeldLaunches, OpenQueue};
-pub use self::pages::PageResponse;
+pub use self::pages::{PageRequest, PageResponse};
 pub use self::profile::{load_profile, mapper_for, Profile};
 pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
@@ -78,6 +83,7 @@ pub use self::windows::is_folder;
 use self::assets::AssetScope;
 use self::grammars::AppGrammars;
 use self::library::Library;
+use self::pages::PageOptions;
 use self::paths::same_path;
 use self::profile::{all_roots, StateFile};
 use self::saver::Saver;
@@ -196,6 +202,9 @@ pub struct App {
     trust: RwLock<Trust>,
     /// The folders the image and page protocols may serve from, in any window.
     assets: RwLock<AssetScope>,
+    /// The HTML pages the windows have open, by the token each open got, and the hosts each has
+    /// loaded from, as the browser's policy reports tell.
+    page_reports: Mutex<PageReports>,
     /// The reading positions, shared by every window.
     state: Mutex<StateFile>,
     notice: Mutex<Option<String>>,
@@ -279,6 +288,7 @@ impl App {
             mapper: RwLock::new(Arc::new(mapper_for(&settings, wsl_distro.clone()))),
             trust: RwLock::new(trust),
             assets: RwLock::new(assets),
+            page_reports: Mutex::new(PageReports::default()),
             settings: RwLock::new(settings),
             workspaces: RwLock::new(workspaces),
             workspaces_read_only,
@@ -454,14 +464,75 @@ impl App {
         )
     }
 
+    /// Answers a page-protocol request: a policy report (`REPORT_PATH`), else a page, a PDF or
+    /// what a page loads (`serve_page`).
+    pub fn page_request(self: &Arc<Self>, request: &PageRequest<'_>) -> PageResponse {
+        if request.path == REPORT_PATH {
+            let token = request.query.and_then(|q| query_param(q, "t"));
+            return pages::report(request.method, request.content_type, request.body, |host| {
+                if let Some(token) = token {
+                    self.page_loaded(token, &host);
+                }
+            });
+        }
+        self.serve_page(request.path, request.query)
+    }
+
     /// Answers a page-protocol request for `request_path` (the URL path, percent-encoded): the same
-    /// checks as for an image, made in memory under brief read locks before the file is read.
-    pub fn serve_page(&self, request_path: &str) -> PageResponse {
+    /// checks as for an image, made in memory under brief read locks before the file is read. An
+    /// HTML page is served under the *HTML pages* setting, its reports going to the open its
+    /// `query` names (`?t=`), when a window has it open.
+    pub fn serve_page(&self, request_path: &str, query: Option<&str>) -> PageResponse {
         pages::serve(
             request_path,
             |url_path| pages::decide(url_path, &read(&self.trust), &read(&self.assets)),
             pages::read,
+            || self.page_options(query),
         )
+    }
+
+    /// How a page whose request carries `query` is served: under the setting now, its reports
+    /// going to the open the query names when there is one.
+    fn page_options(&self, query: Option<&str>) -> PageOptions {
+        let mode = read(&self.settings).html_pages;
+        let report = query
+            .and_then(|q| query_param(q, "t"))
+            .filter(|token| lock(&self.page_reports).served(token, mode != HtmlPages::Full))
+            .map(str::to_owned);
+        PageOptions { mode, report }
+    }
+
+    /// A token for a page the window `label` is opening: its frame URL carries it, and its reports
+    /// come back with it. The window's last page's reports go nowhere from now on.
+    fn open_page(&self, label: &str) -> String {
+        lock(&self.page_reports).open(label)
+    }
+
+    /// A report that the page the open `token` names loaded from `host` (or was blocked from it):
+    /// its window hears of a new host now, or, when it heard lately, a moment later.
+    fn page_loaded(self: &Arc<Self>, token: &str, host: &str) {
+        let send = lock(&self.page_reports).report(token, host, Instant::now());
+        match send {
+            ReportSend::Nothing => {}
+            ReportSend::Now(window, loads) => self.tell_page_loads(&window, loads),
+            ReportSend::Later(wait) => {
+                let app = Arc::clone(self);
+                let token = token.to_owned();
+                thread::spawn(move || {
+                    thread::sleep(wait);
+                    let due = lock(&app.page_reports).flush(&token, Instant::now());
+                    if let Some((window, loads)) = due {
+                        app.tell_page_loads(&window, loads);
+                    }
+                });
+            }
+        }
+    }
+
+    fn tell_page_loads(&self, window: &str, loads: PageLoads) {
+        if let Some(state) = self.window(window) {
+            state.emit(UiEvent::PageLoads(loads));
+        }
     }
 
     /// Rebuilds the trusted hosts and the image scope's roots from every workspace's roots, open
@@ -531,6 +602,15 @@ impl App {
     pub fn flush(&self) {
         self.saver.flush(Duration::from_secs(2));
     }
+}
+
+/// The value of `name` in a URL query (`a=1&t=…`), as written.
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
 }
 
 /// What the window showing the workspace `id` shows besides the shared settings: that workspace,
@@ -603,6 +683,9 @@ pub struct WindowState {
     quiet: AtomicBool,
     /// Its UI holds comment text that isn't saved yet: quitting from another window asks first.
     unsaved: AtomicBool,
+    /// Where its UI says the keyboard focus is: in its own page, or inside a page's or a PDF's
+    /// frame, where only Rust sees the keys (`frame_key`).
+    frame_focus: Mutex<FrameFocus>,
 }
 
 impl WindowState {
@@ -647,6 +730,7 @@ impl WindowState {
             retired: AtomicBool::new(false),
             quiet: AtomicBool::new(false),
             unsaved: AtomicBool::new(false),
+            frame_focus: Mutex::new(FrameFocus::None),
         })
     }
 
@@ -718,6 +802,26 @@ impl WindowState {
         self.app
             .host
             .emit(Target::Window(self.label.clone()), event);
+    }
+
+    /// Where the UI says the keyboard focus is now: in its own page, or inside a frame.
+    pub fn set_frame_focus(&self, focus: FrameFocus) {
+        *lock(&self.frame_focus) = focus;
+    }
+
+    /// A key pressed in the window's webview, `vk` with `mods` held: while the focus is inside a
+    /// frame, one of Lectern's shortcuts goes to the UI as a `frame-key` (`frame_keys::decide`),
+    /// unless it is a Ctrl+Alt press that `types_character` on the keyboard layout (AltGr). True
+    /// when the frame must not see it.
+    pub fn frame_key(&self, vk: u32, mods: Modifiers, types_character: bool) -> bool {
+        let focus = *lock(&self.frame_focus);
+        match decide(vk, mods, focus, types_character) {
+            Some(KeyDecision { key, handled }) => {
+                self.emit(UiEvent::FrameKey(key));
+                handled
+            }
+            None => false,
+        }
     }
 
     /// The window is showing the first document: scans may start, and that document is
@@ -1078,31 +1182,255 @@ mod tests {
             let url = page_url(path).unwrap();
             url.strip_prefix(PAGE_ORIGIN).unwrap().to_owned()
         };
-        let served = f.app.serve_page(&url(&page));
+        let served = f.app.serve_page(&url(&page), None);
         assert_eq!(served.status, 200);
-        assert_eq!(served.content_type, Some("text/html"));
-        assert_eq!(served.body, b"<h1>Report</h1>");
-        assert!(served.policy.unwrap().contains("sandbox"));
+        assert_eq!(served.content_type.as_deref(), Some("text/html"));
+        assert!(served.body.ends_with(b"</script><h1>Report</h1>"));
+        assert!(served.policy.unwrap().starts_with("sandbox allow-scripts;"));
         // A relative link resolves beside the page.
         let page_path = url(&page);
         let (folder, _) = page_path.rsplit_once('/').unwrap();
-        let style = f.app.serve_page(&format!("{folder}/style.css?v=1"));
+        let style = f
+            .app
+            .serve_page(&format!("{folder}/style.css"), Some("v=1"));
         assert_eq!(style.status, 200);
         assert_eq!(style.body, b"h1 { color: teal }");
         assert_eq!(
             f.app
-                .serve_page(&url(&root.join("artifacts").join("gone.css")))
+                .serve_page(&url(&root.join("artifacts").join("gone.css")), None)
                 .status,
             404
         );
         // Outside every root until its folder is opened; then a PDF, unsandboxed.
-        assert_eq!(f.app.serve_page(&url(&pdf)).status, 403);
+        assert_eq!(f.app.serve_page(&url(&pdf), None).status, 403);
         f.state.open_document(&path_string(&pdf));
-        let served = f.app.serve_page(&url(&pdf));
+        let served = f.app.serve_page(&url(&pdf), None);
         assert_eq!(served.status, 200);
-        assert_eq!(served.content_type, Some("application/pdf"));
+        assert_eq!(served.content_type.as_deref(), Some("application/pdf"));
         assert_eq!(served.policy, None);
         assert_eq!(served.body, b"%PDF-1.4");
+    }
+
+    /// Opens `page` in `f`'s first window: the path of its frame URL and the query carrying its
+    /// open's token.
+    fn open_page(f: &Fixture, page: &Path) -> (String, String) {
+        let OpenResult::Ok { doc } = f.state.open_document(&path_string(page)) else {
+            panic!("{} didn't open", page.display());
+        };
+        let url = doc.frame_url.expect("a frame URL");
+        let (path, query) = url
+            .strip_prefix(PAGE_ORIGIN)
+            .unwrap()
+            .split_once('?')
+            .expect("a token");
+        (path.to_owned(), query.to_owned())
+    }
+
+    /// Posts a policy report for the open `token`, saying `uri` was loaded or blocked.
+    fn report_to(app: &Arc<App>, token: &str, uri: &str) -> u16 {
+        let query = format!("t={token}");
+        let body = format!(r#"{{"csp-report":{{"blocked-uri":"{uri}"}}}}"#);
+        app.page_request(&PageRequest {
+            method: "POST",
+            path: REPORT_PATH,
+            query: Some(&query),
+            content_type: Some("application/csp-report"),
+            body: body.as_bytes(),
+        })
+        .status
+    }
+
+    fn page_loads(token: &str, hosts: &[&str], blocked: bool) -> PageLoads {
+        PageLoads {
+            token: token.to_owned(),
+            hosts: hosts.iter().map(|h| (*h).to_owned()).collect(),
+            count: u32::try_from(hosts.len()).unwrap(),
+            blocked,
+        }
+    }
+
+    /// A page opens with a token on its frame URL; served with it, the page reports to that open,
+    /// and the window that opened it hears which hosts it loaded from, at most every 250 ms.
+    #[test]
+    fn a_pages_reports_reach_the_window_that_opened_it() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let page = dir.file("vault/artifacts/report.html", "<h1>Report</h1>");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let (path, query) = open_page(&f, &page);
+        let token = query.strip_prefix("t=").expect("t=<token>").to_owned();
+        assert_eq!(token.len(), 32);
+        let served = f.app.page_request(&PageRequest {
+            method: "GET",
+            path: &path,
+            query: Some(&query),
+            content_type: None,
+            body: &[],
+        });
+        assert_eq!(served.status, 200);
+        assert!(served.report_only.unwrap().ends_with(&format!(
+            "report-uri http://lxpage.localhost/__csp-report?t={token}"
+        )));
+        assert_eq!(
+            report_to(&f.app, &token, "https://cdn.example.test/lib.js"),
+            204
+        );
+        let main = Target::Window(MAIN_WINDOW.to_owned());
+        assert_eq!(
+            f.host.page_loads(),
+            [(
+                main.clone(),
+                page_loads(&token, &["cdn.example.test"], false)
+            )]
+        );
+        // An open no window has is heard by no one.
+        assert_eq!(
+            report_to(&f.app, "0123", "https://cdn.example.test/x.js"),
+            204
+        );
+        assert_eq!(f.host.page_loads().len(), 1);
+        // A second host soon after comes a moment later, with the first.
+        report_to(&f.app, &token, "https://fonts.example.test/a.woff2");
+        let started = Instant::now();
+        while f.host.page_loads().len() < 2 && started.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            f.host.page_loads()[1],
+            (
+                main,
+                page_loads(&token, &["cdn.example.test", "fonts.example.test"], false)
+            )
+        );
+        // Each open is a new one. The window keeps its last few: once it has opened the page four
+        // more times, the first open's reports go nowhere.
+        for _ in 0..4 {
+            let (_, again) = open_page(&f, &page);
+            assert_ne!(again, query);
+        }
+        report_to(&f.app, &token, "https://late.example.test/x.js");
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(f.host.page_loads().len(), 2);
+    }
+
+    /// A page is served as the *HTML pages* setting says when it is asked for: without the web,
+    /// its policy reports what it blocked; without scripts, the bridge alone runs.
+    #[test]
+    fn a_page_is_served_as_the_html_pages_setting_says() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let page = dir.file("vault/report.html", "<p>Hi</p>");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.state.set_settings(SettingsPatch {
+            html_pages: Some(HtmlPages::Offline),
+            ..SettingsPatch::default()
+        });
+        let (path, query) = open_page(&f, &page);
+        let token = query.strip_prefix("t=").unwrap().to_owned();
+        let served = f.app.serve_page(&path, Some(&query));
+        let policy = served.policy.unwrap();
+        assert!(!policy.contains("https:"), "{policy}");
+        assert!(policy.ends_with(&format!(
+            "report-uri http://lxpage.localhost/__csp-report?t={token}"
+        )));
+        assert_eq!(served.report_only, None);
+        report_to(&f.app, &token, "https://cdn.example.test/lib.js");
+        assert_eq!(
+            f.host.page_loads(),
+            [(
+                Target::Window(MAIN_WINDOW.to_owned()),
+                page_loads(&token, &["cdn.example.test"], true)
+            )]
+        );
+        f.state.set_settings(SettingsPatch {
+            html_pages: Some(HtmlPages::Static),
+            ..SettingsPatch::default()
+        });
+        let served = f.app.serve_page(&path, Some(&query));
+        let body = String::from_utf8(served.body).unwrap();
+        let nonce = &body[body.find("<script nonce=\"").unwrap() + 15..][..32];
+        assert!(served
+            .policy
+            .unwrap()
+            .contains(&format!("script-src 'nonce-{nonce}';")));
+        // A token no window minted puts no report URI in the policy.
+        let stranger = f.app.serve_page(&path, Some("t=0123%3B%20script-src%20*"));
+        assert!(!stranger.policy.unwrap().contains("report-uri"));
+        // Under `full`, a page that dropped its token (or never had one) is served offline:
+        // nothing it loads from the web would be seen.
+        f.state.set_settings(SettingsPatch {
+            html_pages: Some(HtmlPages::Full),
+            ..SettingsPatch::default()
+        });
+        for query in [None, Some("t=0123")] {
+            let served = f.app.serve_page(&path, query);
+            let policy = served.policy.unwrap();
+            assert!(!policy.contains("https:"), "{query:?}: {policy}");
+            assert!(policy.contains("connect-src 'none'"), "{query:?}: {policy}");
+            assert_eq!(served.report_only, None);
+        }
+    }
+
+    /// A window that closes, or turns to another workspace, takes its pages' opens with it.
+    #[test]
+    fn a_retired_window_hears_no_more_of_its_pages() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let page = dir.file("vault/report.html", "<p>Hi</p>");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let (path, query) = open_page(&f, &page);
+        let token = query.strip_prefix("t=").unwrap().to_owned();
+        f.state.retire();
+        assert_eq!(
+            report_to(&f.app, &token, "https://cdn.example.test/lib.js"),
+            204
+        );
+        assert!(f.host.page_loads().is_empty());
+        // Served now, it has no open to report to, so it runs offline.
+        let served = f.app.serve_page(&path, Some(&query));
+        assert_eq!(served.report_only, None);
+        assert!(!served.policy.unwrap().contains("https:"));
+    }
+
+    /// Keys pressed while the focus is inside a frame: Lectern's go to the UI, handled but for
+    /// Esc, and a PDF's viewer keeps its own; in Lectern's own page, none.
+    #[test]
+    fn lecterns_keys_inside_a_frame_go_to_the_ui() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let none = Modifiers::default();
+        let ctrl = Modifiers { ctrl: true, ..none };
+        let ctrl_alt = Modifiers { alt: true, ..ctrl };
+        // Ctrl+O, Esc, Ctrl+A, Ctrl+F and M by their virtual-key codes.
+        let (o, esc, a, find, m) = (0x4F, 0x1B, 0x41, 0x46, 0x4D);
+        assert!(!f.state.frame_key(o, ctrl, false));
+        f.state.set_frame_focus(FrameFocus::Page);
+        assert!(f.state.frame_key(o, ctrl, false));
+        assert!(!f.state.frame_key(esc, none, false));
+        assert!(!f.state.frame_key(a, ctrl, false));
+        assert!(f.state.frame_key(find, ctrl, false));
+        // AltGr+M typing µ is the page's; Ctrl+Alt+M on a layout without it is Lectern's.
+        assert!(!f.state.frame_key(m, ctrl_alt, true));
+        assert!(f.state.frame_key(m, ctrl_alt, false));
+        f.state.set_frame_focus(FrameFocus::Pdf);
+        assert!(!f.state.frame_key(find, ctrl, false));
+        f.state.set_frame_focus(FrameFocus::None);
+        assert!(!f.state.frame_key(o, ctrl, false));
+        let keys: Vec<(Target, String)> = f
+            .host
+            .frame_keys()
+            .into_iter()
+            .map(|(target, key)| (target, key.key))
+            .collect();
+        let main = || Target::Window(MAIN_WINDOW.to_owned());
+        assert_eq!(
+            keys,
+            [
+                (main(), "o".to_owned()),
+                (main(), "Escape".to_owned()),
+                (main(), "f".to_owned()),
+                (main(), "m".to_owned()),
+            ]
+        );
     }
 
     /// A raw `<img>` naming an image by its drive path loads through the image protocol when the

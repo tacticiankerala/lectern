@@ -1,6 +1,9 @@
 // Keyboard shortcuts (spec §6): one global keydown handler that maps keys to actions. While the
 // user types in a field only Esc and the find and search keys (Ctrl+F, F3, Shift+F3,
 // Ctrl+Shift+F) go through: no field edits with them, and WebView2 would open its own find bar.
+// Inside a frame (an HTML page or a PDF) keys go to the frame's document, so Rust reports
+// Lectern's own (`frame-key`, crates/lectern-core/src/frame_keys.rs), which run the same actions.
+import type { FrameKey } from "./generated/FrameKey";
 
 export type Action =
   | "open-file"
@@ -52,8 +55,11 @@ const CTRL: Record<string, [Action | null, Action | null]> = {
   q: ["quit", null],
 };
 
+/** A key press, as `actionFor` reads it: a `keydown`, or a `frame-key` from Rust. */
+type KeyPress = Pick<KeyboardEvent, "key" | "code" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">;
+
 /** The action a key press stands for, or null. */
-export function actionFor(e: KeyboardEvent): Action | null {
+export function actionFor(e: KeyPress): Action | null {
   if (e.metaKey) {
     return null;
   }
@@ -106,6 +112,21 @@ export function actionFor(e: KeyboardEvent): Action | null {
   }
   const pair = CTRL[e.key.toLowerCase()];
   return pair ? pair[e.shiftKey ? 1 : 0] : null;
+}
+
+/**
+ * The action one of Lectern's shortcuts pressed inside a frame (an HTML page or a PDF) stands for,
+ * as Rust reports it: the same as that key pressed in Lectern's own page.
+ */
+export function actionForKey(key: FrameKey): Action | null {
+  return actionFor({
+    key: key.key,
+    code: key.code,
+    ctrlKey: key.ctrl,
+    shiftKey: key.shift,
+    altKey: key.alt,
+    metaKey: false,
+  });
 }
 
 /** What still goes through while the user types in a field. */

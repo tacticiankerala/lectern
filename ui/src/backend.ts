@@ -4,6 +4,7 @@ import type { Candidate } from "./generated/Candidate";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { FrameFocus } from "./generated/FrameFocus";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
@@ -29,7 +30,9 @@ export type BackendEvent =
   | "review-changed"
   | "settings-changed"
   | "workspaces-changed"
-  | "close-requested";
+  | "close-requested"
+  | "page-loads"
+  | "frame-key";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
@@ -129,6 +132,11 @@ export interface Backend {
   quit(force: boolean): Promise<string[]>;
   /** Tells Rust whether this window holds comment text that isn't saved yet. */
   setUnsaved(on: boolean): Promise<void>;
+  /**
+   * Tells Rust where the keyboard focus is: in this page, or inside an HTML page's or a PDF's
+   * frame, where only Rust sees the keys and sends Lectern's shortcuts back as `frame-key`.
+   */
+  setFrameFocus(focus: FrameFocus): Promise<void>;
   /**
    * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
    * asked again.

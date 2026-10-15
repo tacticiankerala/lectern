@@ -2,10 +2,12 @@
 // `?garden` adds a second workspace, Garden, closed (`?garden=open`: open in another window),
 // `?many=<n>` adds n more, "Notebook 1" to "Notebook n", closed with no folders, and `?blank`
 // starts a blank window. `window.__lxDocText()` reads the page's visible text as the review
-// comments do, to check it against core's (`__fake.coreText`).
+// comments do, to check it against core's (`__fake.coreText`). `window.__lxPage()` is what the HTML
+// page on screen has reported through its bridge.
 import { App } from "../src/app";
 import { docText } from "../src/comments-text";
 import { byId } from "../src/dom";
+import type { PageFrame } from "../src/page-frame";
 import {
   FakeBackend,
   GARDEN,
@@ -18,9 +20,18 @@ import {
 /** dev/fixtures.json, inlined by `build.mjs --fake`. */
 declare const __LX_FIXTURES__: Fixtures;
 
+/** What the HTML page on screen has reported through its bridge. */
+interface PageState {
+  ready: boolean;
+  text: string;
+  fraction: number;
+  dark: boolean;
+}
+
 declare global {
   interface Window {
     __lxDocText: () => string;
+    __lxPage: () => PageState | null;
   }
 }
 
@@ -58,5 +69,9 @@ const options: FakeOptions = {
 const backend = new FakeBackend(__LX_FIXTURES__, options);
 window.__fake = backend;
 const app = new App(backend, byId("lx-app"));
+window.__lxPage = () => {
+  const page = app.view.page as PageFrame | null;
+  return page && { ready: page.ready, text: page.text, fraction: page.fraction, dark: page.dark };
+};
 await app.start();
 document.documentElement.dataset.lxReady = "";

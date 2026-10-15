@@ -53,6 +53,19 @@ pub enum EditorPref {
     Custom { command: String },
 }
 
+/// What an HTML page may do, beyond showing itself in its sandbox: run its scripts and load from
+/// the internet (`full`), run its scripts with nothing from the internet (`offline`), or run none
+/// of its own scripts (`static`). Lectern's bridge script runs in every mode.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum HtmlPages {
+    #[default]
+    Full,
+    Offline,
+    Static,
+}
+
 /// A user prefix mapping for absolute paths in notes, such as `/home/me/shared` → `S:\Shared`.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +111,8 @@ pub struct Settings {
     /// The header toggle (on by default). Off, all comment UI is hidden, from the highlights to the
     /// Comments tab.
     pub comments_visible: bool,
+    /// What HTML pages may do (scripts and the internet by default). Every window shares it.
+    pub html_pages: HtmlPages,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -126,6 +141,7 @@ pub struct SettingsPatch {
     pub sidebar_font_size: Option<u8>,
     pub review_comments: Option<bool>,
     pub comments_visible: Option<bool>,
+    pub html_pages: Option<HtmlPages>,
 }
 
 /// A window's settings as a command answers or `settings-changed` carries them, with the revision
@@ -413,6 +429,49 @@ pub struct UpdateInfo {
 #[ts(export)]
 pub struct DocChanged {
     pub path: String,
+}
+
+/// Event payload: what an open HTML page has loaded from the web, or tried to and was blocked, as
+/// the browser's policy reports tell it. `token` names the open it is for (the page's frame URL
+/// carries it); `hosts` grows in the order they were first reported, up to its cap.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PageLoads {
+    pub token: String,
+    /// The first hosts reported, at most 50.
+    pub hosts: Vec<String>,
+    /// How many hosts have been reported in all: more than `hosts` names once it is full.
+    pub count: u32,
+    /// The page was served without the web (`offline` or `static`): these loads were blocked.
+    pub blocked: bool,
+}
+
+/// Where the keyboard focus is, as the UI tells Rust: in Lectern's own page, or inside the frame
+/// of an HTML page or a PDF, whose keys only Rust sees.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum FrameFocus {
+    #[default]
+    None,
+    Page,
+    Pdf,
+}
+
+/// Event payload: one of Lectern's own shortcuts, pressed while the focus was inside a frame, as
+/// a `keydown` would describe it.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FrameKey {
+    /// `KeyboardEvent.key`: `"o"`, `"O"` with Shift, `"F5"`, `"Escape"`, `"+"`.
+    pub key: String,
+    /// `KeyboardEvent.code`: `"KeyO"`, `"F5"`, `"Equal"`, `"NumpadAdd"`.
+    pub code: String,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
 }
 
 /// Event payload: a second launch (or a drop) asked to open `path`.

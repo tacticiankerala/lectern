@@ -68,6 +68,22 @@ describe("TauriBackend", () => {
     ]);
   });
 
+  it("tells Rust where the keyboard focus is, and hears the keys and loads of frames", async () => {
+    const backend = new TauriBackend();
+    await backend.setFrameFocus("page");
+    await backend.setFrameFocus("none");
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["set_frame_focus", { focus: "page" }],
+      ["set_frame_focus", { focus: "none" }],
+    ]);
+    backend.on("frame-key", () => undefined);
+    backend.on("page-loads", () => undefined);
+    expect(tauri.listen.mock.calls.map(([event, , options]) => [event, options])).toEqual([
+      ["frame-key", { target: TARGET }],
+      ["page-loads", { target: TARGET }],
+    ]);
+  });
+
   it("asks for a path's forms with the path as written, and whether it is an exact path", async () => {
     const backend = new TauriBackend();
     await backend.pathForms("`/home/me/a.md:12`", false);

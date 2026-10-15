@@ -386,6 +386,7 @@ pub fn apply_patch(
         sidebar_font_size,
         review_comments,
         comments_visible,
+        html_pages,
     } = patch;
     let mut effect = PatchEffect::default();
     let (layout, changed) = match shown {
@@ -422,6 +423,7 @@ pub fn apply_patch(
     *changed |= set(&mut shared.show_status_badges, show_status_badges);
     *changed |= set(&mut shared.sidebar_font_size, sidebar_font_size);
     *changed |= set(&mut shared.review_comments, review_comments);
+    *changed |= set(&mut shared.html_pages, html_pages);
     shared.clamp();
     effect
 }

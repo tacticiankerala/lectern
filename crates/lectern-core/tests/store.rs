@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use lectern_core::ipc::{
-    EditorPref, Measure, PathMapping, RecentEntry, SavedPosition, Settings, SettingsPatch, ThemeId,
-    ThemeMode,
+    EditorPref, HtmlPages, Measure, PathMapping, RecentEntry, SavedPosition, Settings,
+    SettingsPatch, ThemeId, ThemeMode,
 };
 use lectern_core::store::{load_json_or_default, write_json_atomic, Loaded, State};
 use lectern_core::workspace::{apply_patch, ShownMut, Workspace};
@@ -67,6 +67,8 @@ fn settings_defaults_match_spec() {
     assert_eq!(s.sidebar_font_size, 13);
     assert!(s.review_comments);
     assert!(s.comments_visible);
+    // HTML pages run their scripts and may use the internet.
+    assert!(matches!(s.html_pages, HtmlPages::Full));
 }
 
 #[test]
@@ -255,6 +257,7 @@ fn settings_json_shape() {
     assert_eq!(j["sidebarFontSize"], 13);
     assert_eq!(j["reviewComments"], true);
     assert_eq!(j["commentsVisible"], true);
+    assert_eq!(j["htmlPages"], "full");
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -298,6 +301,22 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     // And has review comments on, and shown.
     assert!(s.review_comments);
     assert!(s.comments_visible);
+    // And runs HTML pages' scripts, with the internet.
+    assert!(matches!(s.html_pages, HtmlPages::Full));
+}
+
+#[test]
+fn html_pages_round_trip_in_lowercase() {
+    for (mode, json) in [
+        (HtmlPages::Full, "\"full\""),
+        (HtmlPages::Offline, "\"offline\""),
+        (HtmlPages::Static, "\"static\""),
+    ] {
+        assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+        assert_eq!(serde_json::from_str::<HtmlPages>(json).unwrap(), mode);
+    }
+    let p: SettingsPatch = serde_json::from_str(r#"{"htmlPages": "offline"}"#).unwrap();
+    assert_eq!(p.html_pages, Some(HtmlPages::Offline));
 }
 
 #[test]

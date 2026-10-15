@@ -9,7 +9,8 @@ const PAGE = "C:\\V\\artifacts\\report.html";
 const PDF = "C:\\V\\artifacts\\brief.pdf";
 const TEXT = "C:\\V\\notes\\readme.txt";
 /** Where the fake serves the page and the PDF from: the dev server, as `lxpage` would. */
-const PAGE_URL = "/__page/d/c/V/artifacts/report.html";
+/** A page's URL also names its open (`t`) and, for the dev server, the HTML pages setting. */
+const PAGE_URL = /^\/__page\/d\/c\/V\/artifacts\/report\.html\?t=t\d+&lxmode=full$/;
 const PDF_URL = "/__page/d/c/V/artifacts/brief.pdf";
 
 /** The app with a page, a PDF and a text file beside the notes, and `initial` open. */
@@ -67,7 +68,7 @@ describe("documents that aren't notes", () => {
   it("open with their kind, and a page or a PDF with its frame's URL", async () => {
     const { app } = await started(PAGE);
     expect(app.state.doc?.kind).toBe("html");
-    expect(app.state.doc?.frameUrl).toBe(PAGE_URL);
+    expect(app.state.doc?.frameUrl).toMatch(PAGE_URL);
     await app.open(PDF);
     expect(app.state.doc?.kind).toBe("pdf");
     expect(app.state.doc?.frameUrl).toBe(PDF_URL);
@@ -94,7 +95,7 @@ describe("documents that aren't notes", () => {
     expect(document.querySelectorAll("iframe")).toHaveLength(1);
     expect(frame()?.getAttribute("sandbox")).toBe("allow-scripts");
     expect(frame()?.getAttribute("src")).toMatch(
-      /^\/__page\/d\/c\/V\/artifacts\/report\.html\?v=\d+$/,
+      /^\/__page\/d\/c\/V\/artifacts\/report\.html\?t=t\d+&lxmode=full&v=\d+$/,
     );
     // A text file shows its own text, and the frame goes.
     await app.open(TEXT);
@@ -103,14 +104,14 @@ describe("documents that aren't notes", () => {
     expect(doc?.textContent).toBe("Plain words.");
   });
 
-  it("put the frame in the page before it loads anything", async () => {
+  it("put the frame in the page, a page's in Lectern's colour scheme, before it loads anything", async () => {
     const src = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "src");
     if (!src) throw new Error("no src property");
-    const connected: boolean[] = [];
+    const connected: [boolean, string][] = [];
     Object.defineProperty(HTMLIFrameElement.prototype, "src", {
       ...src,
       set(this: HTMLIFrameElement, value: string) {
-        connected.push(this.isConnected);
+        connected.push([this.isConnected, this.style.colorScheme]);
         src.set?.call(this, value);
       },
     });
@@ -120,7 +121,10 @@ describe("documents that aren't notes", () => {
     } finally {
       Object.defineProperty(HTMLIFrameElement.prototype, "src", src);
     }
-    expect(connected).toEqual([true, true]);
+    expect(connected).toEqual([
+      [true, ""],
+      [true, "light"],
+    ]);
   });
 
   it("reload a PDF at a new URL on F5 and on a change on disk, at its first page", async () => {
@@ -181,7 +185,7 @@ describe("documents that aren't notes", () => {
     expect(restore).not.toHaveBeenCalled();
   });
 
-  it("close the find bar when a page or a PDF opens, and never step a finder over a frame", async () => {
+  it("close the find bar when a PDF opens, and never step a finder over one; a page keeps it", async () => {
     const { app } = await started(A);
     const bar = () => document.querySelector<HTMLElement>(".find-bar");
     // A query with no match: jsdom can't measure ranges to scroll to one.
@@ -199,24 +203,9 @@ describe("documents that aren't notes", () => {
     await app.open(A);
     await app.actions.showFind("nowhere");
     expect(bar()?.hidden).toBe(false);
+    // A page is searched through its text (pages.test.ts).
     await app.open(PAGE);
-    expect(bar()?.hidden).toBe(true);
-  });
-
-  it("a page has no find yet: Ctrl+F and F3 say so", async () => {
-    await started(PAGE);
-    press({ key: "f", ctrlKey: true });
-    await vi.waitFor(() => {
-      expect(toasts()).toEqual(["Find in pages arrives in Task 4."]);
-    });
-    press({ key: "F3" });
-    await vi.waitFor(() => {
-      expect(toasts()).toEqual([
-        "Find in pages arrives in Task 4.",
-        "Find in pages arrives in Task 4.",
-      ]);
-    });
-    expect(document.querySelector(".find-bar:not([hidden])")).toBeNull();
+    expect(bar()?.hidden).toBe(false);
   });
 
   it("⋯ offers Open in default app for a page, a PDF or a text file, never a note", async () => {

@@ -1,21 +1,25 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
 // buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
 // after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
-// instead (frame-view.ts), and keeps no reading position.
+// instead (frame-view.ts): a page keeps its scroll fraction as its reading position, its headings
+// are its anchors, and its links go through Lectern's link rules; a PDF keeps no reading position.
 //
 // Anchor contract (ruling R16): links carry the fragment as written (`href="#Frag"` in-page,
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
 import { HEADINGS, findById, samePath } from "./dom";
+import type { FindPage } from "./find";
 import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
 import { blockAt, capture, restore } from "./position";
 import { placeAt } from "./reflow";
+import { effectiveTheme } from "./themes";
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
@@ -38,7 +42,25 @@ export class DocView {
     private readonly host: HTMLElement,
     private readonly app: App,
   ) {
-    this.frame = new FrameView(app.layout.docPane);
+    this.frame = new FrameView(app.layout.docPane, {
+      dark: () => effectiveTheme(app.state.settings, app.systemDark()).mode === "dark",
+      focusMoved: () => {
+        app.checkFrameFocus();
+      },
+      headings: (items) => {
+        app.showPageOutline(items);
+      },
+      text: () => {
+        app.emit("page");
+      },
+      scrolled: () => {
+        app.schedulePositionSave();
+      },
+      follow: (target) => void this.followTarget(target, undefined),
+      preferences: () => {
+        app.actions.run("preferences");
+      },
+    });
     host.addEventListener("click", (e) => {
       this.onClick(e);
     });
@@ -116,8 +138,14 @@ export class DocView {
     );
   }
 
-  /** Scrolls the anchor to the top of the pane; false when the document has no such anchor. */
+  /**
+   * Scrolls the anchor to the top of the pane; false when the document has no such anchor. In an
+   * HTML page, its headings are the anchors, scrolled to once it is ready.
+   */
   scrollToAnchor(id: string, slug?: string): boolean {
+    if (this.frame.shown) {
+      return this.frame.scrollToAnchor(id);
+    }
     const target = this.findAnchor(id, slug);
     if (target) {
       placeAt(this.app.scroller, target, TOP_GAP);
@@ -142,14 +170,40 @@ export class DocView {
     this.frame.close();
   }
 
-  /** Where the reader is in the document (position.ts); null for a page or a PDF in a frame. */
-  captureAnchor(): SavedPosition | null {
-    return this.frame.shown ? null : capture(this.host, this.app.scroller);
+  /** The HTML page showing, which find searches through its text; null for anything else. */
+  get page(): FindPage | null {
+    return this.frame.page;
   }
 
-  /** Scrolls back to a captured position (position.ts). */
+  /**
+   * Where the reader is in the document (position.ts). In an HTML page, how far down it is, once
+   * it has said; null for a PDF.
+   */
+  captureAnchor(): SavedPosition | null {
+    if (!this.frame.shown) {
+      return capture(this.host, this.app.scroller);
+    }
+    const page = this.frame.page;
+    return page?.ready ? { headingId: null, offset: 0, line: null, fraction: page.fraction } : null;
+  }
+
+  /** Scrolls back to a captured position (position.ts); in an HTML page, once it is ready. */
   restore(p: SavedPosition): void {
+    if (this.frame.shown) {
+      this.frame.restore(p.fraction);
+      return;
+    }
     restore(this.host, this.app.scroller, p);
+  }
+
+  /** What the HTML page showing has loaded from the web, for its notice (`page-loads`). */
+  pageLoads(loads: PageLoads): void {
+    this.frame.loads(loads);
+  }
+
+  /** The theme changed: an HTML page follows it. */
+  syncFrameTheme(): void {
+    this.frame.syncTheme();
   }
 
   /**

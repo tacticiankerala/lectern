@@ -674,6 +674,8 @@ impl WindowState {
         }
         let watch = lock(&self.watch).take();
         drop(watch);
+        // Its pages' reports have no window to go to.
+        lock(&self.app.page_reports).forget(&self.label);
     }
 
     pub(super) fn is_retired(&self) -> bool {

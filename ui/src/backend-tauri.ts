@@ -9,6 +9,7 @@ import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
+import type { FrameFocus } from "./generated/FrameFocus";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
@@ -223,6 +224,10 @@ export class TauriBackend implements Backend {
 
   setUnsaved(on: boolean): Promise<void> {
     return invoke("set_unsaved", { on });
+  }
+
+  setFrameFocus(focus: FrameFocus): Promise<void> {
+    return invoke("set_frame_focus", { focus });
   }
 
   closeWindow(): Promise<void> {

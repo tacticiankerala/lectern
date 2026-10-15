@@ -19,8 +19,11 @@
 //   feature off), it stays, hidden, until that text is saved or let go. `#lx-app.no-comments`
 //   marks every comment surface hidden.
 // - The reading position is saved once scrolling stops for a moment and when the document is
-//   left; a document opened without an anchor or line goes back to its saved position. A page or
-//   a PDF in a frame keeps none.
+//   left; a document opened without an anchor or line goes back to its saved position. An HTML
+//   page keeps how far down it is; a PDF keeps none.
+// - Rust is told whenever the keyboard focus goes into a frame (an HTML page or a PDF) or out of
+//   one, and sends Lectern's shortcuts pressed there as `frame-key`, which run as keydowns do. It
+//   tells what an open page has loaded from the web as `page-loads`.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -39,19 +42,23 @@ import { renderBreadcrumbs } from "./breadcrumbs";
 import type { CommentsController } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
+import { trackFrameFocus } from "./frame-view";
 import type { Crumb } from "./generated/Crumb";
 import type { DocChanged } from "./generated/DocChanged";
 import type { DocPayload } from "./generated/DocPayload";
+import type { FrameKey } from "./generated/FrameKey";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenError } from "./generated/OpenError";
 import type { OpenRequest } from "./generated/OpenRequest";
 import type { OpenResult } from "./generated/OpenResult";
+import type { OutlineItem } from "./generated/OutlineItem";
+import type { PageLoads } from "./generated/PageLoads";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { SettingsSnapshot } from "./generated/SettingsSnapshot";
-import { installKeymap } from "./keymap";
+import { actionForKey, installKeymap } from "./keymap";
 import { LibraryController, NARROW } from "./library-controller";
 import { Navigation } from "./navigation";
 import { Outline } from "./outline";
@@ -89,6 +96,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sidebarFontSize: 13,
   reviewComments: true,
   commentsVisible: true,
+  htmlPages: "full",
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -138,7 +146,8 @@ export interface OpenOptions {
   push?: boolean;
 }
 
-export type Change = "doc" | "settings" | "library" | "workspaces";
+/** What changed, for `on`: `page` is the text of the HTML page on screen. */
+export type Change = "doc" | "settings" | "library" | "workspaces" | "page";
 
 /** A settings change sent to Rust and not yet answered. */
 interface Sending {
@@ -221,6 +230,8 @@ export class App {
   private commentsLoading: Promise<void> | null = null;
   /** Saves the reading position once scrolling has stopped for a moment. */
   private positionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Tells Rust where the keyboard focus is, should a frame have come or gone. */
+  readonly checkFrameFocus: () => void;
 
   constructor(
     readonly backend: Backend,
@@ -267,6 +278,7 @@ export class App {
     this.on("settings", () => {
       this.panel.refresh();
       this.syncComments();
+      this.view.syncFrameTheme();
     });
     this.darkQuery?.addEventListener("change", () => {
       this.applySettings();
@@ -282,6 +294,9 @@ export class App {
     });
     // Once a test replaces the page's app, the old one stops listening.
     installKeymap(root.ownerDocument, (action) => root.isConnected && this.actions.run(action));
+    this.checkFrameFocus = trackFrameFocus(root.ownerDocument, (focus) => {
+      if (root.isConnected) quietly(this.backend.setFrameFocus(focus));
+    });
     // Comment text starts or stops being unsaved on typing, keys and clicks, or once a save
     // they asked for is done.
     for (const type of ["input", "keydown", "click"]) {
@@ -325,6 +340,16 @@ export class App {
     });
     this.backend.on<LibraryPayload>("library-updated", (library) => {
       this.library.setLibrary(library);
+    });
+    this.backend.on<PageLoads>("page-loads", (loads) => {
+      this.view.pageLoads(loads);
+    });
+    // Lectern's shortcuts pressed inside a frame, which only Rust sees.
+    this.backend.on<FrameKey>("frame-key", (key) => {
+      const action = actionForKey(key);
+      if (action !== null && this.layout.app.isConnected) {
+        this.actions.run(action);
+      }
     });
 
     const navigation = this.nav.beginNavigation();
@@ -466,7 +491,8 @@ export class App {
     quietly(this.backend.savePosition(path, position));
   }
 
-  private schedulePositionSave(): void {
+  /** Saves the reading position once scrolling has stopped for a moment. */
+  schedulePositionSave(): void {
     if (this.positionTimer !== null) {
       clearTimeout(this.positionTimer);
     }
@@ -801,6 +827,7 @@ export class App {
     if (doc.kind === "pdf") {
       this.outline.note("PDFs show their own outline in the viewer.");
     } else {
+      // An HTML page's headings come once it has loaded (`showPageOutline`).
       this.outline.render(doc.outline, this.layout.doc);
     }
     if (position) {
@@ -815,6 +842,11 @@ export class App {
     } else {
       this.scroller.scrollTop = 0;
     }
+  }
+
+  /** The headings of the HTML page on screen, as it reported them, in the outline. */
+  showPageOutline(items: OutlineItem[]): void {
+    this.outline.render(items, this.layout.doc);
   }
 
   /**
