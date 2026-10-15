@@ -24,6 +24,13 @@ const HTML = `
 <pre><code id="spaced">S:\\Notes\\My Vault\\plan.md</code></pre>
 <pre><code id="two">cat /mnt/s/a.md /mnt/s/b.md</code></pre>
 <pre><code id="big"></code></pre>
+<pre><code id="ref-line">spec/a_spec.rb:12
+</code></pre>
+<pre><code id="block">cd app/x
+rspec spec/y
+</code></pre>
+<pre><code id="short">a/b
+</code></pre>
 <p><code id="line-ref">spec/a_spec.rb:12</code> <code id="ticked">\`S:\\Notes\\plan.md:12\`</code> <code id="quoted">"app/x y.rb"</code></p>
 <p id="prose">See plan.md for more.</p>
 <p id="inline">Run <code id="rel">${RELATIVE}</code> now.</p>
@@ -245,8 +252,32 @@ describe("the copy path shortcuts", () => {
     if (!code) throw new Error("no code text");
     select(code, 0, "/home/me/projects/app/run.sh\n".length);
     expect(press("W")).toBe(true);
-    // The line break selected with it stays.
-    expect(await copied()).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\projects\\app\\run.sh\n");
+    // The line break selected with it is dropped before converting.
+    expect(await copied()).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\projects\\app\\run.sh");
+  });
+
+  it("drop the line break a triple-click selects with a line, before converting", async () => {
+    await started();
+    // One path: converted and pasted into a terminal, a break would run it at once.
+    expect(selectAll("ref-line")).toBe("spec/a_spec.rb:12\n");
+    expect(press("W")).toBe(true);
+    expect(await copied()).toBe("spec\\a_spec.rb:12");
+    // A block loses only its last break; the ones between its lines stay.
+    expect(selectAll("block")).toBe("cd app/x\nrspec spec/y\n");
+    expect(pressAgain("W")).toBe(true);
+    expect(await copied()).toBe("cd app\\x\nrspec spec\\y");
+    // One break of any kind, and no more than one.
+    for (const [text, converted] of [
+      ["a/b\r\n", "a\\b"],
+      ["a/b\r", "a\\b"],
+      ["a/b\n\n", "a\\b\n"],
+      ["a/b", "a\\b"],
+    ] as const) {
+      el("big").textContent = text;
+      expect(selectAll("big")).toBe(text);
+      expect(pressAgain("W")).toBe(true);
+      expect(await copied(), JSON.stringify(text)).toBe(converted);
+    }
   });
 
   it("send the open file and a wikilink's target as exact paths, a link's path as written, and a selected path as text", async () => {
@@ -462,6 +493,19 @@ describe("a selection's right-click menu", () => {
     selectAll("cmd");
     await choose(el("cmd"), "Copy");
     expect(await copied()).toBe(COMMAND);
+  });
+
+  it("copies a selected line with its break as it is, and converts it without", async () => {
+    await started();
+    expect(selectAll("short")).toBe("a/b\n");
+    await choose(el("short"), "Copy");
+    expect(await copied()).toBe("a/b\n");
+    selectAll("short");
+    await choose(el("short"), "Copy as Windows path");
+    expect(await copied()).toBe("a\\b");
+    selectAll("short");
+    await choose(el("short"), "Copy as WSL path");
+    expect(await copied()).toBe("a/b");
   });
 
   it("works on a selection in a review comment's card", async () => {

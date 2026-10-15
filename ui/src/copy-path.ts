@@ -263,16 +263,29 @@ function tooLong(text: string): boolean {
   return text.length > CONVERT_LIMIT || new TextEncoder().encode(text).length > CONVERT_LIMIT;
 }
 
+/** One line break (`\r\n`, `\n` or `\r`) at the very end of a text. */
+const TRAILING_BREAK = /\r?\n$|\r$/;
+
+/**
+ * What a selection's copies convert: how it reads as paths (`pathsIn`), less the one line break
+ * at its very end. A triple-click selects a line's break with it, and a converted command pasted
+ * into a terminal with one would run at once. The breaks between a block's lines stay, and Copy
+ * keeps them all.
+ */
+function pathsToConvert(selection: string): PathToCopy | null {
+  return pathsIn(selection.replace(TRAILING_BREAK, ""));
+}
+
 /**
  * The selection in the note or a comment, when it holds a path; else null, and for one too long
- * to convert, which isn't read at all.
+ * to convert, which isn't read at all. Its copies convert it less the line break at its end.
  */
 export function selectedPaths(doc: HTMLElement): SelectedPaths | null {
   const selected = selectionIn(doc);
   if (!selected || tooLong(selected.text)) {
     return null;
   }
-  const path = pathsIn(selected.text);
+  const path = pathsToConvert(selected.text);
   return path && { ...selected, path };
 }
 
@@ -289,7 +302,7 @@ export function shortcutPath(
   if (selected && tooLong(selected.text)) {
     return "too-long";
   }
-  const path = selected && pathsIn(selected.text);
+  const path = selected && pathsToConvert(selected.text);
   if (path) {
     return path;
   }
