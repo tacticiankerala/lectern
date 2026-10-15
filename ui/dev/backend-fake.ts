@@ -22,8 +22,10 @@
 // workspace here answers `reload`, and with `persist` the model survives the page reload that
 // follows.
 //
-// A path's Windows and WSL forms follow core's rules for drives, `/mnt/<x>`, WSL shares and Linux
-// paths, for exact paths and for text, with Ubuntu as the WSL distribution, but no user mappings.
+// A path's Windows and WSL forms follow core's rules for drives, `/mnt/<x>`, WSL shares, Linux
+// paths and the settings' mappings from a Linux folder, for exact paths and for text (a relative
+// one flipping its separators), with Ubuntu as the WSL distribution, but no mappings from a
+// Windows path; so does converting each path in a selection.
 //
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
@@ -36,12 +38,13 @@ import type { Backend, BackendEvent } from "../src/backend";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
-import { trimPath } from "../src/copy-path";
+import { pathTokens } from "../src/copy-path";
 import { DOCUMENT_PATH } from "../src/dom";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
 import type { ClaudeKind } from "../src/generated/ClaudeKind";
 import type { CommentStatus } from "../src/generated/CommentStatus";
+import type { ConvertedPaths } from "../src/generated/ConvertedPaths";
 import type { Crumb } from "../src/generated/Crumb";
 import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
@@ -56,7 +59,10 @@ import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
 import type { PageBlock } from "../src/generated/PageBlock";
+import type { PathForm } from "../src/generated/PathForm";
 import type { PathForms } from "../src/generated/PathForms";
+import type { PathMapping } from "../src/generated/PathMapping";
+import { CONVERT_LIMIT } from "../src/generated/path-tokens";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
 import type { ReviewOp } from "../src/generated/ReviewOp";
@@ -555,12 +561,13 @@ function wslPath(path: string): string | null {
 const FAKE_DISTRO = "Ubuntu";
 
 /**
- * Text written as a path, as core's `bare_path` leaves it: trimmed, without a trailing `#anchor`
- * (only after a file name with an extension, so `Meeting #3.md` keeps its `#`), `:line`,
- * `:line:col` or `#Lline`.
+ * Where in `raw` the path is, as core's `bare_span` finds it: trimmed of whitespace, quotes and
+ * backticks, without a trailing `#anchor` (only after a file name with an extension, so
+ * `Meeting #3.md` keeps its `#`), `:line`, `:line:col` or `#Lline`.
  */
-function bareText(raw: string): string {
-  let path = trimPath(raw);
+function bareSpan(raw: string): [number, number] {
+  const start = raw.length - raw.replace(/^[\p{White_Space}"'`“”‘’]+/u, "").length;
+  let path = raw.slice(start).replace(/[\p{White_Space}"'`“”‘’]+$/u, "");
   const hash = path.lastIndexOf("#");
   if (
     hash >= 0 &&
@@ -571,22 +578,116 @@ function bareText(raw: string): string {
   }
   // A trailing `:line` or `:line:col`, unless only a drive letter would be left.
   const line = /^(.+?)(?::\d+){1,2}$/.exec(path)?.[1];
-  return line !== undefined && !/^[A-Za-z]$/.test(line) ? line : path;
+  const bare = line !== undefined && !/^[A-Za-z]$/.test(line) ? line : path;
+  return [start, start + bare.length];
 }
 
 /**
- * As core's `PathMapper::forms` and `literal_forms`, without user mappings or the index. Text
- * (`literal` false) is trimmed, and loses a trailing `#anchor` (after a file name with an
- * extension), `:line` or `#Lline`; an exact path is taken as it is. Then a drive or UNC path is
- * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path goes through
- * `FAKE_DISTRO`; the WSL form is a WSL share's Linux path or a drive's `/mnt/<x>/…`.
+ * Core's `is_relative`: not absolute (`/…`, `X:\…`, `\\…`) nor at a drive's root (`\x`), holding
+ * a separator, and no `:` before the first one (a URL, a host, a drive's current folder).
  */
-function pathForms(raw: string, literal: boolean): PathForms {
-  const path = literal ? raw : bareText(raw);
+function isRelative(path: string): boolean {
+  const separator = path.search(/[\\/]/);
+  return (
+    !/^(?:[\\/]|[A-Za-z]:[\\/])/.test(path) &&
+    separator >= 0 &&
+    !path.slice(0, separator).includes(":")
+  );
+}
+
+/** A user mapping from a Linux folder to a Windows one, each without its trailing separators. */
+interface FolderMapping {
+  linux: string;
+  windows: string;
+}
+
+/** The settings' mappings from a Linux folder; core's mappings from a Windows path are left out. */
+function folderMappings(mappings: readonly PathMapping[]): FolderMapping[] {
+  return mappings
+    .filter(({ from }) => from.startsWith("/") && !from.startsWith("//"))
+    .map(({ from, to }) => ({
+      linux: from.replace(/\/+$/, ""),
+      windows: to.replace(/[\\/]+$/, ""),
+    }))
+    .filter(({ windows }) => windows !== "");
+}
+
+/**
+ * The mapping whose `side` holds `path` in the longest folder, and what follows that folder (`""`
+ * or from a separator on). The Windows side compares as Windows does: any letter case, either
+ * separator; the Linux side exactly.
+ */
+function underMapping(
+  path: string,
+  mappings: FolderMapping[],
+  side: "linux" | "windows",
+): { mapping: FolderMapping; rest: string } | null {
+  const fold = (s: string) => s.replaceAll("/", "\\").toLowerCase();
+  let best: { mapping: FolderMapping; rest: string } | null = null;
+  for (const mapping of mappings) {
+    const folder = mapping[side];
+    const head = path.slice(0, folder.length);
+    const rest = path.slice(folder.length);
+    const same = side === "windows" ? fold(head) === fold(folder) : head === folder;
+    if (same && /^(?:[\\/]|$)/.test(rest) && folder.length >= (best?.mapping[side].length ?? 0)) {
+      best = { mapping, rest };
+    }
+  }
+  return best;
+}
+
+/**
+ * As core's `PathMapper::forms` and `literal_forms`, without the index. Text (`literal` false) has
+ * its path converted by itself, the whitespace, quotes and backticks around it and a trailing
+ * `#anchor` (after a file name with an extension), `:line` or `#Lline` kept as they are; an exact
+ * path is taken as it is. A relative path (text only) flips its separators.
+ * Otherwise a Linux path under a mapped folder is under its Windows folder, a drive or UNC path is
+ * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path goes through
+ * `FAKE_DISTRO`; the WSL form is under a mapped folder, a WSL share's Linux path or a drive's
+ * `/mnt/<x>/…`.
+ */
+function pathForms(raw: string, literal: boolean, mappings: FolderMapping[]): PathForms {
+  if (literal) {
+    return mappedForms(raw, mappings);
+  }
+  const [start, end] = bareSpan(raw);
+  const forms = bareForms(raw.slice(start, end), mappings);
+  const around = (path: string | null) =>
+    path === null ? null : raw.slice(0, start) + path + raw.slice(end);
+  return { windows: around(forms.windows), wsl: around(forms.wsl) };
+}
+
+/**
+ * As core's `PathMapper::written_forms`: a link's path as written, nothing trimmed. A bare file name
+ * is the same in both forms; anything else converts as `bareForms` says.
+ */
+function writtenForms(path: string, mappings: FolderMapping[]): PathForms {
+  if (path !== "" && !/[\\/]/.test(path)) {
+    return { windows: path, wsl: path };
+  }
+  return bareForms(path, mappings);
+}
+
+/** `pathForms` of text already trimmed by `bareSpan`. */
+function bareForms(path: string, mappings: FolderMapping[]): PathForms {
+  if (isRelative(path)) {
+    return { windows: path.replaceAll("/", "\\"), wsl: path.replaceAll("\\", "/") };
+  }
+  return mappedForms(path, mappings);
+}
+
+/** The forms of an absolute path, mapped as `pathForms` says; none for anything else. */
+function mappedForms(path: string, mappings: FolderMapping[]): PathForms {
   const parts = (rest: string) => rest.split(/[\\/]/).filter((part) => part !== "");
   const mnt = /^\/mnt\/([A-Za-z])(?:\/(.*))?$/.exec(path);
+  const mapped = path.startsWith("/") ? underMapping(path, mappings, "linux") : null;
   let windows: string | null = null;
-  if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(path)) {
+  if (mapped) {
+    const folder = mapped.mapping.windows;
+    const below = parts(mapped.rest);
+    windows =
+      below.length === 0 && folder.endsWith(":") ? `${folder}\\` : [folder, ...below].join("\\");
+  } else if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(path)) {
     windows = path;
   } else if (mnt) {
     windows = `${(mnt[1] ?? "").toUpperCase()}:\\${parts(mnt[2] ?? "").join("\\")}`;
@@ -596,11 +697,46 @@ function pathForms(raw: string, literal: boolean): PathForms {
   if (windows === null) {
     return { windows, wsl: null };
   }
+  const unmapped = underMapping(windows, mappings, "windows");
   const share = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/][^\\/]+(.*)$/i.exec(windows);
-  const wsl = share
-    ? `/${parts(share[1] ?? "").join("/")}`
-    : wslPath(windows.replaceAll("/", "\\"));
+  let wsl: string | null;
+  if (unmapped) {
+    wsl = [unmapped.mapping.linux, ...parts(unmapped.rest)].join("/") || "/";
+  } else if (share) {
+    wsl = `/${parts(share[1] ?? "").join("/")}`;
+  } else {
+    wsl = wslPath(windows.replaceAll("/", "\\"));
+  }
   return { windows, wsl };
+}
+
+/** Why a selection's paths weren't converted, as Rust says it: it is past `CONVERT_LIMIT`. */
+const TOO_LONG = "The selection is too long to convert.";
+
+/**
+ * As core's `PathMapper::convert_paths`: each path token (`pathTokens`) in `form`, by
+ * `pathForms`' rules for text, what surrounds its path kept; one with no such form as written. The
+ * fake has no index, as core's conversion doesn't use one.
+ */
+function convertPaths(text: string, form: PathForm, mappings: FolderMapping[]): ConvertedPaths {
+  let out = "";
+  let done = 0;
+  let converted = 0;
+  let unconverted = 0;
+  for (const token of pathTokens(text)) {
+    const raw = text.slice(token.start, token.end);
+    const path = pathForms(raw, false, mappings)[form];
+    out += text.slice(done, token.start);
+    if (path === null) {
+      out += raw;
+      unconverted++;
+    } else {
+      out += path;
+      converted++;
+    }
+    done = token.end;
+  }
+  return { text: out + text.slice(done), converted, unconverted };
 }
 
 export class FakeBackend implements Backend, FakeControl {
@@ -904,7 +1040,20 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   pathForms(raw: string, literal: boolean): Promise<PathForms> {
-    return Promise.resolve(pathForms(raw, literal));
+    return Promise.resolve(pathForms(raw, literal, folderMappings(this.settings.pathMappings)));
+  }
+
+  writtenForms(raw: string): Promise<PathForms> {
+    return Promise.resolve(writtenForms(raw, folderMappings(this.settings.pathMappings)));
+  }
+
+  convertPaths(text: string, form: PathForm): Promise<ConvertedPaths> {
+    if (new TextEncoder().encode(text).length > CONVERT_LIMIT) {
+      // Rust's commands fail with a message.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(TOO_LONG);
+    }
+    return Promise.resolve(convertPaths(text, form, folderMappings(this.settings.pathMappings)));
   }
 
   revealInExplorer(): Promise<void> {

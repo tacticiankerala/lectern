@@ -1,9 +1,10 @@
 // The UI on the fake backend, for Playwright: `/?open=<path>` stands in for a launch argument.
 // `?garden` adds a second workspace, Garden, closed (`?garden=open`: open in another window),
-// `?many=<n>` adds n more, "Notebook 1" to "Notebook n", closed with no folders, and `?blank`
-// starts a blank window. `window.__lxDocText()` reads the page's visible text as the review
-// comments do, to check it against core's (`__fake.coreText`). `window.__lxPage()` is what the HTML
-// page on screen has reported through its bridge.
+// `?many=<n>` adds n more, "Notebook 1" to "Notebook n", closed with no folders, `?recent=<n>`
+// makes the first n fixture documents the recent files, and `?blank` starts a blank window.
+// `window.__lxDocText()` reads the page's visible text as the review comments do, to check it
+// against core's (`__fake.coreText`). `window.__lxPage()` is what the HTML page on screen has
+// reported through its bridge.
 import { App } from "../src/app";
 import { docText } from "../src/comments-text";
 import { byId } from "../src/dom";
@@ -55,6 +56,9 @@ const open = params.get("open");
 const garden = params.get("garden");
 const many = Number(params.get("many") ?? "0");
 const blank = params.has("blank");
+const recent = Object.entries(__LX_FIXTURES__.docs)
+  .slice(0, Number(params.get("recent") ?? "0"))
+  .map(([path, doc]) => ({ path, title: doc.title, openedMs: 0 }));
 const options: FakeOptions = {
   persist: true,
   workspaces: [
@@ -63,6 +67,7 @@ const options: FakeOptions = {
     ...Array.from({ length: many }, (_, i) => notebook(i + 1)),
   ],
   ...(blank ? { current: null } : {}),
+  ...(recent.length > 0 ? { recent } : {}),
   ...(open === null ? {} : { initial: open }),
 };
 const backend = new FakeBackend(__LX_FIXTURES__, options);

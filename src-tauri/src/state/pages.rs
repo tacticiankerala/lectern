@@ -260,7 +260,7 @@ impl PageResponse {
 /// open's own page) inserted at its top under a nonce fresh for this response, sandboxed under
 /// `options`' policy (`lectern_core::page`). The charset the page declares is kept in the type, as
 /// the bridge, ahead of it, may push its declaration past where the browser looks; a UTF-16 page
-/// is served as UTF-8.
+/// is served as UTF-8, and so is one that declares nothing and is valid UTF-8.
 fn page(kind: PageType, body: &[u8], options: &PageOptions) -> PageResponse {
     let nonce = fresh_token();
     let policy = page_policy(options.mode, &nonce, options.report.as_deref());
@@ -621,7 +621,11 @@ mod tests {
             },
             full,
         );
-        assert_eq!(page.content_type.as_deref(), Some("text/html"));
+        // Undeclared, and valid UTF-8.
+        assert_eq!(
+            page.content_type.as_deref(),
+            Some("text/html; charset=utf-8")
+        );
         assert!(page.body.ends_with(b"</script><p>Hi</p>"));
         let failed = |url: &str, error: io::ErrorKind| {
             serve(
@@ -678,9 +682,15 @@ mod tests {
             let url = format!("/o/t1/a.{ext}");
             let response = serve(&url, opens, check_open, reads(b"x"), full).into_http();
             assert_eq!(response.status(), 200, "{ext}");
+            // A page that declares no charset, in valid UTF-8, says so.
+            let content_type = match served {
+                Served::Page => format!("{content_type}; charset=utf-8"),
+                _ => content_type.to_owned(),
+            };
             assert_eq!(
                 header(&response, "Content-Type").as_deref(),
-                Some(content_type)
+                Some(content_type.as_str()),
+                "{ext}"
             );
             assert_eq!(
                 header(&response, "X-Content-Type-Options").as_deref(),
@@ -894,6 +904,27 @@ mod tests {
             Some("text/html; charset=windows-1252")
         );
         assert!(page.body.ends_with(b"<title>Caf\xe9</title>"));
+    }
+
+    /// A saved fragment that declares no charset (no doctype, no `<meta charset>`), in valid UTF-8,
+    /// goes out as UTF-8, which WebView2 would otherwise read as Windows-1252.
+    #[test]
+    fn an_undeclared_page_in_valid_utf8_is_served_as_utf8() {
+        let fragment = "<title>Tide notes · “Spring” week</title>\n<p>The harbour’s mark</p>";
+        let response = serve(
+            "/o/t1/notes.html",
+            opens,
+            check_open,
+            reads(fragment.as_bytes()),
+            full,
+        )
+        .into_http();
+        assert_eq!(
+            header(&response, "Content-Type").as_deref(),
+            Some("text/html; charset=utf-8")
+        );
+        let body = String::from_utf8(response.body().clone()).unwrap();
+        assert!(body.ends_with(fragment), "{body}");
     }
 
     /// A page in UTF-16 goes out as UTF-8, its type saying so.

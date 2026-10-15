@@ -1,13 +1,17 @@
 //! Mapping paths written in notes to files on this machine, and local files to asset and page
 //! URLs.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use super::resolve::{library_suffix_match, moved_file_match};
 use super::LibraryIndex;
-use crate::ipc::PathForms;
+use crate::ipc::{ConvertedPaths, PathForm, PathForms};
+
+/// The most text [`PathMapper::convert_paths`] is asked to convert at once, in bytes.
+pub const CONVERT_LIMIT: usize = 64 * 1024;
 
 /// Maps absolute paths found in notes (Linux, WSL, other machines) to local files.
 #[derive(Debug, Clone, Default)]
@@ -141,18 +145,92 @@ impl PathMapper {
     }
 
     /// Both forms of the text `raw`, written as a path (a selection, or a broken link's text), for
-    /// pasting into a terminal. Surrounding whitespace, quotes and backticks, and a trailing
-    /// `:line`, `#Lline` or `#anchor`, are dropped first. The Windows form is where
-    /// [`PathMapper::map`] puts it, verified or not, so it may be the file a moved note's link
-    /// finds; the WSL form is [`PathMapper::to_wsl`] of that. A relative path has neither. Only
-    /// strings and the in-memory index are consulted, never the disk, so it answers at once even
-    /// for a path on a share that stalls.
+    /// pasting into a terminal. Only the path's format changes: whitespace, quotes and backticks
+    /// around it, and a trailing `:line`, `#Lline` or `#anchor`, stay as they are, and the path
+    /// between them is mapped by itself. Only strings and the in-memory index are consulted, never
+    /// the disk, so it answers at once even for a path on a share that stalls.
+    ///
+    /// For an absolute path, the Windows form is where [`PathMapper::map`] puts it, verified or
+    /// not, so it may be the file a moved note's link finds; the WSL form is
+    /// [`PathMapper::to_wsl`] of that. A relative path (see `is_relative`) only changes its
+    /// separators: `\` in the Windows form, `/` in the WSL form. It is never resolved, since
+    /// paths in notes are often relative to somewhere else, such as a repository. Anything else,
+    /// such as a bare file name or a URL, has neither form.
     pub fn forms(&self, raw: &str, index: Option<&LibraryIndex>) -> PathForms {
-        let windows = match self.map(&bare_path(raw), index) {
+        let span = bare_span(raw);
+        let forms = self.bare_forms(&raw[span.clone()], index);
+        let around = |path: String| format!("{}{path}{}", &raw[..span.start], &raw[span.end..]);
+        PathForms {
+            windows: forms.windows.map(around),
+            wsl: forms.wsl.map(around),
+        }
+    }
+
+    /// Both forms of `path` as a link was written with it (`data-written`). The renderer has
+    /// already decoded it and dropped its query, fragment and line, so nothing more is trimmed: a
+    /// `#` or a quote in it is part of a name. An absolute one maps as [`PathMapper::forms`] maps
+    /// it, with the index, so it is the file the link opens; a relative one only changes its
+    /// separators, and a bare file name, which has none, is the same in both forms. It is never
+    /// resolved against the note.
+    pub fn written_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
+        if !path.is_empty() && !path.contains(['/', '\\']) {
+            return PathForms {
+                windows: Some(path.to_owned()),
+                wsl: Some(path.to_owned()),
+            };
+        }
+        self.bare_forms(path, index)
+    }
+
+    /// The forms of a path with nothing around it: a relative one with its separators changed, an
+    /// absolute one where [`PathMapper::map`] puts it.
+    fn bare_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
+        if is_relative(path) {
+            return PathForms {
+                windows: Some(path.replace('/', "\\")),
+                wsl: Some(path.replace('\\', "/")),
+            };
+        }
+        let windows = match self.map(path, index) {
             Mapped::Verified(path) | Mapped::Unverified(path) => Some(path),
             Mapped::Unresolved => None,
         };
         self.both_forms(windows)
+    }
+
+    /// `text` with each of its path tokens (see [`path_tokens`]) in `form`, by the rules of
+    /// [`PathMapper::forms`]: every other byte stays as it is, and so do the quotes, backticks
+    /// and `:line` or `#anchor` around a path. A path with no such form stays as written and
+    /// counts as unconverted. The tokens are mapped without the index (user mappings, `/mnt/<x>`
+    /// and WSL only, never a moved file), so a long selection costs no look through the library
+    /// for each of its paths.
+    pub fn convert_paths(&self, text: &str, form: PathForm) -> ConvertedPaths {
+        let mut out = String::with_capacity(text.len());
+        let (mut converted, mut unconverted) = (0, 0);
+        let mut done = 0;
+        for token in path_tokens(text) {
+            out.push_str(&text[done..token.start]);
+            let raw = &text[token.clone()];
+            let forms = self.forms(raw, None);
+            let path = match form {
+                PathForm::Windows => forms.windows,
+                PathForm::Wsl => forms.wsl,
+            };
+            if let Some(path) = path {
+                out.push_str(&path);
+                converted += 1;
+            } else {
+                out.push_str(raw);
+                unconverted += 1;
+            }
+            done = token.end;
+        }
+        out.push_str(&text[done..]);
+        ConvertedPaths {
+            text: out,
+            converted,
+            unconverted,
+        }
     }
 
     /// Both forms of `path`, an exact path on this machine (the open file, a tree row, a resolved
@@ -181,18 +259,125 @@ impl PathMapper {
     }
 }
 
-/// `raw` without surrounding whitespace, quotes or backticks, and without a trailing `#anchor`,
-/// `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name with an extension
-/// (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs` keep theirs.
-fn bare_path(raw: &str) -> String {
+/// Where the path is in `raw`: without surrounding whitespace, quotes or backticks, and without a
+/// trailing `#anchor`, `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name
+/// with an extension (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs`
+/// keep theirs.
+fn bare_span(raw: &str) -> Range<usize> {
     let quoted =
         |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’');
-    let path = raw.trim_matches(quoted);
+    let path = raw.trim_start_matches(quoted);
+    let start = raw.len() - path.len();
+    let path = path.trim_end_matches(quoted);
     let path = match path.rsplit_once('#') {
         Some((file, anchor)) if !anchor.contains(['/', '\\']) && has_extension(file) => file,
         _ => path,
     };
-    split_line_suffix(path).path
+    // What `split_line_suffix` leaves is the start of `path`.
+    start..start + split_line_suffix(path).path.len()
+}
+
+/// A relative path: not absolute, not starting at a drive's root (`\x`), holding a separator,
+/// and without a `:` before its first one, which would make it a URL (`https://…`), a host
+/// (`host:/srv`) or a drive's current folder (`C:x\y`).
+fn is_relative(path: &str) -> bool {
+    !is_absolute(path)
+        && !path.starts_with('\\')
+        && path
+            .find(['/', '\\'])
+            .is_some_and(|separator| !path[..separator].contains(':'))
+}
+
+/// The paths in `text`, as byte ranges, for converting them where they are (see
+/// [`PathMapper::convert_paths`]). A token is a word (a run of anything but whitespace), or the
+/// inside of a `"…"` or `'…'` run that opens a word and closes on the same line, which may hold
+/// spaces. Of a flag's word (`--name=value`, `-n=value`) only the value counts, and so does what
+/// follows the unquoted shell operators a word may open with (`>/x`, `2>/x`, `|a/b`). A token is
+/// a path when it holds `/` or `\` and isn't a URL (`scheme://…` or `mailto:…`).
+///
+/// Linear in `text`: every scan stops where the next one starts (a quoted run at its closing quote
+/// or line break, a flag's name at its `=`, the operators at the first other character), so
+/// nothing is read twice, however long a line or a word is.
+pub fn path_tokens(text: &str) -> Vec<Range<usize>> {
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = text[at..].find(|c: char| !c.is_whitespace()) {
+        let word = at + offset;
+        let start = flag_value(text, word)
+            .or_else(|| operator_end(text, word))
+            .unwrap_or(word);
+        // A quoted run may end before its word does, or run on past spaces; either way, what
+        // follows its closing quote is read afresh.
+        let token = match quoted_run(text, start) {
+            Some(inside) => {
+                at = inside.end + 1;
+                inside
+            }
+            None => {
+                at = text[start..]
+                    .find(char::is_whitespace)
+                    .map_or(text.len(), |n| start + n);
+                start..at
+            }
+        };
+        if is_path_token(&text[token.clone()]) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+/// Where the value starts in a flag's word at `word` (`--name=value`, `-n=value`): just after its
+/// first `=`, when the name before it holds no separator or quote.
+fn flag_value(text: &str, word: usize) -> Option<usize> {
+    let rest = text.get(word..).filter(|rest| rest.starts_with('-'))?;
+    let end = rest.find(|c: char| c == '=' || c.is_whitespace())?;
+    let (name, after) = rest.split_at(end);
+    let flag = after.starts_with('=') && !name.contains(['/', '\\', '"', '\'']);
+    flag.then_some(word + end + 1)
+}
+
+/// Where the path starts in a word at `word` that opens with unquoted shell operators: just after
+/// the run of them. They are a redirection (`>`, `>>`, `<`, and `2>`, `&>` or any other with a
+/// file descriptor's digits before it), a pipe, `&`, `;` or `(`, in any combination (`>>`, `|&`,
+/// `;(`). They stay as written; `None` for a word that opens with anything else.
+fn operator_end(text: &str, word: usize) -> Option<usize> {
+    let rest = text.get(word..)?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    // A file descriptor only counts before `<` or `>`.
+    let from = if rest[digits..].starts_with(['<', '>']) {
+        digits
+    } else {
+        0
+    };
+    let run = rest[from..]
+        .find(|c: char| !matches!(c, '>' | '<' | '|' | '&' | ';' | '('))
+        .unwrap_or(rest.len() - from);
+    (run > 0).then_some(word + from + run)
+}
+
+/// The inside of the quoted run that opens at `start` in `text`: from a `"` or `'` to the next
+/// one like it on the same line. `None` when there is no quote at `start`, or a line break or the
+/// end comes first. The scan stops at whichever of those it meets first.
+fn quoted_run(text: &str, start: usize) -> Option<Range<usize>> {
+    let quote = text[start..]
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\''))?;
+    let inside = start + 1;
+    let stop = text[inside..].find([quote, '\n', '\r'])?;
+    text[inside + stop..]
+        .starts_with(quote)
+        .then(|| inside..inside + stop)
+}
+
+/// Whether a token is a path: it holds a separator and isn't a URL.
+fn is_path_token(token: &str) -> bool {
+    token.contains(['/', '\\'])
+        && !token.contains("://")
+        && !token.to_ascii_lowercase().contains("mailto:")
 }
 
 /// Whether the last component of `path` is a file name with an extension, such as `plan.md`.

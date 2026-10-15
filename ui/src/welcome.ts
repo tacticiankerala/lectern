@@ -24,6 +24,7 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+O", "Open a file"],
   ["Ctrl+Shift+N", "Add a folder to the library"],
   ["Ctrl+P", "Quick open"],
+  ["Ctrl+H", "Recent files"],
   ["Ctrl+Shift+.", "Breadcrumb chooser"],
   ["Ctrl+Shift+F", "Search the library"],
   ["Ctrl+F", "Find in page"],
@@ -36,7 +37,7 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+Alt+M", "Add a comment"],
   ["F11", "Focus mode"],
   ["Ctrl+E", "Open in editor"],
-  ["Ctrl+Shift+C / Ctrl+Shift+L", "Copy Windows / WSL path"],
+  ["Ctrl+Shift+C / Ctrl+Shift+W", "Copy as WSL / Windows path"],
   ["Ctrl+N", "New window"],
 ];
 

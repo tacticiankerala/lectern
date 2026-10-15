@@ -6,7 +6,10 @@
 //!   an exact `id` match;
 //! - `data-slug`: that heading, or an in-page link's fragment, slugged as heading ids are, for
 //!   when no `id` matches exactly;
-//! - `data-line`: the line a `doc`, `file` or `path` link cites.
+//! - `data-line`: the line a `doc`, `file` or `path` link cites;
+//! - `data-written`: the path a Markdown link or a path in inline code was written with,
+//!   percent-decoded and without its `?query`, `#fragment` or `:line`, for copying it as written.
+//!   A wikilink names a note rather than a path, and has none.
 
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
@@ -122,7 +125,11 @@ enum Href {
     Anchor {
         slug: String,
     },
-    Local(Target),
+    /// A local place, and the path as written (see `data-written`).
+    Local {
+        target: Target,
+        written: String,
+    },
 }
 
 impl<'c> Links<'c> {
@@ -170,7 +177,11 @@ impl<'c> Links<'c> {
             },
             None => (None, line),
         };
-        Some(Href::Local(self.link_target(&path, anchor, line)))
+        let target = self.link_target(&path, anchor, line);
+        Some(Href::Local {
+            target,
+            written: path,
+        })
     }
 
     /// An explicit link's path. One the index can't confirm still links: a document opens (and
@@ -221,18 +232,21 @@ impl<'c> Links<'c> {
         }
     }
 
-    /// Where a path-like code span points. Relative paths link only when the index holds the
-    /// file; absolute ones always link and are checked when followed. Needs the index.
-    fn code_target(&self, code: &str) -> Option<Target> {
+    /// Where a path-like code span points, and the path as written (without its `:line`).
+    /// Relative paths link only when the index holds the file; absolute ones always link and are
+    /// checked when followed. Needs the index.
+    fn code_target(&self, code: &str) -> Option<(Target, String)> {
         let index = self.index?;
         if !is_path_like(code) {
             return None;
         }
         let LineRef { path, line, .. } = split_line_suffix(code);
-        if is_absolute(&path) {
-            return Some(self.absolute_target(&path, None, line));
-        }
-        resolve_relative(index, self.doc_path, &path).map(|found| local_target(found, None, line))
+        let target = if is_absolute(&path) {
+            self.absolute_target(&path, None, line)
+        } else {
+            local_target(resolve_relative(index, self.doc_path, &path)?, None, line)
+        };
+        Some((target, path))
     }
 
     /// Resolves a wikilink, noting a failure when there's an index to fail against.
@@ -484,7 +498,8 @@ pub(super) fn format_link<'a>(
             context.write_str("\" data-kind=\"anchor\"")?;
             write_slug(context, &slug)?;
         }
-        Href::Local(target) => {
+        Href::Local { target, written } => {
+            write_attribute(context, "data-written", &written)?;
             context.write_str(" href=\"#\"")?;
             if matches!(target, Target::Doc { .. }) {
                 context.write_str(" class=\"link-doc\"")?;
@@ -550,10 +565,12 @@ pub(super) fn format_code<'a>(
         true => context.user.links.code_target(code),
         false => None,
     };
-    let Some(target) = target else {
+    let Some((target, written)) = target else {
         return html::format_node_default(context, node, entering);
     };
-    context.write_str("<a href=\"#\" class=\"code-link\"")?;
+    context.write_str("<a")?;
+    write_attribute(context, "data-written", &written)?;
+    context.write_str(" href=\"#\" class=\"code-link\"")?;
     write_target(context, &target)?;
     context.write_str("><code")?;
     html::render_sourcepos(context, node)?;

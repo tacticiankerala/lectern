@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use lectern_core::ipc::{
-    Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
-    PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload,
-    UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    Candidate, ConvertedPaths, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult,
+    OpenWhere, PathForm, PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot,
+    StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::PageBlock;
@@ -148,6 +148,32 @@ pub async fn path_forms(
     state: Shared<'_>,
 ) -> Result<PathForms, String> {
     Ok(window_state(&window, &state)?.path_forms(&raw, literal))
+}
+
+/// The Windows and WSL forms of the path a link was written with, taken as it is. Strings and
+/// the in-memory index only, so it needs no blocking thread.
+#[tauri::command]
+pub async fn written_forms(
+    raw: String,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<PathForms, String> {
+    Ok(window_state(&window, &state)?.written_forms(&raw))
+}
+
+/// `text`, a selection holding paths, with each path in `form`. Strings only, but up to 64 KB of
+/// them, so on the blocking pool.
+#[tauri::command]
+pub async fn convert_paths(
+    text: String,
+    form: PathForm,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<ConvertedPaths, String> {
+    blocking(window_state(&window, &state)?, move |s| {
+        s.convert_paths(&text, form)
+    })
+    .await?
 }
 
 #[tauri::command]

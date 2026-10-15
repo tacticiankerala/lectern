@@ -113,6 +113,8 @@ pub struct Settings {
     pub comments_visible: bool,
     /// What HTML pages may do (scripts and the internet by default). Every window shares it.
     pub html_pages: HtmlPages,
+    /// How many recent files the header's recent files menu lists, 5–20 (10 by default).
+    pub recent_in_menu: u8,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -142,6 +144,7 @@ pub struct SettingsPatch {
     pub review_comments: Option<bool>,
     pub comments_visible: Option<bool>,
     pub html_pages: Option<HtmlPages>,
+    pub recent_in_menu: Option<u8>,
 }
 
 /// A window's settings as a command answers or `settings-changed` carries them, with the revision
@@ -417,6 +420,26 @@ pub enum FollowResult {
 pub struct PathForms {
     pub windows: Option<String>,
     pub wsl: Option<String>,
+}
+
+/// One of the two forms a terminal takes a path in: Windows (`C:\…`, `\\server\…`) or WSL (`/…`).
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum PathForm {
+    Windows,
+    Wsl,
+}
+
+/// Text with each path in it converted to one form: `converted` of them were, and `unconverted`
+/// had no such form and stay as written.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ConvertedPaths {
+    pub text: String,
+    pub converted: u32,
+    pub unconverted: u32,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]

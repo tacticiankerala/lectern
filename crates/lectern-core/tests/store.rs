@@ -69,6 +69,8 @@ fn settings_defaults_match_spec() {
     assert!(s.comments_visible);
     // HTML pages run their scripts and may use the internet.
     assert!(matches!(s.html_pages, HtmlPages::Full));
+    // The recent files menu lists 10.
+    assert_eq!(s.recent_in_menu, 10);
 }
 
 #[test]
@@ -139,6 +141,36 @@ fn sidebar_font_size_range_is_11_to_20() {
         },
     );
     assert_eq!(s.sidebar_font_size, 20);
+}
+
+#[test]
+fn recent_in_menu_range_is_5_to_20() {
+    for (saved, clamped) in [
+        (0, 5),
+        (4, 5),
+        (5, 5),
+        (12, 12),
+        (20, 20),
+        (21, 20),
+        (255, 20),
+    ] {
+        let mut s = Settings {
+            recent_in_menu: saved,
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.recent_in_menu, clamped, "{saved} clamps to {clamped}");
+    }
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    apply(
+        &mut s,
+        &mut ws,
+        SettingsPatch {
+            recent_in_menu: Some(1),
+            ..Default::default()
+        },
+    );
+    assert_eq!(s.recent_in_menu, 5);
 }
 
 #[test]
@@ -258,6 +290,7 @@ fn settings_json_shape() {
     assert_eq!(j["reviewComments"], true);
     assert_eq!(j["commentsVisible"], true);
     assert_eq!(j["htmlPages"], "full");
+    assert_eq!(j["recentInMenu"], 10);
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -303,6 +336,8 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     assert!(s.comments_visible);
     // And runs HTML pages' scripts, with the internet.
     assert!(matches!(s.html_pages, HtmlPages::Full));
+    // And lists 10 recent files in the menu.
+    assert_eq!(s.recent_in_menu, 10);
 }
 
 #[test]
@@ -322,11 +357,12 @@ fn html_pages_round_trip_in_lowercase() {
 #[test]
 fn settings_patch_accepts_a_partial_object() {
     let p: SettingsPatch = serde_json::from_str(
-        r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null, "sidebarFontSize": 15}"#,
+        r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null, "sidebarFontSize": 15, "recentInMenu": 7}"#,
     )
     .unwrap();
     assert_eq!(p.font_size, Some(22));
     assert_eq!(p.sidebar_font_size, Some(15));
+    assert_eq!(p.recent_in_menu, Some(7));
     assert!(matches!(p.light_theme, Some(ThemeId::Sepia)));
     assert!(p.code_wrap.is_none());
     assert!(p.theme_mode.is_none());

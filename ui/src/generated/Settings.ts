@@ -44,4 +44,8 @@ commentsVisible: boolean,
 /**
  * What HTML pages may do (scripts and the internet by default). Every window shares it.
  */
-htmlPages: HtmlPages, };
+htmlPages: HtmlPages, 
+/**
+ * How many recent files the header's recent files menu lists, 5–20 (10 by default).
+ */
+recentInMenu: number, };

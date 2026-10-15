@@ -1,17 +1,23 @@
-// What the user asks for: shortcuts, the header's buttons and menus, the sidebar's and links'
-// context menus, copying paths in Windows or WSL form, quick open, Preferences, find in page,
-// full-text search, update checks, About and the breadcrumb chooser (all loaded on first use),
-// focus mode, the sidebars' visibility and widths, showing or hiding the review comments, a new
-// window and quitting.
+// What the user asks for: shortcuts, the header's buttons and menus (the recent files menu among
+// them, recent-files.ts), the sidebar's, links' and selected paths' context menus, copying paths
+// as they are or in Windows or WSL form, quick open, Preferences, find in page, full-text search,
+// update checks, About and the breadcrumb chooser (all loaded on first use), focus mode, the
+// sidebars' visibility and widths, showing or hiding the review comments, a new window and
+// quitting.
 import type { About } from "./about";
 import type { App } from "./app";
 import {
   COPIED,
+  COPY_KEYS,
+  FORM_NAME,
   NO_FORM,
+  SELECTION_TOO_LONG,
   TOAST_PATH_CHARS,
+  copiedWith,
   inNoteOrComment,
-  linkPath,
+  linkPaths,
   middleTruncate,
+  selectedPaths,
   shortcutPath,
   type PathForm,
   type PathToCopy,
@@ -19,15 +25,17 @@ import {
 import type { CrumbChooser } from "./crumb-chooser";
 import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
+import type { ConvertedPaths } from "./generated/ConvertedPaths";
 import type { DocPayload } from "./generated/DocPayload";
 import type { PathForms } from "./generated/PathForms";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
 import { NARROW } from "./library-controller";
-import type { Menu, MenuEntry } from "./menu";
+import type { Menu, MenuEntry, MenuItem } from "./menu";
 import { blockAt } from "./position";
 import type { Preferences } from "./preferences";
 import type { QuickOpen } from "./quick-open";
+import { recentChoices, type RecentChoice } from "./recent-files";
 import { FlowHold, keepFlow } from "./reflow";
 import type { SearchPanel } from "./search-panel";
 import { bumpFontSize, bumpSidebarFontSize, toggleThemeMode } from "./themes";
@@ -58,6 +66,8 @@ export class Actions {
   /** The menu open, if any. */
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
+  /** The clock: the recent files menu, off while it would list none. */
+  private readonly recentButton: HTMLButtonElement;
   private readonly libraryButton: HTMLButtonElement;
   /** Shows or hides every comment surface; its badge counts the open comments. */
   private readonly commentsButton: HTMLButtonElement;
@@ -105,12 +115,21 @@ export class Actions {
     outlineButton.addEventListener("click", () => {
       this.toggleSidebar("outline");
     });
+    this.recentButton = iconButton("lx-recent-btn", "Recent files", ICONS.recent, "Ctrl+H");
+    this.recentButton.setAttribute("aria-haspopup", "menu");
+    this.recentButton.addEventListener("click", () => {
+      void this.toggleRecentMenu();
+    });
+    this.syncRecentButton();
+    app.on("doc", () => {
+      this.syncRecentButton();
+    });
     this.moreButton = iconButton("lx-more-btn", "More", ICONS.more);
     this.moreButton.setAttribute("aria-haspopup", "menu");
     this.moreButton.addEventListener("click", () => {
       void this.toggleMoreMenu();
     });
-    app.layout.headerActions.append(outlineButton, this.moreButton);
+    app.layout.headerActions.append(outlineButton, this.recentButton, this.moreButton);
     app.on("library", () => {
       this.preferences?.refresh();
     });
@@ -125,7 +144,7 @@ export class Actions {
       if (this.onPdf()) this.find?.close();
     });
     app.layout.app.addEventListener("contextmenu", (e) => {
-      this.linkMenu(e);
+      this.pathMenu(e);
     });
     for (const handle of app.layout.app.querySelectorAll<HTMLElement>(".resizer")) {
       const side = handle.dataset.for;
@@ -152,6 +171,11 @@ export class Actions {
         return true;
       case "quick-open":
         void this.showQuickOpen();
+        return true;
+      case "recent-files":
+        // An open menu closes, even one × has emptied; a shut one opens only with files to list.
+        if (!this.recentMenuOpen() && this.recentChoices().length === 0) return false;
+        void this.toggleRecentMenu();
         return true;
       case "search":
         this.app.openSearch();
@@ -187,7 +211,11 @@ export class Actions {
       case "copy-wsl-path": {
         const target = shortcutPath(this.app.layout.doc, this.app.nav.currentPath());
         if (target === null) return false;
-        void this.copyPath(target, action === "copy-wsl-path" ? "wsl" : "windows");
+        if (target === "too-long") {
+          this.app.toast(SELECTION_TOO_LONG);
+          return true;
+        }
+        void this.copyAs(target, action === "copy-wsl-path" ? "wsl" : "windows");
         return true;
       }
       case "reload":
@@ -452,11 +480,12 @@ export class Actions {
   }
 
   /**
-   * Before `opening` opens: closes the menu and every other overlay (the workspaces' dropdown, the
-   * breadcrumb chooser, quick open, search, Preferences, About, the reading panel), so only one is
-   * ever on top. The find bar stays: it sits above the document rather than over it, as before.
+   * Before `opening` (or a menu, given none) opens: closes the menu and every other overlay (the
+   * workspaces' dropdown, the breadcrumb chooser, quick open, search, Preferences, About, the
+   * reading panel), so only one is ever on top. The find bar stays: it sits above the document
+   * rather than over it, as before.
    */
-  closeOverlays(opening: { close(): void }): void {
+  closeOverlays(opening?: { close(): void }): void {
     this.menu?.close(false);
     for (const overlay of [
       this.app.workspaces.menu,
@@ -490,7 +519,10 @@ export class Actions {
     }
   }
 
-  /** Opens a menu, replacing any other; it forgets itself once closed. */
+  /**
+   * Opens a menu, replacing any other; it forgets itself once closed, and the button it hangs
+   * from, if any, is no longer expanded.
+   */
   private async openMenu(
     entries: MenuEntry[],
     at: HTMLElement | { x: number; y: number },
@@ -501,10 +533,68 @@ export class Actions {
     const menu: Menu = new Menu(this.app.layout.overlayRoot, entries, at, () => {
       if (this.menu === menu) {
         this.menu = null;
-        this.moreButton.setAttribute("aria-expanded", "false");
+        menu.anchor?.setAttribute("aria-expanded", "false");
       }
     });
     this.menu = menu;
+  }
+
+  /**
+   * The recent files menu, from the clock or Ctrl+H, once every other overlay is closed; again, it
+   * closes.
+   */
+  private async toggleRecentMenu(): Promise<void> {
+    if (this.recentMenuOpen()) {
+      this.menu?.close();
+      return;
+    }
+    this.closeOverlays();
+    await this.openMenu(this.recentEntries(), this.recentButton);
+    this.recentButton.setAttribute("aria-expanded", "true");
+  }
+
+  /** Whether the recent files menu is open. */
+  private recentMenuOpen(): boolean {
+    return this.menu?.isOpen === true && this.menu.anchor === this.recentButton;
+  }
+
+  /** The recent files the menu lists: every one but the file on screen, up to the setting. */
+  private recentChoices(): RecentChoice[] {
+    const { recent, library, settings } = this.app.state;
+    return recentChoices(recent, this.app.nav.currentPath(), library.roots, settings.recentInMenu);
+  }
+
+  /** The recent files menu's entries: the files, each with its ×, then quick open. */
+  private recentEntries(): MenuEntry[] {
+    const choices = this.recentChoices();
+    const files: MenuEntry[] = choices.map((choice) => ({
+      label: choice.title,
+      detail: choice.folder,
+      title: `${choice.path}\nDelete removes it`,
+      digit: choice.key ?? "",
+      run: () => void this.app.open(choice.path, { push: true }),
+      remove: {
+        label: `Remove ${choice.title} from recent`,
+        title: "Remove from recent",
+        run: () => this.removeRecent(choice.path),
+      },
+    }));
+    return [
+      ...(files.length > 0 ? files : [{ note: "No other recent files" }]),
+      { label: "All files…", keys: "Ctrl+P", footer: true, run: () => void this.showQuickOpen() },
+    ];
+  }
+
+  /** Drops `path` from the recent files for good; answers the recent files menu's entries left. */
+  private async removeRecent(path: string): Promise<MenuEntry[]> {
+    await this.app.removeRecent(path);
+    this.syncRecentButton();
+    return this.recentEntries();
+  }
+
+  /** The clock is off while the menu would list no file. */
+  private syncRecentButton(): void {
+    this.recentButton.disabled = this.recentChoices().length === 0;
   }
 
   private async toggleMoreMenu(): Promise<void> {
@@ -540,22 +630,15 @@ export class Actions {
             if (path !== null) void this.app.reveal(path);
           },
         },
-        {
-          label: "Copy Windows path",
-          keys: "Ctrl+Shift+C",
-          disabled: path === null,
-          run: () => {
-            if (path !== null) void this.copyPath({ path, literal: true }, "windows");
+        // The open file, though the keys shown also copy a selected path or a focused link.
+        ...this.copyItems(
+          path ?? "",
+          { kind: "exact", path: path ?? "" },
+          {
+            keys: true,
+            disabled: path === null,
           },
-        },
-        {
-          label: "Copy WSL path",
-          keys: "Ctrl+Shift+L",
-          disabled: path === null,
-          run: () => {
-            if (path !== null) void this.copyPath({ path, literal: true }, "wsl");
-          },
-        },
+        ),
         {
           label: "Reload",
           keys: "F5",
@@ -590,7 +673,7 @@ export class Actions {
   async contextMenu(e: MouseEvent, path: string, isRoot: boolean): Promise<void> {
     const entries: MenuEntry[] = [
       { label: "Reveal in Explorer", run: () => void this.app.reveal(path) },
-      ...this.copyItems({ path, literal: true }),
+      ...this.copyItems(path, { kind: "exact", path }),
     ];
     if (isRoot) {
       entries.push("separator", {
@@ -602,37 +685,72 @@ export class Actions {
   }
 
   /**
-   * A link's menu, in a note or a comment: a resolved one opens, copies its exact target in either
-   * form or reveals it; a broken one written as an absolute path copies that text. Any other link
-   * keeps the default menu.
+   * The menu for a right-click in a note or a comment. On a selection holding a path, it copies
+   * the selection as it is, or with its paths in either form. On a link that leads somewhere, it
+   * opens, copies the link's text or its path in either form, or reveals; on a broken one written
+   * as a path, it copies. Anywhere else, and in a field, the default menu stays.
    */
-  private linkMenu(e: MouseEvent): void {
-    const link = e.target instanceof Element ? e.target.closest("a") : null;
-    const found = link && inNoteOrComment(link, this.app.layout.doc) ? linkPath(link) : null;
+  private pathMenu(e: MouseEvent): void {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target || target.closest("input, textarea, [contenteditable]")) {
+      return;
+    }
+    const doc = this.app.layout.doc;
+    const selected = selectedPaths(doc);
+    if (selected?.range.intersectsNode(target)) {
+      e.preventDefault();
+      void this.openMenu(this.copyItems(selected.text, selected.path), {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      return;
+    }
+    const link = target.closest("a");
+    const found = link && inNoteOrComment(link, doc) ? linkPaths(link) : null;
     if (!link || !found) {
       return;
     }
     e.preventDefault();
-    const entries: MenuEntry[] = found.literal
-      ? [
-          {
-            label: "Open",
-            run: () => {
-              this.app.view.follow(link);
+    const leadsTo = found.target;
+    const entries: MenuEntry[] =
+      leadsTo === null
+        ? this.copyItems(found.text, found.path)
+        : [
+            {
+              label: "Open",
+              run: () => {
+                this.app.view.follow(link);
+              },
             },
-          },
-          ...this.copyItems(found),
-          { label: "Reveal in Explorer", run: () => void this.app.reveal(found.path) },
-        ]
-      : this.copyItems(found);
+            ...this.copyItems(found.text, found.path),
+            { label: "Reveal in Explorer", run: () => void this.app.reveal(leadsTo) },
+          ];
     void this.openMenu(entries, { x: e.clientX, y: e.clientY });
   }
 
-  /** The menu items that copy `target` in Windows and in WSL form. */
-  private copyItems(target: PathToCopy): MenuEntry[] {
+  /**
+   * The menu items that copy `text` as it is, and `target` in Windows and in WSL form: "as … path"
+   * for one path, "with … paths" for text holding paths. `keys` shows the shortcuts (the ⋯ menu).
+   */
+  private copyItems(
+    text: string,
+    target: PathToCopy,
+    opts: { keys?: boolean; disabled?: boolean } = {},
+  ): MenuEntry[] {
+    const disabled = opts.disabled === true;
+    const convert = (form: PathForm): MenuItem => ({
+      label:
+        target.kind === "paths"
+          ? `Copy with ${FORM_NAME[form]} paths`
+          : `Copy as ${FORM_NAME[form]} path`,
+      ...(opts.keys ? { keys: COPY_KEYS[form] } : {}),
+      disabled,
+      run: () => void this.copyAs(target, form),
+    });
     return [
-      { label: "Copy Windows path", run: () => void this.copyPath(target, "windows") },
-      { label: "Copy WSL path", run: () => void this.copyPath(target, "wsl") },
+      { label: "Copy", disabled, run: () => void this.copyText(text) },
+      convert("windows"),
+      convert("wsl"),
     ];
   }
 
@@ -715,13 +833,28 @@ export class Actions {
   }
 
   /**
-   * Copies `target` in `form`, as Rust works it out, and names it in a toast. A path with no such
-   * form copies nothing, and the toast says so.
+   * Copies `target` in `form`, as Rust works it out, and says so in a toast. One path with no such
+   * form copies nothing, and the toast says so; text holding paths is copied with those that have
+   * one converted, and the toast counts both.
    */
-  private async copyPath(target: PathToCopy, form: PathForm): Promise<void> {
+  private async copyAs(target: PathToCopy, form: PathForm): Promise<void> {
+    if (target.kind === "paths") {
+      let result: ConvertedPaths;
+      try {
+        result = await this.app.backend.convertPaths(target.text, form);
+      } catch (e) {
+        this.app.toast(String(e));
+        return;
+      }
+      await this.copyText(result.text, copiedWith(form, result.converted, result.unconverted));
+      return;
+    }
     let forms: PathForms;
     try {
-      forms = await this.app.backend.pathForms(target.path, target.literal);
+      forms =
+        target.kind === "written"
+          ? await this.app.backend.writtenForms(target.path)
+          : await this.app.backend.pathForms(target.path, target.kind === "exact");
     } catch (e) {
       this.app.toast(String(e));
       return;
@@ -731,13 +864,25 @@ export class Actions {
       this.app.toast(NO_FORM[form]);
       return;
     }
+    await this.copyText(path, COPIED[form]);
+  }
+
+  /** Copies `text` as it is, with `message` in a toast and the text, on one line, below it. */
+  private async copyText(text: string, message = "Copied"): Promise<void> {
     try {
-      await navigator.clipboard.writeText(path);
+      await navigator.clipboard.writeText(text);
     } catch {
       this.app.toast("Couldn't copy to the clipboard");
       return;
     }
-    this.app.toast(COPIED[form], middleTruncate(path, TOAST_PATH_CHARS));
+    let line = text.replace(/\s+/gu, " ").trim();
+    // Only its ends show, so a long text (a whole selected note) is cut to them before its
+    // characters are counted.
+    const ends = 2 * TOAST_PATH_CHARS;
+    if (line.length > 2 * ends) {
+      line = `${line.slice(0, ends)}…${line.slice(-ends)}`;
+    }
+    this.app.toast(message, middleTruncate(line, TOAST_PATH_CHARS));
   }
 
   /** Whether the document is a PDF, which the find bar can't search: its viewer does. */

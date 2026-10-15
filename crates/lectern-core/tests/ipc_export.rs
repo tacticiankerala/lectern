@@ -6,12 +6,16 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::frame_keys::keys;
 use lectern_core::ipc::{
-    DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure, OpenError,
-    OpenErrorKind, OpenResult, OpenWhere, PageLoads, PathForms, RecentEntry, RootState,
-    SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    ConvertedPaths, DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure,
+    OpenError, OpenErrorKind, OpenResult, OpenWhere, PageLoads, PathForm, PathForms, RecentEntry,
+    RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome,
+    WorkspaceSummary,
 };
+use lectern_core::library::pathmap::{path_tokens, PathMapper, CONVERT_LIMIT};
 use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
-use lectern_core::page::{inject_script, page_policy, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS};
+use lectern_core::page::{
+    inject_script, page_policy, prepare_page, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS,
+};
 use lectern_core::review::anchor::AnchorState;
 use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::text::PageBlock;
@@ -74,6 +78,8 @@ fn ts_bindings_exported() {
         "WorkspaceOutcome",
         "OpenRequest",
         "PathForms",
+        "PathForm",
+        "ConvertedPaths",
         "DocKind",
         "HtmlPages",
         "PageLoads",
@@ -186,8 +192,9 @@ fn frame_keys_exported() {
 }
 
 /// Pages as Lectern serves them, for the UI's test that the fake's dev server (`ui/dev/`) serves
-/// them the same: each mode's policies, where the bridge goes in pages made to trip it up, and
-/// which files beside a page it may read.
+/// them the same: each mode's policies, where the bridge goes in pages made to trip it up, the
+/// charset each page made to trip up the prescan is served with, and which files beside a page it
+/// may read.
 #[test]
 fn page_vectors_exported() {
     // JSON, with the byte order mark spelled out rather than invisible.
@@ -256,6 +263,66 @@ fn page_vectors_exported() {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // Bytes, a character each, anything past ASCII spelled out.
+    let bytes = |page: &[u8]| {
+        let text: String = page.iter().map(|&b| char::from(b)).collect();
+        serde_json::to_string(&text)
+            .unwrap()
+            .chars()
+            .map(|c| {
+                if c.is_ascii() {
+                    c.to_string()
+                } else {
+                    format!("\\u{:04x}", u32::from(c))
+                }
+            })
+            .collect::<String>()
+    };
+    let mut late = vec![b' '; 1024];
+    late.extend_from_slice(b"<meta charset=\"koi8-r\">");
+    let charset_pages: Vec<&[u8]> = vec![
+        b"<!doctype html><html><head><meta charset=\"UTF-8\"><title>x",
+        b"<head><META http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\">",
+        b"<meta charset=shift_jis>",
+        b"<meta/charset=big5>",
+        b"<meta charset=\"koi8-r\" charset=\"utf-8\">",
+        b"<meta charset=\"\">",
+        b"<meta charset=\"no such label!\">",
+        b"<!-- <meta charset=\"shift_jis\"> --><meta charset=\"utf-8\">",
+        b"<!--><meta charset=\"koi8-r\">",
+        b"<!---><meta charset=\"koi8-r\">",
+        b"<!-- unclosed <meta charset=\"koi8-r\">",
+        b"<meta content=\"text/html; charset=windows-1252\">",
+        b"<meta http-equiv=\"refresh\" content=\"0; charset=koi8-r\">",
+        b"<meta content='text/html; charset=\"iso-8859-2\"' http-equiv=Content-Type>",
+        b"<meta http-equiv=content-type content=\"text/html;charset = gbk ;x\">",
+        b"<p title='<meta charset=koi8-r>'><meta charset=utf-8>",
+        b"<?xml version=\"1.0\"?><meta charset=euc-kr>",
+        b"<metal charset=koi8-r>",
+        b"<meta charset=\"UTF-16LE\">",
+        b"<meta charset=\"windows-1252\"><p>Hi</p>",
+        b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9",
+        "<title>Tide notes · “Spring” week</title>".as_bytes(),
+        b"<p>Hi</p>",
+        b"",
+        &late,
+        b"<title>Caf\xe9</title>",
+        b"\xEF\xBB\xBF<p>Hi</p>",
+        b"\xFF\xFE<\0p\0>\0",
+        b"\xFE\xFF\0<\0p\0>",
+    ];
+    let charsets = charset_pages
+        .iter()
+        .map(|page| {
+            let charset = prepare_page(page, None).charset;
+            format!(
+                "  {{ page: {}, charset: {} }},",
+                bytes(page),
+                charset.as_deref().map_or("null".to_owned(), quote)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let shared = SHARED_EXTENSIONS
         .iter()
         .map(|ext| quote(ext))
@@ -267,6 +334,8 @@ fn page_vectors_exported() {
          export const PAGE_POLICIES: readonly {{\n  mode: string;\n  token: string | null;\n  enforced: string;\n  reportOnly: string | null;\n}}[] = [\n{policies}\n];\n\n\
          /** Where `inject_script` puts `<script nonce=\"NONCE\">BRIDGE</script>` in each page. */\n\
          export const INJECTIONS: readonly {{ page: string; injected: string }}[] = [\n{injections}\n];\n\n\
+         /** The charset `prepare_page` serves each page with, its bytes a character each. */\n\
+         export const CHARSETS: readonly {{ page: string; charset: string | null }}[] = [\n{charsets}\n];\n\n\
          /** Where the bridge takes its open's key (`BRIDGE_KEY_SLOT`). */\n\
          export const BRIDGE_KEY_SLOT = {};\n\n\
          /** The extensions of the files beside a page it may read (`SHARED_EXTENSIONS`): its scripts and fonts. */\n\
@@ -282,6 +351,10 @@ fn page_vectors_exported() {
     ), "{ts}");
     assert!(
         ts.contains(r#"SHARED_EXTENSIONS: readonly string[] = ["js", "mjs", "woff", "woff2", "ttf", "otf"];"#),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(r#"{ page: "<title>Caf\u00e9</title>", charset: null },"#),
         "{ts}"
     );
 }
@@ -472,6 +545,107 @@ fn path_forms_are_two_optional_strings() {
         })
         .unwrap(),
         json!({"windows": r"\\nas\share\x.md", "wsl": null})
+    );
+}
+
+#[test]
+fn converted_paths_are_the_text_and_two_counts_for_a_form() {
+    assert_eq!(decl::<PathForm>(), r#"type PathForm = "windows" | "wsl";"#);
+    let decl = decl::<ConvertedPaths>();
+    assert!(decl.contains("text: string,"), "{decl}");
+    assert!(decl.contains("converted: number,"), "{decl}");
+    assert!(decl.contains("unconverted: number,"), "{decl}");
+    assert_eq!(
+        serde_json::from_value::<PathForm>(json!("wsl")).unwrap(),
+        PathForm::Wsl
+    );
+}
+
+/// What `path_tokens` and `convert_paths` make of a set of texts, for the UI's test that its own
+/// reading of a selection (copy-path.ts) and the fake backend's conversion agree with core's; and
+/// the most text a conversion takes. The mapper is the fake's: the distribution `Ubuntu`, no
+/// mappings and no index.
+#[test]
+fn path_token_vectors_exported() {
+    // JSON, with anything past ASCII spelled out rather than invisible.
+    let quote = |s: &str| {
+        serde_json::to_string(s)
+            .unwrap()
+            .encode_utf16()
+            .map(|unit| match char::from_u32(u32::from(unit)) {
+                Some(c) if c.is_ascii() => c.to_string(),
+                _ => format!("\\u{unit:04x}"),
+            })
+            .collect::<String>()
+    };
+    let texts = [
+        "bundle exec rubocop app/services/x spec/services/x",
+        "cat /mnt/s/Notes/plan.md",
+        r#""/mnt/s/My Vault/a.md""#,
+        "--config=app/x.yml",
+        r#"run -f=a/b.yml --out="/mnt/s/My Vault/x" --flag"#,
+        "curl https://example.com/a/b file:///C:/x mailto:me@example.com/x",
+        "cd app/services\n    rspec spec/a_spec.rb:12\r\n\tcat `docs/x.md`, /mnt/c/x.md#top\n",
+        r"cp \\nas\share\x.md S:\Notes\x.md",
+        r"bash /home/me/run.sh \\wsl.localhost\Ubuntu\home\me\a.md",
+        "\"a/b\nc/d\"",
+        "\"\u{e9}/a\"b/c\u{a0}d/\u{e9}\u{3000}'x/y",
+        r#"it's 'not a/path' or "one" and/or v1.2 notes.md"#,
+        r"-Iinclude/x C:notes\plan.md \root\x host:/srv/x",
+        r#"see (https://example.com/a) and a/b, "S:\Notes\Meeting #3.md#agenda""#,
+        "echo hello >/mnt/c/output.txt 2>/mnt/c/err.log",
+        r#"cat <spec/a.txt |grep x &>/tmp/a.log >>logs/b.log ;(cd app/x && ls) >"/mnt/s/My Vault/x" ">/x" a|b/c 2>&1"#,
+        "",
+    ];
+    let mapper = PathMapper {
+        wsl_distro: Some("Ubuntu".into()),
+        ..PathMapper::default()
+    };
+    let converted = |c: &ConvertedPaths| {
+        format!(
+            "{{ text: {}, converted: {}, unconverted: {} }}",
+            quote(&c.text),
+            c.converted,
+            c.unconverted
+        )
+    };
+    let rows = texts
+        .iter()
+        .map(|text| {
+            let tokens = path_tokens(text)
+                .into_iter()
+                .map(|r| quote(&text[r]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "  {{ text: {}, tokens: [{tokens}], windows: {}, wsl: {} }},",
+                quote(text),
+                converted(&mapper.convert_paths(text, PathForm::Windows)),
+                converted(&mapper.convert_paths(text, PathForm::Wsl)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ts = format!(
+        "// Generated from `lectern_core::library::pathmap` by `cargo test -p lectern-core`. Do not edit this file manually.\n\n\
+         /** The most text `convert_paths` takes at once, in bytes (`CONVERT_LIMIT`). */\n\
+         export const CONVERT_LIMIT = {CONVERT_LIMIT};\n\n\
+         /**\n * Texts, the path tokens `path_tokens` finds in each, and what `convert_paths` makes of each in\n \
+         * either form with the WSL distribution `Ubuntu`, no mappings and no index, as the fake backend\n \
+         * converts.\n \
+         */\n\
+         export const PATH_TOKEN_VECTORS: readonly {{\n  text: string;\n  tokens: readonly string[];\n  \
+         windows: {{ text: string; converted: number; unconverted: number }};\n  \
+         wsl: {{ text: string; converted: number; unconverted: number }};\n}}[] = [\n{rows}\n];\n"
+    );
+    let path = generated_dir().join("path-tokens.ts");
+    if fs::read_to_string(&path).ok().as_deref() != Some(ts.as_str()) {
+        fs::write(&path, &ts).unwrap();
+    }
+    assert!(ts.contains("export const CONVERT_LIMIT = 65536;"), "{ts}");
+    assert!(
+        ts.contains(r#"{ text: "--config=app/x.yml", tokens: ["app/x.yml"], windows: { text: "--config=app\\x.yml", converted: 1, unconverted: 0 }, wsl: { text: "--config=app/x.yml", converted: 1, unconverted: 0 } },"#),
+        "{ts}"
     );
 }
 

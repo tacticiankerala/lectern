@@ -1,6 +1,7 @@
 // What the UI needs from the host: the Tauri app (backend-tauri.ts) or, for Playwright, a fake
 // that serves pre-rendered fixtures (dev/backend-fake.ts).
 import type { Candidate } from "./generated/Candidate";
+import type { ConvertedPaths } from "./generated/ConvertedPaths";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
@@ -9,6 +10,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForm } from "./generated/PathForm";
 import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -48,12 +50,26 @@ export interface Backend {
   follow(target: FollowTarget): Promise<FollowResult>;
   /**
    * The Windows and WSL forms of a path, for copying. `literal`: an exact path on this machine (the
-   * open file, a tree row, a resolved link's target), taken as it is, a `#` or `:12` included.
-   * Otherwise text written as a path (a selection, a broken link), trimmed, without a line or
-   * anchor suffix, and mapped as a link is, with the index. Strings and the index alone, never the
-   * disk. A form it has none of is null.
+   * open file, a tree row, where a wikilink leads), taken as it is, a `#` or `:12` included.
+   * Otherwise text holding one path (a selection, a broken link's text): the path, without the
+   * quotes, backticks, line or anchor around it, mapped by itself (an absolute one as a link is,
+   * with the index; a relative one only changing its separators), and what was around it kept.
+   * Strings and the index alone, never the disk. A form it has none of is null.
    */
   pathForms(raw: string, literal: boolean): Promise<PathForms>;
+  /**
+   * `text`, a selection holding paths (a command, a block), with each path in it in `form` by the
+   * rules `pathForms` applies to text (a relative one only changes its separators), and every
+   * other character as it is. Paths are mapped without the index. Rejects with a message for the
+   * reader past 64 KB.
+   */
+  convertPaths(text: string, form: PathForm): Promise<ConvertedPaths>;
+  /**
+   * The Windows and WSL forms of the path a link was written with (`data-written`), taken as it is
+   * (a `#` or a quote is part of a name): an absolute one mapped with the index, as the link is; a
+   * relative one only changing its separators; a bare file name the same in both.
+   */
+  writtenForms(raw: string): Promise<PathForms>;
   revealInExplorer(path: string): Promise<void>;
   openInEditor(path: string, line?: number): Promise<void>;
   /**

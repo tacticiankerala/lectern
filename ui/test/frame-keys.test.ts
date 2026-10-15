@@ -45,6 +45,7 @@ describe("keys inside a frame", () => {
     expect(key("F11", "F11", {})).toBe("focus");
     expect(key("Escape", "Escape", {})).toBe("escape");
     expect(key(">", "Period", { ctrl: true, shift: true })).toBe("breadcrumbs");
+    expect(key("h", "KeyH", { ctrl: true })).toBe("recent-files");
     expect(key("a", "KeyA", { ctrl: true })).toBeNull();
   });
 });

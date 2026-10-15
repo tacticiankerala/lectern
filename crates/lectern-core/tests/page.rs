@@ -135,7 +135,8 @@ fn a_utf16_page_is_served_as_utf8() {
     assert!(text.ends_with("a\u{fffd}\u{fffd}"), "{text:?}");
 }
 
-/// A page that isn't UTF-16 keeps its bytes, and the charset it declares rides on the type.
+/// A page that isn't UTF-16 keeps its bytes, and the charset it declares rides on the type, valid
+/// UTF-8 or not.
 #[test]
 fn other_pages_keep_their_bytes_and_declared_charset() {
     let served = prepare_page(
@@ -144,7 +145,47 @@ fn other_pages_keep_their_bytes_and_declared_charset() {
     );
     assert_eq!(served.charset.as_deref(), Some("windows-1252"));
     assert!(served.body.ends_with(b"<title>Caf\xe9"));
-    assert_eq!(prepare_page(b"<p>Hi</p>", Some((NONCE, KEY))).charset, None);
+    let ascii = prepare_page(b"<meta charset=\"windows-1252\"><p>Hi</p>", None);
+    assert_eq!(ascii.charset.as_deref(), Some("windows-1252"));
+}
+
+/// A page that declares no charset (no byte order mark, no `<meta>` the prescan finds) and is
+/// valid UTF-8 is served as UTF-8, which WebView2 would otherwise read as Windows-1252. Saved
+/// artifacts are often such fragments, starting at `<title>`.
+#[test]
+fn an_undeclared_page_in_valid_utf8_is_served_as_utf8() {
+    let fragment = "<title>Tide notes · “Spring” week</title>\n<p>The harbour’s mark · twice</p>\n";
+    let served = prepare_page(fragment.as_bytes(), Some((NONCE, KEY)));
+    assert_eq!(served.charset.as_deref(), Some("utf-8"));
+    assert_eq!(
+        String::from_utf8(served.body)
+            .unwrap()
+            .replace(&bridge_for(KEY), "BRIDGE"),
+        format!("{}{fragment}", script())
+    );
+    assert_eq!(
+        prepare_page(fragment.as_bytes(), None).charset.as_deref(),
+        Some("utf-8")
+    );
+    assert_eq!(
+        prepare_page(b"<p>Hi</p>", Some((NONCE, KEY)))
+            .charset
+            .as_deref(),
+        Some("utf-8")
+    );
+}
+
+/// Undeclared and not valid UTF-8, a page gets no charset: the browser's own guess, as before. A
+/// UTF-8 byte order mark declares it, and the browser goes by that first.
+#[test]
+fn an_undeclared_page_not_in_utf8_or_with_a_bom_gets_no_charset() {
+    let served = prepare_page(b"<title>Caf\xe9</title>", Some((NONCE, KEY)));
+    assert_eq!(served.charset, None);
+    assert!(served.body.ends_with(b"<title>Caf\xe9</title>"));
+    assert_eq!(
+        prepare_page("\u{feff}<p>Café</p>".as_bytes(), None).charset,
+        None
+    );
 }
 
 /// A page served without its open's bridge (one the frame navigated to) gets no script and no

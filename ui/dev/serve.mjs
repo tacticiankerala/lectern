@@ -4,15 +4,16 @@
 // open's token reaches the folder of the page it opened and below, and nothing else; a script or a
 // font it serves is shared with the page's opaque origin (`Access-Control-Allow-Origin: null`), by
 // its extension alone, and nothing else is; and everything but a PDF carries the sandboxing CSP.
-// The server keeps nothing: a token from the fake backend, `t<n>-<hex>`, carries its page's path
-// in hex, and the open's key is worked out from it. The open's own page gets
-// Lectern's bridge (crates/lectern-core/assets/page-bridge.js), with that key, inserted at its top
-// under a fresh nonce, and the policy of the HTML pages setting its URL names (`lxmode`, from the
-// fake backend), reporting to its open; any other page gets neither bridge nor reports, as
-// lectern_core::page builds them (dev/page-serving.mjs, held to Rust's by
-// test/page-serving.test.ts). The browser's reports go to
-// /__csp-report, which takes them and does nothing more: the fake backend tells what a page loads
-// itself. A file under an open asked for with `lxdelay=<ms>` comes that much later, for the e2e.
+// The server keeps nothing: a token from the fake backend, `t<n>-<hex>`, carries its page's path in
+// hex, and the open's key is worked out from it. The open's own page gets Lectern's bridge
+// (crates/lectern-core/assets/page-bridge.js), with that key, inserted at its top under a fresh
+// nonce, and the policy of the HTML pages setting its URL names (`lxmode`, from the fake backend),
+// reporting to its open; any other page gets neither bridge nor reports, as lectern_core::page
+// builds them, and every page goes out with the charset Rust would give it (dev/page-serving.mjs,
+// held to Rust's by test/page-serving.test.ts). The fake reads every page as UTF-8, which every
+// fixture page is. The browser's reports go to /__csp-report, which takes them and does nothing
+// more: the fake backend tells what a page loads itself. A file under an open asked for with
+// `lxdelay=<ms>` comes that much later, for the e2e.
 import { randomBytes } from "node:crypto";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
@@ -23,6 +24,7 @@ import {
   fakeBridgeKey,
   injectScript,
   pagePolicy,
+  servedCharset,
   sharedWithPage,
 } from "./page-serving.mjs";
 
@@ -144,8 +146,11 @@ createServer(async (req, res) => {
     const policy = pagePolicy(url.searchParams.get("lxmode"), nonce, token, "");
     headers["content-security-policy"] = policy.enforced;
     if (policy.reportOnly) headers["content-security-policy-report-only"] = policy.reportOnly;
+    const bytes = readFileSync(file);
+    const charset = servedCharset(bytes);
+    if (charset !== null) headers["content-type"] = `${type}; charset=${charset}`;
     res.writeHead(200, headers);
-    const html = readFileSync(file, "utf8");
+    const html = bytes.toString("utf8");
     if (token === null) return void res.end(html);
     const script = `<script nonce="${nonce}">${bridgeFor(bridge, fakeBridgeKey(token))}</script>`;
     return void res.end(injectScript(html, script));

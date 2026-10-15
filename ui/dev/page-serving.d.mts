@@ -15,6 +15,8 @@ export function pagePolicy(
 
 export function injectScript(html: string, script: string): string;
 
+export function servedCharset(bytes: Uint8Array): string | null;
+
 export const BRIDGE_KEY_SLOT: string;
 
 export function fakeBridgeKey(token: string): string;

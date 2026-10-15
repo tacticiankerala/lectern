@@ -1,11 +1,12 @@
 // Preferences (Ctrl+, or the ⋯ menu, spec §6), in two parts. This workspace: its name, its
 // libraries' folders (add, remove, retry) and its theme, the shared one ("Same as other windows")
 // or its own mode and light and dark themes. A blank window has no such part. All windows: folder
-// status badges, review comments on or off, what HTML pages may do, path mappings (from/to rows,
-// saved as a field loses focus), the editor command, automatic update checks, and the workspaces,
-// to rename or delete (not one open in a window). Then the version. Settings changed elsewhere
-// show at once in the switches, the theme and the path mappings, unless the mappings were edited
-// here: those are what closing saves. Loaded on first use.
+// status badges, review comments on or off, how many recent files the header's menu lists (5 to
+// 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the
+// editor command, automatic update checks, and the workspaces, to rename or delete (not one open
+// in a window). Then the version. Settings changed elsewhere show at once in the switches, the
+// theme and the path mappings, unless the mappings were edited here: those are what closing
+// saves. Loaded on first use.
 import { h } from "./dom";
 import type { EditorPref } from "./generated/EditorPref";
 import type { HtmlPages } from "./generated/HtmlPages";
@@ -16,6 +17,7 @@ import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { ThemeId } from "./generated/ThemeId";
 import type { ThemeMode } from "./generated/ThemeMode";
 import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
+import { RECENT_IN_MENU } from "./recent-files";
 import { THEMES } from "./themes";
 
 export interface PreferencesHost {
@@ -81,6 +83,7 @@ export class Preferences {
   private readonly autoUpdate: HTMLInputElement;
   private readonly badges: HTMLInputElement;
   private readonly reviewComments: HTMLInputElement;
+  private readonly recentInMenu: HTMLInputElement;
   private readonly htmlPages: HTMLInputElement[];
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
@@ -183,6 +186,16 @@ export class Preferences {
     this.reviewComments.addEventListener("change", () => {
       this.host.update({ reviewComments: this.reviewComments.checked });
     });
+    this.recentInMenu = h("input", {
+      type: "number",
+      name: "lx-recent-in-menu",
+      min: String(RECENT_IN_MENU.min),
+      max: String(RECENT_IN_MENU.max),
+      step: "1",
+    });
+    this.recentInMenu.addEventListener("change", () => {
+      this.saveRecentInMenu();
+    });
     this.htmlPages = HTML_PAGES.map(([mode]) => {
       const input = h("input", { type: "radio", name: "lx-html-pages", value: mode });
       input.addEventListener("change", () => {
@@ -239,6 +252,7 @@ export class Preferences {
           { class: "prefs-hint" },
           "Comments are saved next to each note as <note>.review.md, a Markdown file Claude, Codex or another AI agent can read and reply in.",
         ),
+        h("label", { class: "prefs-number" }, "Recent files in the menu", this.recentInMenu),
       ),
       section(
         "HTML pages",
@@ -337,6 +351,9 @@ export class Preferences {
     this.autoUpdate.checked = s.autoUpdate;
     this.badges.checked = s.showStatusBadges;
     this.reviewComments.checked = s.reviewComments;
+    if (document.activeElement !== this.recentInMenu) {
+      this.recentInMenu.value = String(s.recentInMenu);
+    }
     for (const input of this.htmlPages) {
       input.checked = input.value === s.htmlPages;
     }
@@ -599,6 +616,20 @@ export class Preferences {
       this.host.update({ pathMappings: mappings });
     }
     this.mappingsEdited = mappings.length !== rows.length;
+  }
+
+  /** Saves the number typed, kept in range; an empty field goes back to the setting. */
+  private saveRecentInMenu(): void {
+    const typed = Math.round(Number(this.recentInMenu.value));
+    const current = this.host.settings().recentInMenu;
+    const value =
+      this.recentInMenu.value.trim() === "" || !Number.isFinite(typed)
+        ? current
+        : Math.min(RECENT_IN_MENU.max, Math.max(RECENT_IN_MENU.min, typed));
+    this.recentInMenu.value = String(value);
+    if (value !== current) {
+      this.host.update({ recentInMenu: value });
+    }
   }
 
   /** Custom needs a command; until it has one, Automatic stays in effect. */

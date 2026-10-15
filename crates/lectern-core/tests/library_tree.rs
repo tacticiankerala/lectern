@@ -77,6 +77,7 @@ fn tree_shows_text_html_and_pdf_files_with_their_kinds() {
             "chart",
             "brief.pdf",
             "faking.html",
+            "fragment.html",
             "late-leaving.html",
             "leaving.html",
             "other.html",
