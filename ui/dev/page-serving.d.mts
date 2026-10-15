@@ -20,3 +20,7 @@ export const BRIDGE_KEY_SLOT: string;
 export function fakeBridgeKey(token: string): string;
 
 export function bridgeFor(bridge: string, key: string): string;
+
+export const SHARED_EXTENSIONS: readonly string[];
+
+export function sharedWithPage(file: string): boolean;

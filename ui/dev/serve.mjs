@@ -1,11 +1,11 @@
 // Serves dist-fake/ on port 4517 for Playwright, plus the fixture vault's files at
 // /__asset/<encoded path>, where the path is under C:\Fixtures\vault as `export_fixtures` wrote it,
 // and at /__page/o/<token>/<encoded segments>, as `lxpage` serves pages and PDFs into a frame: each
-// open's token reaches the folder of the page it opened and below, and nothing else; a module
-// script or a font it serves (`Sec-Fetch-Dest`) is shared with the page's opaque origin
-// (`Access-Control-Allow-Origin: null`), nothing else is; and everything but a PDF carries the
-// sandboxing CSP. The server keeps nothing: a token from the fake backend, `t<n>-<hex>`, carries
-// its page's path in hex, and the open's key is worked out from it. The open's own page gets
+// open's token reaches the folder of the page it opened and below, and nothing else; a script or a
+// font it serves is shared with the page's opaque origin (`Access-Control-Allow-Origin: null`), by
+// its extension alone, and nothing else is; and everything but a PDF carries the sandboxing CSP.
+// The server keeps nothing: a token from the fake backend, `t<n>-<hex>`, carries its page's path
+// in hex, and the open's key is worked out from it. The open's own page gets
 // Lectern's bridge (crates/lectern-core/assets/page-bridge.js), with that key, inserted at its top
 // under a fresh nonce, and the policy of the HTML pages setting its URL names (`lxmode`, from the
 // fake backend), reporting to its open; any other page gets neither bridge nor reports, as
@@ -18,7 +18,13 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bridgeFor, fakeBridgeKey, injectScript, pagePolicy } from "./page-serving.mjs";
+import {
+  bridgeFor,
+  fakeBridgeKey,
+  injectScript,
+  pagePolicy,
+  sharedWithPage,
+} from "./page-serving.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, "../dist-fake");
@@ -119,14 +125,12 @@ createServer(async (req, res) => {
   }
   const found = resolve(url.pathname);
   if (found === undefined) return void res.writeHead(404).end();
-  // Within an open, a module script or a font is the page's to load; nothing else is its to read.
-  const dest = req.headers["sec-fetch-dest"];
-  const shared =
-    found.opened !== null && (dest === "script" || dest === "font")
-      ? { "access-control-allow-origin": "null" }
-      : {};
+  // Within an open, a script or a font is the page's to load, as its extension says (WebView2 says
+  // nothing of what a request is for); nothing else is its to read.
   const { file } = found;
-  if (file === null) return void res.writeHead(403, shared).end();
+  if (file === null) return void res.writeHead(403).end();
+  const shared =
+    found.opened !== null && sharedWithPage(file) ? { "access-control-allow-origin": "null" } : {};
   if (!statSync(file, { throwIfNoEntry: false })?.isFile()) {
     return void res.writeHead(404, shared).end();
   }

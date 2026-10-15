@@ -90,7 +90,7 @@ The demo library in [`fixtures/demo`](fixtures/demo) has one of each: Orbit Note
 
 ### What a page may do
 
-Every page runs in a sandbox, away from your files and from Lectern. A page reaches only its own folder and below: its styles, scripts, images and fonts there load, and nothing elsewhere on your computer does. Its scripts can't read the files beside it, so a page saved among other files can't send them anywhere. A page can't open another page in its place either; open that one from Lectern instead. Many agent-made pages also load a chart library or a font from the internet, so the **HTML pages** setting, in Preferences, decides how far a page may go:
+Every page runs in a sandbox, away from your files and from Lectern. A page reaches only its own folder and below: its styles, scripts (module scripts too), images and fonts there load, and nothing elsewhere on your computer does. Its scripts can't read the documents or data around it, so a page saved among other files can't send them anywhere. A page can't open another page in its place either; open that one from Lectern instead. Many agent-made pages also load a chart library or a font from the internet, so the **HTML pages** setting, in Preferences, decides how far a page may go:
 
 - **Run scripts and allow the internet**, the default.
 - **Run scripts offline:** the page's scripts run, but nothing loads from the internet.

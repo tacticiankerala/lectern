@@ -1,5 +1,5 @@
 // Draws from the invented readings beside its page, as an artifact's module script would, and
-// tries to read that file's text as well, which the page may not.
+// tries to read the data file beside it as well, which the page may not.
 import { readings } from "./readings.mjs";
 
 function line(text) {
@@ -9,7 +9,7 @@ function line(text) {
 }
 
 line(`Charted ${readings.length} invented readings.`);
-fetch("readings.mjs").then(
-  () => line("Read the file beside it."),
-  () => line("Couldn't read the file beside it."),
+fetch("tides.json").then(
+  () => line("Read the tide log beside it."),
+  () => line("Couldn't read the tide log beside it."),
 );

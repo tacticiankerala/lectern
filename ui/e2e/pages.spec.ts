@@ -332,15 +332,15 @@ test("Ctrl+Alt+M inside a page, as Rust sends it, comments on the words selected
   await expect.poll(() => painted(page, "comment")).toEqual(["Rendered by script"]);
 });
 
-test("a page's module script imports the module beside it, but can't read the file", async ({
+test("a page's module script imports the module beside it, but can't read the data there", async ({
   page,
 }) => {
   await openFixture(page, "artifacts/chart/index.html");
   await expect(inside(page).locator("p", { hasText: "Charted" })).toHaveText(
     "Charted 3 invented readings.",
   );
-  await expect(inside(page).locator("p", { hasText: "file beside it" })).toHaveText(
-    "Couldn't read the file beside it.",
+  await expect(inside(page).locator("p", { hasText: "tide log" })).toHaveText(
+    "Couldn't read the tide log beside it.",
   );
   await htmlPages(page, "offline");
   await expect(frame(page)).toHaveAttribute("src", /lxmode=offline/);

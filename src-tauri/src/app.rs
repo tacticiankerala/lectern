@@ -128,8 +128,6 @@ pub fn run(context: tauri::Context, launch: Launch) {
                     .map(str::to_owned)
             };
             let content_type = header("content-type");
-            // What the request is for: a module script or a font may be shared with the page.
-            let fetch_dest = header("sec-fetch-dest");
             // As for images: the checks are in memory, and only an allowed file is read, off the
             // main thread.
             tauri::async_runtime::spawn_blocking(move || {
@@ -139,7 +137,6 @@ pub fn run(context: tauri::Context, launch: Launch) {
                         path: &path,
                         query: query.as_deref(),
                         content_type: content_type.as_deref(),
-                        fetch_dest: fetch_dest.as_deref(),
                         body: &body,
                     }),
                     None => PageResponse::refused(),

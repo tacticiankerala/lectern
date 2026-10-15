@@ -479,19 +479,17 @@ impl App {
                 }
             });
         }
-        self.serve_page(request.path, request.fetch_dest)
+        self.serve_page(request.path)
     }
 
     /// Answers a page-protocol request for `request_path` (the URL path, percent-encoded, naming
-    /// an open: `/o/<token>/…`), asked for `dest` (`Sec-Fetch-Dest`): every check is made in
-    /// memory, under brief locks, before the file is read, and the file must be in the open's
-    /// folder or below it, by its real path too. An HTML page is served under the *HTML pages*
-    /// setting, with the open's bridge and its reports going to the open when it is the open's own
-    /// page.
-    pub fn serve_page(&self, request_path: &str, dest: Option<&str>) -> PageResponse {
+    /// an open: `/o/<token>/…`): every check is made in memory, under brief locks, before the file
+    /// is read, and the file must be in the open's folder or below it, by its real path too. An
+    /// HTML page is served under the *HTML pages* setting, with the open's bridge and its reports
+    /// going to the open when it is the open's own page.
+    pub fn serve_page(&self, request_path: &str) -> PageResponse {
         pages::serve(
             request_path,
-            dest,
             |token| lock(&self.page_opens).scope(token),
             |scope, rest| pages::decide(scope, rest, &read(&self.trust)),
             |scope, path, cap| pages::read_within(&self.real_folder(scope)?, path, cap),
@@ -1230,17 +1228,11 @@ mod tests {
     }
 
     fn get(f: &Fixture, path: &str) -> PageResponse {
-        get_for(f, path, None)
-    }
-
-    /// A GET of `path` for `dest`, as its `Sec-Fetch-Dest` says.
-    fn get_for(f: &Fixture, path: &str, dest: Option<&str>) -> PageResponse {
         f.app.page_request(&PageRequest {
             method: "GET",
             path,
             query: None,
             content_type: None,
-            fetch_dest: dest,
             body: &[],
         })
     }
@@ -1255,9 +1247,9 @@ mod tests {
     }
 
     /// A page reaches its own folder and the folders below it: what it loads there loads, and its
-    /// module scripts and fonts are shared with its opaque origin, never what its scripts fetch.
-    /// Nothing above its folder, no other root's file and no other opened note's folder is
-    /// reached, and the old drive URLs serve nothing.
+    /// scripts and fonts are shared with its opaque origin, by their extension; its documents and
+    /// data never are. Nothing above its folder, no other root's file and no other opened note's
+    /// folder is reached, and the old drive URLs serve nothing.
     #[test]
     fn a_page_reaches_its_own_folder_and_below_and_nothing_else() {
         let dir = TempDir::new();
@@ -1267,6 +1259,7 @@ mod tests {
         dir.file("vault/artifacts/lib/app.mjs", "export const a = 1;");
         dir.file("vault/artifacts/fonts/body.woff2", "wOF2");
         dir.file("vault/artifacts/data.json", "{\"a\":1}");
+        dir.file("vault/artifacts/img/chart.png", "PNG");
         dir.file("vault/top.css", "p { color: red }");
         let note = dir.file("vault/notes/plan.md", "# Plan");
         dir.file("vault/notes/note.css", "p { color: red }");
@@ -1276,40 +1269,27 @@ mod tests {
         let served = get(&f, &path);
         assert_eq!(served.status, 200);
         assert!(served.body.ends_with(b"</script><h1>Report</h1>"));
+        assert!(!served.shared);
         assert!(served.policy.unwrap().starts_with("sandbox allow-scripts;"));
-        for (rest, dest, content_type, body, shared) in [
-            (
-                "style.css",
-                "style",
-                "text/css",
-                &b"h1 { color: teal }"[..],
-                false,
-            ),
+        for (rest, content_type, body, shared) in [
+            ("style.css", "text/css", &b"h1 { color: teal }"[..], false),
             (
                 "lib/app.mjs",
-                "script",
                 "text/javascript",
                 b"export const a = 1;",
                 true,
             ),
-            ("fonts/body.woff2", "font", "font/woff2", b"wOF2", true),
-            (
-                "data.json?v=1",
-                "empty",
-                "application/json",
-                b"{\"a\":1}",
-                false,
-            ),
+            ("fonts/body.woff2", "font/woff2", b"wOF2", true),
+            ("data.json?v=1", "application/json", b"{\"a\":1}", false),
+            ("img/chart.png", "image/png", b"PNG", false),
         ] {
-            let served = get_for(&f, &beside(&path, rest), Some(dest));
+            let served = get(&f, &beside(&path, rest));
             assert_eq!(served.status, 200, "{rest}");
             assert_eq!(served.content_type.as_deref(), Some(content_type), "{rest}");
             assert_eq!(served.body, body, "{rest}");
             let expected = shared.then(|| "null".to_owned());
             assert_eq!(acao(served), expected, "{rest}");
         }
-        // Asked for without saying what for: never shared.
-        assert_eq!(acao(get(&f, &beside(&path, "lib/app.mjs"))), None);
         assert_eq!(get(&f, &beside(&path, "gone.css")).status, 404);
         // The note's folder came into the image protocol's scope when it opened; the page's open
         // reaches it no more than it reaches the root above its folder.
@@ -1440,7 +1420,6 @@ mod tests {
             path: REPORT_PATH,
             query: Some(&query),
             content_type: Some("application/csp-report"),
-            fetch_dest: Some("report"),
             body: body.as_bytes(),
         })
         .status

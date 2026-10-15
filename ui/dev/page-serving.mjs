@@ -1,11 +1,24 @@
 // How the fake's dev server serves an HTML page (dev/serve.mjs), as `lectern_core::page` does: its
-// policies, and where Lectern's bridge goes in it, read as the browser's tokenizer reads a page's
-// prologue. test/page-serving.test.ts holds both to what Rust gives (src/generated/page-vectors.ts).
+// policies, where Lectern's bridge goes in it, read as the browser's tokenizer reads a page's
+// prologue, and which files beside it the page may read. test/page-serving.test.ts holds them to
+// what Rust gives (src/generated/page-vectors.ts).
 
 const ALWAYS = "object-src 'none'; form-action 'none'; base-uri 'self'";
 
 /** Where the bridge takes its open's key, as `lectern_core::page::BRIDGE_KEY_SLOT`. */
 export const BRIDGE_KEY_SLOT = '"LECTERN_BRIDGE_KEY"';
+
+/**
+ * As `lectern_core::page::SHARED_EXTENSIONS`: the files beside a page it may read, its scripts and
+ * fonts, by extension, as WebView2 tells `lxpage` nothing of what a request is for.
+ */
+export const SHARED_EXTENSIONS = ["js", "mjs", "woff", "woff2", "ttf", "otf"];
+
+/** Whether a page may read `file` beside it: its extension, in any letter case, is shared. */
+export function sharedWithPage(file) {
+  const ext = /\.([^.\\/]+)$/.exec(file)?.[1]?.toLowerCase();
+  return ext !== undefined && SHARED_EXTENSIONS.includes(ext);
+}
 
 /**
  * The key of the fake open `token`. The fake backend and the dev server keep nothing between

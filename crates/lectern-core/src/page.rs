@@ -11,7 +11,8 @@
 //!
 //! A page always runs sandboxed, with an opaque origin: its policy starts with
 //! `sandbox allow-scripts`, whatever frame it lands in. The bridge runs in every mode: `static`
-//! allows it alone, by the nonce of its script element.
+//! allows it alone, by the nonce of its script element. Of the files beside it, it may read only
+//! its scripts and fonts (`SHARED_EXTENSIONS`), so its module scripts and fonts load.
 //!
 //! The reports come from the browser, not the page, so a page can't hide what it loaded: under
 //! `full` a report-only policy reports every load from the web, and in every mode the enforced
@@ -42,6 +43,13 @@ pub const BRIDGE_KEY_SLOT: &str = "\"LECTERN_BRIDGE_KEY\"";
 
 /// Where the policy reports of a page go, on the page protocol: `?t=<token>` names the open.
 pub const REPORT_PATH: &str = "/__csp-report";
+
+/// The extensions of the files beside a page that it may read, within its open: its scripts and
+/// fonts, served with `Access-Control-Allow-Origin: null`, as its opaque origin needs to load
+/// them as module scripts and fonts. Nothing else, so its scripts can't read the documents or
+/// data around it. By extension, as WebView2 tells the page protocol nothing of what a request
+/// is for (no `Sec-Fetch-Dest`): a module import and a `fetch` look the same to it.
+pub const SHARED_EXTENSIONS: &[&str] = &["js", "mjs", "woff", "woff2", "ttf", "otf"];
 
 /// A window hears about a page's loads at most this often.
 pub const REPORT_THROTTLE: Duration = Duration::from_millis(250);

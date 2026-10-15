@@ -513,7 +513,7 @@ mod tests {
             let name = path.file_name().unwrap().to_string_lossy();
             assert_eq!(file, format!("/o/{token}/{name}"));
             tokens.push(token.to_owned());
-            let served = f.app.serve_page(file, None);
+            let served = f.app.serve_page(file);
             assert_eq!(served.status, 200, "{url}");
             assert!(served.body.ends_with(&fs::read(path).unwrap()), "{url}");
             assert_eq!(doc.html, "");
@@ -545,11 +545,9 @@ mod tests {
         let url = doc.frame_url.expect("a frame URL");
         let (file, token) = open_url(&url);
         assert_eq!(file, format!("/o/{token}/brief.pdf"));
-        assert_eq!(f.app.serve_page(file, None).status, 200, "{url}");
+        assert_eq!(f.app.serve_page(file).status, 200, "{url}");
         assert_eq!(
-            f.app
-                .serve_page(&format!("/o/{token}/style.css"), None)
-                .status,
+            f.app.serve_page(&format!("/o/{token}/style.css")).status,
             200
         );
     }

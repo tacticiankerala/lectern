@@ -47,3 +47,6 @@ export const INJECTIONS: readonly { page: string; injected: string }[] = [
 
 /** Where the bridge takes its open's key (`BRIDGE_KEY_SLOT`). */
 export const BRIDGE_KEY_SLOT = "\"LECTERN_BRIDGE_KEY\"";
+
+/** The extensions of the files beside a page it may read (`SHARED_EXTENSIONS`): its scripts and fonts. */
+export const SHARED_EXTENSIONS: readonly string[] = ["js", "mjs", "woff", "woff2", "ttf", "otf"];
