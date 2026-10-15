@@ -7,7 +7,6 @@
 import { App } from "../src/app";
 import { docText } from "../src/comments-text";
 import { byId } from "../src/dom";
-import type { PageFrame } from "../src/page-frame";
 import {
   FakeBackend,
   GARDEN,
@@ -70,7 +69,7 @@ const backend = new FakeBackend(__LX_FIXTURES__, options);
 window.__fake = backend;
 const app = new App(backend, byId("lx-app"));
 window.__lxPage = () => {
-  const page = app.view.page as PageFrame | null;
+  const page = app.view.page;
   return page && { ready: page.ready, text: page.text, fraction: page.fraction, dark: page.dark };
 };
 await app.start();

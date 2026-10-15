@@ -1,7 +1,9 @@
 //! Review comments on the open note: loading its sidecar, and saving the changes the UI asks for.
 //!
 //! Only the sidecar of the note on screen is ever touched, at the path derived from the note's,
-//! and only while the feature is on. The note itself is read, never written.
+//! and only while the feature is on. The note itself is read, never written. An HTML page's text
+//! is the one its bridge reported as the page ran, which the UI sends with every command; its
+//! source is read for the lines and the fingerprint.
 
 use std::fs;
 use std::io;
@@ -11,9 +13,9 @@ use std::time::SystemTime;
 use lectern_core::library::{doc_kind, DocKind};
 use lectern_core::review::anchor::resolve_all;
 use lectern_core::review::ops::ReviewOp;
-use lectern_core::review::text::TextMap;
+use lectern_core::review::text::{page_text_len, NoteText, PageBlock, MAX_PAGE_TEXT};
 use lectern_core::review::view::{build_payload, PayloadInput, ReviewPayload};
-use lectern_core::review::{fingerprint, is_sidecar_name, iso_utc, sidecar_path, store, Review};
+use lectern_core::review::{is_sidecar_name, iso_utc, sidecar_path, store, Review};
 
 use super::doc::{read_text, render_text};
 use super::sync::{lock, read};
@@ -21,9 +23,11 @@ use super::{trust, WindowState};
 
 const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
-const NOT_A_NOTE: &str = "Comments can only be added to notes and text files.";
+const NOT_A_NOTE: &str = "Comments can only be added to notes, text files and pages.";
 const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
-const NOT_YET_ON_PAGES: &str = "Comments on pages arrive in Task 5.";
+const NO_PAGE_TEXT: &str =
+    "The page hasn't reported its text yet, so its comments can't be placed.";
+const PAGE_TOO_LONG: &str = "The page's text is over 2 MB, too much for comments.";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -34,27 +38,57 @@ struct Target {
 }
 
 impl Target {
-    /// Why the note can't have comments, or `None` when it can: a Markdown note or a text file
-    /// can, unless it is a sidecar itself (`plan.review.review.md` would be a sidecar's sidecar). A
-    /// page takes none yet, and a PDF never does.
+    /// Why the note can't have comments, or `None` when it can: a Markdown note, a text file or an
+    /// HTML page can, unless it is a sidecar itself (`plan.review.review.md` would be a sidecar's
+    /// sidecar). A PDF never does.
     fn refusal(&self) -> Option<&'static str> {
         match doc_kind(&self.note_name) {
             Some(DocKind::Pdf) => Some(NOT_ON_A_PDF),
-            Some(DocKind::Html) => Some(NOT_YET_ON_PAGES),
-            Some(DocKind::Markdown | DocKind::Text) if !is_sidecar_name(&self.note_name) => None,
+            Some(kind) if kind.takes_comments() && !is_sidecar_name(&self.note_name) => None,
             _ => Some(NOT_A_NOTE),
         }
+    }
+
+    /// The page's text a command was sent, checked: an HTML page's text is what its bridge
+    /// reported, so it must come, and be no more than the bridge reports (`MAX_PAGE_TEXT`). Any
+    /// other note's text is its file's, so what came with it is dropped. In memory only.
+    fn page(&self, page: Option<Vec<PageBlock>>) -> Result<Option<Vec<PageBlock>>, String> {
+        if doc_kind(&self.note_name) != Some(DocKind::Html) {
+            return Ok(None);
+        }
+        let page = page.ok_or(NO_PAGE_TEXT)?;
+        if page_text_len(&page) > MAX_PAGE_TEXT {
+            return Err(PAGE_TOO_LONG.to_owned());
+        }
+        Ok(Some(page))
+    }
+
+    /// Reads the note, and its text as the review anchors read it, with its fingerprint: an HTML
+    /// page's from the blocks its bridge reported (`page`, see `NoteText::of_page`), any other's
+    /// by its kind (`NoteText::of_note`).
+    fn read(&self, page: Option<&[PageBlock]>) -> Result<NoteText, String> {
+        let source = read_text(&self.note).map_err(|e| e.message)?.text;
+        Ok(match page {
+            Some(blocks) => NoteText::of_page(blocks, &source),
+            None => NoteText::of_note(&self.note_name, &source),
+        })
     }
 }
 
 impl WindowState {
     /// The open note's comments. Without a sidecar the note isn't read. A file that can't take
     /// comments (see `review_target`) shows none, read-only with the reason, and nothing is read.
-    pub fn load_review(&self, path: &str) -> Result<ReviewPayload, String> {
+    /// An HTML page's come only with its text (`page`, see `Target::page`).
+    pub fn load_review(
+        &self,
+        path: &str,
+        page: Option<Vec<PageBlock>>,
+    ) -> Result<ReviewPayload, String> {
         let target = self.open_target(path)?;
         if let Some(refusal) = target.refusal() {
             return Ok(self.review_payload(&target, None, Some(refusal.to_owned())));
         }
+        let page = target.page(page)?;
         if let Err(e) = fs::metadata(&target.sidecar) {
             if e.kind() == io::ErrorKind::NotFound {
                 return Ok(self.review_payload(&target, None, None));
@@ -65,17 +99,23 @@ impl WindowState {
         let Some(review) = loaded.review else {
             return Ok(self.review_payload(&target, None, loaded.read_only));
         };
-        let source = read_text(&target.note).map_err(|e| e.message)?.text;
-        Ok(self.review_payload(&target, Some((&review, &source)), loaded.read_only))
+        let note = target.read(page.as_deref())?;
+        Ok(self.review_payload(&target, Some((&review, &note)), loaded.read_only))
     }
 
     /// Applies `op` to the open note's sidecar, creating it if need be, and returns the comments
-    /// as saved.
-    pub fn review_op(&self, path: &str, op: ReviewOp) -> Result<ReviewPayload, String> {
+    /// as saved. An HTML page's take its text (`page`, see `Target::page`).
+    pub fn review_op(
+        &self,
+        path: &str,
+        op: ReviewOp,
+        page: Option<Vec<PageBlock>>,
+    ) -> Result<ReviewPayload, String> {
         let target = self.review_target(path)?;
-        let source = read_text(&target.note).map_err(|e| e.message)?.text;
+        let page = target.page(page)?;
+        let note = target.read(page.as_deref())?;
         let now = iso_utc(SystemTime::now());
-        let saved = store::apply_op(&target.sidecar, &target.note_name, &source, &op, &now);
+        let saved = store::apply_op_on(&target.sidecar, &target.note_name, &note, &op, &now);
         let (review, _) = saved.map_err(|e| {
             log::warn!(
                 "couldn't save a review comment to {}: {e}",
@@ -83,7 +123,7 @@ impl WindowState {
             );
             e.to_string()
         })?;
-        Ok(self.review_payload(&target, Some((&review, &source)), None))
+        Ok(self.review_payload(&target, Some((&review, &note)), None))
     }
 
     /// Whether review comments are on.
@@ -129,23 +169,18 @@ impl WindowState {
         })
     }
 
-    /// The payload for `found`, a review and the note's text, with each comment found in the
-    /// text again, read as the note's kind reads it (`TextMap::of_note`). Comment bodies render
-    /// as Markdown beside the note, so their links follow a note's rules.
+    /// The payload for `found`, a review and the note's text (`Target::read`), with each comment
+    /// found in the text again. Comment bodies render as Markdown beside the note, so their links
+    /// follow a note's rules.
     fn review_payload(
         &self,
         target: &Target,
-        found: Option<(&Review, &str)>,
+        found: Option<(&Review, &NoteText)>,
         read_only: Option<String>,
     ) -> ReviewPayload {
-        let (text, resolved) = match found {
-            Some((review, source)) => {
-                let text = TextMap::of_note(&target.note_name, source);
-                let resolved = resolve_all(review, &text, &fingerprint(source));
-                (Some(text), resolved)
-            }
-            None => (None, Vec::new()),
-        };
+        let resolved = found.map_or_else(Vec::new, |(review, note)| {
+            resolve_all(review, &note.text, &note.fingerprint)
+        });
         let index = self.index();
         let mapper = self.mapper();
         let hosts = read(&self.app.trust).hosts();
@@ -157,7 +192,7 @@ impl WindowState {
                 sidecar: &target.sidecar,
                 review: found.map(|(review, _)| review),
                 resolved: &resolved,
-                text: text.as_ref(),
+                text: found.map(|(_, note)| &note.text),
                 read_only,
                 note_wsl: mapper.to_wsl(&target.note),
                 sidecar_wsl: mapper.to_wsl(&target.sidecar),
@@ -220,7 +255,7 @@ mod tests {
         let (f, note) = with_open_note();
         // Gone since it opened: a load that read the note would fail.
         fs::remove_file(&note).unwrap();
-        let payload = f.state.load_review(&path_string(&note)).unwrap();
+        let payload = f.state.load_review(&path_string(&note), None).unwrap();
         let sidecar = note.with_file_name("tide.review.md");
         assert!(!payload.exists);
         assert!(payload.comments.is_empty());
@@ -238,7 +273,7 @@ mod tests {
         let path = path_string(&note);
         let payload = f
             .state
-            .review_op(&path, add("Why 50? See ![chart](chart.png)."))
+            .review_op(&path, add("Why 50? See ![chart](chart.png)."), None)
             .unwrap();
         let sidecar = note.with_file_name("tide.review.md");
         assert!(sidecar.is_file());
@@ -274,7 +309,7 @@ mod tests {
         let html = &comment.entries[0].html;
         assert!(html.contains(&format!(r#"src="{chart}""#)), "{html}");
 
-        let loaded = f.state.load_review(&path).unwrap();
+        let loaded = f.state.load_review(&path, None).unwrap();
         assert!(loaded.exists);
         let [again] = loaded.comments.as_slice() else {
             panic!("{:?}", loaded.comments);
@@ -292,7 +327,9 @@ mod tests {
             text: "Agreed.".to_owned(),
         };
         assert_eq!(
-            f.state.review_op(&path_string(&note), reply).unwrap_err(),
+            f.state
+                .review_op(&path_string(&note), reply, None)
+                .unwrap_err(),
             "That comment no longer exists."
         );
         assert!(!note.with_file_name("tide.review.md").exists());
@@ -304,46 +341,48 @@ mod tests {
         let note = f.dir.file("notes/tide.md", NOTE);
         let other = f.dir.file("notes/other.md", NOTE);
         assert_eq!(
-            f.state.load_review(&path_string(&note)).unwrap_err(),
+            f.state.load_review(&path_string(&note), None).unwrap_err(),
             NOT_OPEN,
             "nothing is open yet"
         );
         opened_path(&f.state.open_document(&path_string(&note)));
         assert_eq!(
-            f.state.load_review(&path_string(&other)).unwrap_err(),
+            f.state.load_review(&path_string(&other), None).unwrap_err(),
             NOT_OPEN
         );
         assert_eq!(
             f.state
-                .review_op(&path_string(&other), add("Why 50?"))
+                .review_op(&path_string(&other), add("Why 50?"), None)
                 .unwrap_err(),
             NOT_OPEN
         );
         assert!(!other.with_file_name("other.review.md").exists());
         // The open note's name, but not its absolute path.
-        assert_eq!(f.state.load_review("tide.md").unwrap_err(), NOT_OPEN);
+        assert_eq!(f.state.load_review("tide.md", None).unwrap_err(), NOT_OPEN);
         assert_eq!(
-            f.state.review_op("tide.md", add("Why 50?")).unwrap_err(),
+            f.state
+                .review_op("tide.md", add("Why 50?"), None)
+                .unwrap_err(),
             NOT_OPEN
         );
         assert!(!note.with_file_name("tide.review.md").exists());
         // A relative path is refused even when it is the current one, which no open makes it.
         f.state
             .make_current(f.state.next_seq(), Path::new("tide.md"), None);
-        assert_eq!(f.state.load_review("tide.md").unwrap_err(), NOT_OPEN);
+        assert_eq!(f.state.load_review("tide.md", None).unwrap_err(), NOT_OPEN);
         assert_eq!(
-            f.state.review_op("tide.md", add("Why 50?")).unwrap_err(),
+            f.state
+                .review_op("tide.md", add("Why 50?"), None)
+                .unwrap_err(),
             NOT_OPEN
         );
     }
 
-    /// A page takes no comments yet (and says when it will), a PDF never does (and says so), and a
-    /// sidecar takes none of its own.
+    /// A PDF never takes comments (and says so), and a sidecar takes none of its own.
     #[test]
-    fn refuses_a_page_a_pdf_or_a_sidecar() {
+    fn refuses_a_pdf_or_a_sidecar() {
         let f = fixture(profile(&[]), FakeHost::default());
         for (name, reason) in [
-            ("a/tide.html", "Comments on pages arrive in Task 5."),
             ("b/plan.review.md", NOT_A_NOTE),
             ("c/PLAN.Review.MD", NOT_A_NOTE),
             ("d/brief.pdf", "PDFs don't take comments."),
@@ -353,17 +392,400 @@ mod tests {
             let path = path_string(&doc);
             opened_path(&f.state.open_document(&path));
             assert_eq!(
-                f.state.review_op(&path, add("Why 50?")).unwrap_err(),
+                f.state.review_op(&path, add("Why 50?"), None).unwrap_err(),
                 reason,
                 "{name}"
             );
             assert!(!sidecar_path(&doc).exists(), "{name}");
             // Shown read-only with the reason, so nothing offers to add one.
-            let loaded = f.state.load_review(&path).unwrap();
+            let loaded = f.state.load_review(&path, None).unwrap();
             assert!(!loaded.exists, "{name}");
             assert!(loaded.comments.is_empty(), "{name}");
             assert_eq!(loaded.read_only.as_deref(), Some(reason), "{name}");
         }
+    }
+
+    /// An invented page, laid out as `fixtures/vault/artifacts/report.html` is, whose script builds
+    /// the paragraph it adds from words, so that text is nowhere in the source.
+    const REPORT: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Weekly report</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Weekly report</h1>
+<p>An invented report for Lectern's tests: the lanternfish survey, week by week.</p>
+<h2>Results</h2>
+<p>Sign-ups rose steadily, but conversion dipped in week 3 before recovering.</p>
+<table>
+<tr><th>Week</th><th>Sign-ups</th></tr>
+<tr><td>3</td><td>151</td></tr>
+</table>
+<h2>Next steps</h2>
+<p>Check the week 3 dip against the survey calendar, as the <a href="other.html">other page</a> does.</p>
+<script>
+  var note = document.createElement("p");
+  note.textContent = ["Added", "by", "a", "script"].join(" ");
+  document.body.appendChild(note);
+</script>
+</body>
+</html>
+"#;
+
+    /// What the bridge reports of `REPORT` as it runs: its blocks, the script's paragraph last.
+    fn report_page() -> Vec<PageBlock> {
+        let block = |text: &str, heading_level: Option<u8>| PageBlock {
+            text: text.to_owned(),
+            heading_level,
+        };
+        vec![
+            block("Weekly report", Some(1)),
+            block(
+                "An invented report for Lectern's tests: the lanternfish survey, week by week.",
+                None,
+            ),
+            block("Results", Some(2)),
+            block(
+                "Sign-ups rose steadily, but conversion dipped in week 3 before recovering.",
+                None,
+            ),
+            block("Week", None),
+            block("Sign-ups", None),
+            block("3", None),
+            block("151", None),
+            block("Next steps", Some(2)),
+            block(
+                "Check the week 3 dip against the survey calendar, as the other page does.",
+                None,
+            ),
+            block("Added by a script", None),
+        ]
+    }
+
+    /// A comment on `quote`, selected in a page just after the page's text `prefix`: a page's
+    /// selection carries no lines.
+    fn add_on_page(quote: &str, prefix: &str, text: &str) -> ReviewOp {
+        ReviewOp::Add {
+            anchor: NewAnchor {
+                start_line: 0,
+                end_line: 0,
+                quote: quote.to_owned(),
+                prefix: prefix.to_owned(),
+            },
+            text: text.to_owned(),
+        }
+    }
+
+    /// The page's text from UTF-16 offset `start` up to `end`, as the UI cuts it.
+    fn utf16_slice(page: &[PageBlock], start: Option<u32>, end: Option<u32>) -> String {
+        let joined: Vec<&str> = page.iter().map(|b| b.text.as_str()).collect();
+        let units: Vec<u16> = joined.join(" ").encode_utf16().collect();
+        let (start, end) = (start.unwrap() as usize, end.unwrap() as usize);
+        String::from_utf16(&units[start..end]).unwrap()
+    }
+
+    /// An HTML page takes comments on the text its bridge reported: `<page>.html.review.md` gets
+    /// the quote, the line of its paragraph in the page's source and its heading path, and the
+    /// comment is found on the same words when the page opens again.
+    #[test]
+    fn a_page_takes_comments_on_the_text_its_bridge_reported() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let empty = f.state.load_review(&path, Some(report_page())).unwrap();
+        assert!(!empty.exists);
+        assert_eq!(empty.read_only, None);
+
+        let saved = f
+            .state
+            .review_op(
+                &path,
+                add_on_page(
+                    "conversion dipped in week 3",
+                    "Results Sign-ups rose steadily, but ",
+                    "weekly, not daily",
+                ),
+                Some(report_page()),
+            )
+            .unwrap();
+        let sidecar = page.with_file_name("report.html.review.md");
+        assert_eq!(saved.sidecar_path, path_string(&sidecar));
+        let content = fs::read_to_string(&sidecar).unwrap();
+        assert!(content.contains("\nnote: report.html\n"), "{content}");
+        assert!(
+            content.contains("\n## C1 · open · L12 · Weekly report › Results\n<!-- anchor prefix="),
+            "{content}"
+        );
+        assert!(
+            content.contains("\n> conversion dipped in week 3\n\n**You:** weekly, not daily\n"),
+            "{content}"
+        );
+        assert_eq!(
+            fs::read_to_string(&page).unwrap(),
+            REPORT,
+            "the page changed"
+        );
+
+        let loaded = f.state.load_review(&path, Some(report_page())).unwrap();
+        let [c1] = loaded.comments.as_slice() else {
+            panic!("{:?}", loaded.comments);
+        };
+        assert_eq!(c1.state, AnchorState::Anchored);
+        assert_eq!((c1.start_line, c1.end_line), (12, 12));
+        assert_eq!(c1.heading_path, ["Weekly report", "Results"]);
+        assert_eq!(
+            utf16_slice(&report_page(), c1.text_start, c1.text_end),
+            "conversion dipped in week 3"
+        );
+    }
+
+    /// Text only a script makes is anchored by its quote all the same; its line is that of the
+    /// block before it found in the source.
+    #[test]
+    fn a_comment_on_text_a_script_made_takes_the_line_before_it() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let saved = f
+            .state
+            .review_op(
+                &path,
+                add_on_page("by a script", "other page does. Added ", "Which script?"),
+                Some(report_page()),
+            )
+            .unwrap();
+        let [c1] = saved.comments.as_slice() else {
+            panic!("{:?}", saved.comments);
+        };
+        assert_eq!(c1.state, AnchorState::Anchored);
+        assert_eq!((c1.start_line, c1.end_line), (18, 18));
+        assert_eq!(c1.heading_path, ["Weekly report", "Next steps"]);
+        assert_eq!(
+            utf16_slice(&report_page(), c1.text_start, c1.text_end),
+            "by a script"
+        );
+    }
+
+    /// Edited so the sentence moves down, the page's comment follows it; reworded, it is found as
+    /// moved. Never lost.
+    #[test]
+    fn a_page_comment_follows_its_text_through_edits() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        f.state
+            .review_op(
+                &path,
+                add_on_page(
+                    "conversion dipped in week 3 before recovering",
+                    "Sign-ups rose steadily, but ",
+                    "weekly, not daily",
+                ),
+                Some(report_page()),
+            )
+            .unwrap();
+
+        let added = "<p>A new paragraph, added above the results.</p>\n";
+        fs::write(
+            &page,
+            REPORT.replace("<h2>Results</h2>\n", &format!("{added}<h2>Results</h2>\n")),
+        )
+        .unwrap();
+        let mut moved_down = report_page();
+        moved_down.insert(
+            2,
+            PageBlock {
+                text: "A new paragraph, added above the results.".to_owned(),
+                heading_level: None,
+            },
+        );
+        let loaded = f
+            .state
+            .load_review(&path, Some(moved_down.clone()))
+            .unwrap();
+        let c1 = &loaded.comments[0];
+        assert_eq!(c1.state, AnchorState::Anchored);
+        assert_eq!((c1.start_line, c1.end_line), (13, 13));
+        assert_eq!(
+            utf16_slice(&moved_down, c1.text_start, c1.text_end),
+            "conversion dipped in week 3 before recovering"
+        );
+
+        let reworded = |text: &str| text.replace("dipped in week 3", "dipped sharply in week 3");
+        fs::write(&page, reworded(REPORT)).unwrap();
+        let page_now: Vec<PageBlock> = report_page()
+            .into_iter()
+            .map(|b| PageBlock {
+                text: reworded(&b.text),
+                ..b
+            })
+            .collect();
+        let loaded = f.state.load_review(&path, Some(page_now)).unwrap();
+        let c1 = &loaded.comments[0];
+        assert_eq!(c1.state, AnchorState::Moved);
+        assert_eq!((c1.start_line, c1.end_line), (12, 12));
+    }
+
+    /// A page's comments are fingerprinted by the text it showed, not by its file: the same HTML
+    /// shows other text when a script writes something else or scripts are turned off, and a quote
+    /// gone from what it shows is looked for, not kept where it was.
+    #[test]
+    fn a_page_showing_other_text_from_the_same_file_looks_for_its_comments_again() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let saved = f
+            .state
+            .review_op(
+                &path,
+                add_on_page("Added by a script", "", "Which script?"),
+                Some(report_page()),
+            )
+            .unwrap();
+        assert_eq!(saved.comments[0].state, AnchorState::Anchored);
+        // The same file, with scripts off: the script's paragraph isn't shown.
+        let mut scriptless = report_page();
+        scriptless.pop();
+        let loaded = f.state.load_review(&path, Some(scriptless)).unwrap();
+        assert_eq!(loaded.comments[0].state, AnchorState::Detached);
+        assert_eq!(loaded.comments[0].text_start, None);
+        // Scripts back on: found again.
+        let loaded = f.state.load_review(&path, Some(report_page())).unwrap();
+        assert_eq!(loaded.comments[0].state, AnchorState::Anchored);
+    }
+
+    /// A page's comments need the text its bridge reported, no more of it than the bridge sends;
+    /// without it nothing is read or written.
+    #[test]
+    fn a_page_without_its_text_or_with_too_much_is_refused() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let op = || add_on_page("conversion dipped in week 3", "", "weekly, not daily");
+        assert_eq!(f.state.load_review(&path, None).unwrap_err(), NO_PAGE_TEXT);
+        assert_eq!(
+            f.state.review_op(&path, op(), None).unwrap_err(),
+            NO_PAGE_TEXT
+        );
+        let half = "x".repeat(MAX_PAGE_TEXT / 2);
+        let big = vec![
+            PageBlock {
+                text: half.clone(),
+                heading_level: None,
+            },
+            PageBlock {
+                text: half,
+                heading_level: None,
+            },
+        ];
+        assert_eq!(
+            f.state.load_review(&path, Some(big.clone())).unwrap_err(),
+            PAGE_TOO_LONG
+        );
+        assert_eq!(
+            f.state.review_op(&path, op(), Some(big)).unwrap_err(),
+            PAGE_TOO_LONG
+        );
+        assert!(!sidecar_path(&page).exists());
+        // A note's text is its file's: blocks sent with it are dropped.
+        let note = f.dir.file("notes/tide.md", NOTE);
+        let note_path = path_string(&note);
+        opened_path(&f.state.open_document(&note_path));
+        let payload = f
+            .state
+            .review_op(&note_path, add("Why 50?"), Some(report_page()))
+            .unwrap();
+        assert_eq!(payload.comments[0].heading_path, ["Tide sync", "Batching"]);
+    }
+
+    /// A file beside a page named as its sidecar, without a sidecar's frontmatter, isn't one
+    /// Lectern made: shown read-only, never written.
+    #[test]
+    fn a_pages_sidecar_without_frontmatter_is_read_only() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("artifacts/report.html", REPORT);
+        let own = "# My notes on the report\n\n## C1 · open · L12\n> conversion dipped\n";
+        let sidecar = f.dir.file("artifacts/report.html.review.md", own);
+        let path = path_string(&page);
+        opened_path(&f.state.open_document(&path));
+        let loaded = f.state.load_review(&path, Some(report_page())).unwrap();
+        assert!(loaded.exists);
+        assert!(loaded.read_only.is_some());
+        assert!(f
+            .state
+            .review_op(
+                &path,
+                add_on_page("conversion dipped in week 3", "", "weekly, not daily"),
+                Some(report_page()),
+            )
+            .is_err());
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), own);
+    }
+
+    /// A page saved in UTF-16 (by its byte order mark, either way round) is read for its lines like
+    /// any other: its comments load, anchored, and take new ones; a UTF-16 text file opens.
+    #[test]
+    fn a_utf16_page_with_a_sidecar_loads_its_comments() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        for (name, little) in [("le.html", true), ("be.html", false)] {
+            let units = REPORT.encode_utf16().flat_map(|u| {
+                if little {
+                    u.to_le_bytes()
+                } else {
+                    u.to_be_bytes()
+                }
+            });
+            let bom: [u8; 2] = if little { [0xFF, 0xFE] } else { [0xFE, 0xFF] };
+            let page = f.dir.0.join("artifacts").join(name);
+            fs::create_dir_all(page.parent().unwrap()).unwrap();
+            fs::write(&page, bom.into_iter().chain(units).collect::<Vec<u8>>()).unwrap();
+            fs::write(
+                sidecar_path(&page),
+                format!("---\nlectern-review: 1\nnote: {name}\n---\n\n## C1 · open · L12 · Results\n> conversion dipped in week 3\n\n**Claude (question):** Weekly?\n"),
+            )
+            .unwrap();
+            let path = path_string(&page);
+            opened_path(&f.state.open_document(&path));
+
+            let loaded = f.state.load_review(&path, Some(report_page())).unwrap();
+            assert_eq!(loaded.read_only, None, "{name}");
+            let [c1] = loaded.comments.as_slice() else {
+                panic!("{name}: {:?}", loaded.comments);
+            };
+            assert_eq!(c1.state, AnchorState::Anchored, "{name}");
+            assert_eq!((c1.start_line, c1.end_line), (12, 12), "{name}");
+            assert_eq!(
+                utf16_slice(&report_page(), c1.text_start, c1.text_end),
+                "conversion dipped in week 3"
+            );
+            let saved = f
+                .state
+                .review_op(
+                    &path,
+                    add_on_page("Added by a script", "", "Which script?"),
+                    Some(report_page()),
+                )
+                .unwrap();
+            assert_eq!(saved.comments[1].start_line, 18, "{name}");
+        }
+        let text = f.dir.0.join("notes").join("utf16.txt");
+        fs::create_dir_all(text.parent().unwrap()).unwrap();
+        let units = "Readme in UTF-16.\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes);
+        fs::write(
+            &text,
+            [0xFF, 0xFE].into_iter().chain(units).collect::<Vec<u8>>(),
+        )
+        .unwrap();
+        opened_path(&f.state.open_document(&path_string(&text)));
     }
 
     const TEXT: &str = "Readme for the vault.\nEvery word is invented.\n\nThe lanternfish survey is plain text,\nso search reads it.\n";
@@ -383,7 +805,7 @@ mod tests {
         let path = path_string(&text);
         opened_path(&f.state.open_document(&path));
 
-        let loaded = f.state.load_review(&path).unwrap();
+        let loaded = f.state.load_review(&path, None).unwrap();
         assert!(loaded.exists);
         assert_eq!(loaded.read_only, None);
         assert_eq!(loaded.sidecar_path, path_string(&sidecar));
@@ -402,7 +824,7 @@ mod tests {
             },
             text: "Which survey?".to_owned(),
         };
-        let payload = f.state.review_op(&path, add).unwrap();
+        let payload = f.state.review_op(&path, add, None).unwrap();
         let ours = &payload.comments[1];
         assert_eq!(ours.state, AnchorState::Anchored);
         assert_eq!((ours.start_line, ours.end_line), (4, 5));
@@ -421,13 +843,13 @@ mod tests {
 
         // Edited elsewhere so the paragraph moves down: the comment follows it.
         fs::write(&text, format!("A new first line.\n\n{TEXT}")).unwrap();
-        let loaded = f.state.load_review(&path).unwrap();
+        let loaded = f.state.load_review(&path, None).unwrap();
         let moved = &loaded.comments[1];
         assert_eq!(moved.state, AnchorState::Anchored);
         assert_eq!((moved.start_line, moved.end_line), (6, 7));
         // Reworded: found again by its words, as moved.
         fs::write(&text, TEXT.replace("is plain text", "is now plain text")).unwrap();
-        let loaded = f.state.load_review(&path).unwrap();
+        let loaded = f.state.load_review(&path, None).unwrap();
         let reworded = &loaded.comments[1];
         assert_eq!(reworded.state, AnchorState::Moved);
         assert_eq!((reworded.start_line, reworded.end_line), (4, 5));
@@ -438,22 +860,22 @@ mod tests {
         let (f, note) = with_open_note();
         let path = path_string(&note);
         let sidecar = note.with_file_name("tide.review.md");
-        f.state.review_op(&path, add("Why 50?")).unwrap();
+        f.state.review_op(&path, add("Why 50?"), None).unwrap();
         let saved = fs::read(&sidecar).unwrap();
         set_reviews(&f, false);
-        assert_eq!(f.state.load_review(&path).unwrap_err(), FEATURE_OFF);
+        assert_eq!(f.state.load_review(&path, None).unwrap_err(), FEATURE_OFF);
         assert_eq!(
             f.state
-                .review_op(&path, add("And why not 100?"))
+                .review_op(&path, add("And why not 100?"), None)
                 .unwrap_err(),
             FEATURE_OFF
         );
         assert_eq!(fs::read(&sidecar).unwrap(), saved);
         // Checked first: before trust and before the open note.
         let unc = r"\\lectern-untrusted.invalid\share\a.md";
-        assert_eq!(f.state.load_review(unc).unwrap_err(), FEATURE_OFF);
+        assert_eq!(f.state.load_review(unc, None).unwrap_err(), FEATURE_OFF);
         set_reviews(&f, true);
-        assert!(f.state.load_review(&path).unwrap().exists);
+        assert!(f.state.load_review(&path, None).unwrap().exists);
     }
 
     #[test]
@@ -465,8 +887,11 @@ mod tests {
         f.state
             .make_current(f.state.next_seq(), Path::new(doc), None);
         let started = Instant::now();
-        assert_eq!(f.state.load_review(doc).unwrap_err(), refusal);
-        assert_eq!(f.state.review_op(doc, add("Why 50?")).unwrap_err(), refusal);
+        assert_eq!(f.state.load_review(doc, None).unwrap_err(), refusal);
+        assert_eq!(
+            f.state.review_op(doc, add("Why 50?"), None).unwrap_err(),
+            refusal
+        );
         assert!(started.elapsed() < Duration::from_millis(200));
     }
 
@@ -496,7 +921,7 @@ mod tests {
         wait_until("the root is indexed", || settled(&f, &root));
         let path = path_string(&note);
         opened_path(&f.state.open_document(&path));
-        f.state.review_op(&path, add("Why 50?")).unwrap();
+        f.state.review_op(&path, add("Why 50?"), None).unwrap();
         let count = |f: &Fixture| {
             f.state
                 .index()

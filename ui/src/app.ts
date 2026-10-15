@@ -344,11 +344,12 @@ export class App {
     this.backend.on<PageLoads>("page-loads", (loads) => {
       this.view.pageLoads(loads);
     });
-    // Lectern's shortcuts pressed inside a frame, which only Rust sees.
+    // Lectern's shortcuts pressed inside a frame, which only Rust sees. Esc that nothing took goes
+    // on to the comments, as it does in the window.
     this.backend.on<FrameKey>("frame-key", (key) => {
       const action = actionForKey(key);
-      if (action !== null && this.layout.app.isConnected) {
-        this.actions.run(action);
+      if (action !== null && this.layout.app.isConnected && !this.actions.run(action)) {
+        if (action === "escape") this.comments?.escape();
       }
     });
 
@@ -993,6 +994,21 @@ export class App {
     }
   }
 
+  /** The text selected in the HTML page on screen changed: the Comment button follows it. */
+  pageSelectionChanged(): void {
+    this.comments?.pageSelectionChanged();
+  }
+
+  /** The HTML page on screen scrolled, taking its selection with it. */
+  pageScrolled(): void {
+    this.comments?.pageScrolled();
+  }
+
+  /** The reader clicked text a comment marks in the HTML page on screen, at `offset`. */
+  pageCommentClicked(offset: number): void {
+    this.comments?.pageCommentClicked(offset);
+  }
+
   /** Whether comments show: the feature on and not hidden by the header toggle. */
   private commentsShown(): boolean {
     const s = this.state.settings;
@@ -1075,6 +1091,9 @@ export class App {
             this.view.follow(link);
           },
           onDoc: (cb) => this.on("doc", cb),
+          isPage: () => this.state.doc?.kind === "html",
+          page: () => this.view.page,
+          onPage: (cb) => this.on("page", cb),
           visible: () => this.commentsShown(),
           panelOpen: () => this.rightPanelOpen(),
           openPanel: () => {

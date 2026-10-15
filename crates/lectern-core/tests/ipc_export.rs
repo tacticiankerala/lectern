@@ -14,6 +14,7 @@ use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
 use lectern_core::page::{inject_script, page_policy};
 use lectern_core::review::anchor::AnchorState;
 use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
+use lectern_core::review::text::PageBlock;
 use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
@@ -78,6 +79,7 @@ fn ts_bindings_exported() {
         "PageLoads",
         "FrameFocus",
         "FrameKey",
+        "PageBlock",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -292,6 +294,11 @@ fn page_types_are_lowercase_and_camel_case() {
     assert!(
         key.contains("ctrl: boolean, shift: boolean, alt: boolean,"),
         "{key}"
+    );
+    // As the bridge reports a block: a heading's level only on a heading.
+    assert_eq!(
+        decl::<PageBlock>(),
+        "type PageBlock = { text: string, \n/**\n * 1 to 6 for a heading; none for any other block.\n */\nheadingLevel?: number, };"
     );
 }
 

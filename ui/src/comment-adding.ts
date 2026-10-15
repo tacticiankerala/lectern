@@ -23,7 +23,12 @@
 // - Re-attach mode turns the selection button into "Attach C<n> here" until it's used, cancelled
 //   or Esc is pressed, or the comment, the note or the comments' visibility goes.
 // - Every operation is for the note it was asked on (see `AddingHost.perform`).
+// - In an HTML page (comments-page.ts) there is no "+": a comment goes on the text selected in the
+//   page, as its bridge reports it, with the selection button placed by the selection's last line
+//   in the frame, which a scroll of the page hides; Ctrl+Alt+M with nothing selected comments on
+//   the block at the top of the page's view.
 import { CommentEditor, type EditorAnchor } from "./comment-editor";
+import { pageSelected, pageTopAnchor, type PageSurface } from "./comments-page";
 import {
   SKIP,
   blockForLine,
@@ -60,6 +65,8 @@ export interface AddingHost {
   readOnly: () => string | null;
   /** The note's visible text, indexed once per render (comments.ts); null without a note. */
   textIndex: () => TextIndex | null;
+  /** The HTML page on screen, once it has reported its text; null for anything else. */
+  page: () => PageSurface | null;
   /** Applies an operation to the note at `path`, after those before it (comments.ts). */
   perform: (op: ReviewOp, path: string) => Promise<Outcome>;
   /** Whether the note at `path` is still the one on screen. */
@@ -221,6 +228,10 @@ export class CommentAdding {
    * selected.
    */
   addFromSelection(): boolean {
+    const page = this.host.page();
+    if (page) {
+      return this.addFromPage(page);
+    }
     const range = this.selectionInDoc();
     if (range === null) {
       return false;
@@ -247,6 +258,11 @@ export class CommentAdding {
    */
   addAtTop(): void {
     this.ensureShown();
+    const page = this.host.page();
+    if (page) {
+      this.addOnPageTop(page);
+      return;
+    }
     const block = this.topBlock();
     if (block) {
       this.addOnBlock(block);
@@ -299,12 +315,28 @@ export class CommentAdding {
     const path = this.host.docPath();
     const note = path === null ? null : noteKey(path);
     this.showPlus(null);
+    // Its selection went with what was on screen (a page's is its frame's).
+    cancelAnimationFrame(this.selFrame);
+    this.dragging = false;
+    this.hideSelButton();
     if (this.editorNote !== note) {
       this.keepTyped();
       this.editor.close();
     }
     if (this.attach !== null && this.attach.note !== note) this.leaveAttach();
     this.restoreSoon();
+  }
+
+  /** The text selected in the HTML page on screen changed: the selection button follows it. */
+  pageSelectionChanged(): void {
+    this.syncSelButton();
+  }
+
+  /** The HTML page on screen scrolled: the selection button, placed by where it was, goes. */
+  pageScrolled(): void {
+    if (this.host.page()) {
+      this.hideSelButton();
+    }
   }
 
   /** Whether text typed for a new comment would be lost with the page: open, kept or saving. */
@@ -388,6 +420,39 @@ export class CommentAdding {
       quote,
       prefix: index ? textBefore(index, range) : "",
     };
+  }
+
+  /**
+   * `addFromSelection` in an HTML page: a comment on the text selected in it, by the selection's
+   * last line; in re-attach mode, the comment being re-attached moved to it. False when nothing
+   * in the page is selected.
+   */
+  private addFromPage(page: PageSurface): boolean {
+    const selected = pageSelected(page);
+    if (selected === null) {
+      return false;
+    }
+    this.hideSelButton();
+    if (!this.writable()) {
+      return true;
+    }
+    this.ensureShown();
+    if (this.attach !== null) {
+      void this.reattach(this.attach.id, selected.anchor);
+    } else {
+      this.openEditor(selected.anchor, selected.box);
+    }
+    return true;
+  }
+
+  /** A comment on the block at the top of an HTML page's view, the editor at the page's top. */
+  private addOnPageTop(page: PageSurface): void {
+    const anchor = pageTopAnchor(page);
+    if (anchor === null || !this.writable()) {
+      return;
+    }
+    const frame = page.frameBox();
+    this.openEditor(anchor, { left: frame.left + EDGE, top: frame.top, bottom: frame.top + EDGE });
   }
 
   /** A comment on a whole block: its lines and its text. */
@@ -600,14 +665,15 @@ export class CommentAdding {
   }
 
   /**
-   * The selection button: on the last line of the text selected in the note, once the selection
-   * is made, while comments may be added; "Attach C<n> here" in re-attach mode.
+   * The selection button: on the last line of the text selected in the note (or in the HTML page
+   * on screen), once the selection is made, while comments may be added; "Attach C<n> here" in
+   * re-attach mode.
    */
   private syncSelButton(): void {
     const allowed =
       this.offering() && !this.dragging && (this.attach !== null || !this.editor.isOpen);
-    const range = allowed ? this.selectionInDoc() : null;
-    if (range === null) {
+    const end = allowed ? this.selectionEnd() : null;
+    if (end === null) {
       this.hideSelButton();
       return;
     }
@@ -617,7 +683,7 @@ export class CommentAdding {
       this.attach === null ? "Comment" : `Attach C${String(this.attach.id)} here`;
     this.selButton.hidden = false;
     const at = selButtonPlace(
-      endRect(range),
+      end,
       { width: this.selButton.offsetWidth, height: this.selButton.offsetHeight },
       {
         left: box.left,
@@ -634,6 +700,19 @@ export class CommentAdding {
 
   private hideSelButton(): void {
     this.selButton.hidden = true;
+  }
+
+  /**
+   * Where the selection's last line is in the viewport: the note's, or the HTML page's as its
+   * bridge reported it; null when nothing is selected.
+   */
+  private selectionEnd(): Box | null {
+    const page = this.host.page();
+    if (page) {
+      return pageSelected(page)?.box ?? null;
+    }
+    const range = this.selectionInDoc();
+    return range && endRect(range);
   }
 
   /**
@@ -730,17 +809,29 @@ export class CommentAdding {
     }
   };
 
-  /** Esc, when nothing before it took it: leaves re-attach mode, else hides the selection button. */
+  /**
+   * Esc, when nothing before it took it, pressed in the window or (from Rust) inside an HTML
+   * page's frame: leaves re-attach mode, else hides the selection button. False when neither was
+   * showing.
+   */
+  escape(): boolean {
+    if (this.attach !== null) {
+      this.leaveAttach();
+      return true;
+    }
+    if (!this.selButton.hidden) {
+      this.hideSelButton();
+      return true;
+    }
+    return false;
+  }
+
   private readonly onKey = (e: KeyboardEvent): void => {
     if (e.key !== "Escape" || e.defaultPrevented || e.ctrlKey || e.altKey) {
       return;
     }
-    if (this.attach !== null) {
+    if (this.escape()) {
       e.preventDefault();
-      this.leaveAttach();
-    } else if (!this.selButton.hidden) {
-      e.preventDefault();
-      this.hideSelButton();
     }
   };
 }

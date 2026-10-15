@@ -4,8 +4,10 @@
 // tagged `lx: 1`, and listens to nothing but its parent window.
 //
 // To Lectern: `ready` once the page has loaded (its title, headings, text blocks, scroll state and
-// colour scheme), `blocks` again when the page changes, `selection`, `scroll`, `scheme`, and `link`
-// for a clicked link, which Lectern follows by its own rules instead of the frame.
+// colour scheme), `blocks` again when the page changes, `selection` (with the box of its last line,
+// to place Lectern's Comment button by), `scroll`, `scheme`, `link` for a clicked link, which
+// Lectern follows by its own rules instead of the frame, and `comment-click` with the offset of a
+// plain click on text a comment marks.
 // From Lectern: `theme` (the highlight colours), `paint` and `clear` (highlights by layer), and
 // `scroll-to` (a fraction of the page, or an offset into its text).
 //
@@ -609,8 +611,7 @@
         return;
       }
       hadSelection = true;
-      var box =
-        typeof range.getBoundingClientRect === "function" ? range.getBoundingClientRect() : null;
+      var box = lastBox(range);
       post({
         type: "selection",
         selection: {
@@ -641,7 +642,54 @@
     });
   }
 
-  /** A click on a link: Lectern follows it instead, unless it is the page's own to handle. */
+  /** Where `range`'s last line is in the viewport: its last box with a size, else its bounds. */
+  function lastBox(range) {
+    var rects = typeof range.getClientRects === "function" ? range.getClientRects() : null;
+    for (var i = rects ? rects.length - 1 : -1; i >= 0; i--) {
+      if (rects[i].width > 0 || rects[i].height > 0) {
+        return rects[i];
+      }
+    }
+    return typeof range.getBoundingClientRect === "function" ? range.getBoundingClientRect() : null;
+  }
+
+  /** The page point at `x`, `y` in the viewport, as `[node, offset]`; null when there's none. */
+  function caretAt(x, y) {
+    if (typeof document.caretPositionFromPoint === "function") {
+      var position = document.caretPositionFromPoint(x, y);
+      return position ? [position.offsetNode, position.offset] : null;
+    }
+    if (typeof document.caretRangeFromPoint === "function") {
+      var range = document.caretRangeFromPoint(x, y);
+      return range ? [range.startContainer, range.startOffset] : null;
+    }
+    return null;
+  }
+
+  /**
+   * A plain click (no link, no selection made by it) on text a comment marks: where it fell goes
+   * to Lectern, which shows that comment.
+   */
+  function clickedMark(e) {
+    var marks = painted.comment;
+    var selection = window.getSelection();
+    if (!marks || marks.length === 0 || (selection && !selection.isCollapsed)) {
+      return;
+    }
+    var caret = caretAt(e.clientX, e.clientY);
+    var offset = caret ? offsetOf(caret[0], caret[1], true) : -1;
+    for (var i = 0; offset >= 0 && i < marks.length; i++) {
+      if (marks[i].start <= offset && offset <= marks[i].end) {
+        post({ type: "comment-click", offset: offset });
+        return;
+      }
+    }
+  }
+
+  /**
+   * A click on a link: Lectern follows it instead, unless it is the page's own to handle. A click
+   * elsewhere may be on text a comment marks.
+   */
   function clicked(e) {
     if (e.defaultPrevented || e.button !== 0) {
       return;
@@ -650,6 +698,7 @@
     var link =
       target && typeof target.closest === "function" ? target.closest("a[href], area[href]") : null;
     if (!link) {
+      clickedMark(e);
       return;
     }
     var href = link.getAttribute("href") || "";

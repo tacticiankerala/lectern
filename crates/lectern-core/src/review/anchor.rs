@@ -50,6 +50,9 @@ pub struct Resolved {
     pub current_text: Option<String>,
     /// When detached: the deepest heading of the comment's path still in the note, and its line.
     pub pinned_heading: Option<(String, u32)>,
+    /// Where that heading starts in [`TextMap::text`], in bytes: which of the headings with its
+    /// text it is.
+    pub pinned_at: Option<usize>,
 }
 
 /// A quote as stored: `normalized`, cut to [`QUOTE_CAP`] characters and an ellipsis when longer.
@@ -107,8 +110,17 @@ pub struct AnchorParts {
 /// lines, prefix and suffix. Only its first [`QUOTE_CAP`] characters are stored as the quote. A
 /// selection that isn't there whole is looked for by that excerpt. If neither is there (the UI
 /// and core disagree, or the note changed under the reader), the given lines are kept with an
-/// empty fingerprint, so they are never trusted.
-pub fn make_anchor(text: &TextMap, a: &NewAnchor, fp: &str, now: &str) -> AnchorParts {
+/// empty fingerprint, so they are never trusted. An anchor that came with no lines (line 0: a
+/// page's selection carries none) is then placed as a detached comment is pinned, never on line
+/// 0: at the deepest heading of the `reattached` comment's path still in the text, else on the
+/// text's first line, else on line 1.
+pub fn make_anchor(
+    text: &TextMap,
+    a: &NewAnchor,
+    reattached: Option<&Comment>,
+    fp: &str,
+    now: &str,
+) -> AnchorParts {
     let selection = normalize(&a.quote);
     let quote = cap_quote(&selection);
     let excerpt = needle(&quote);
@@ -132,12 +144,25 @@ pub fn make_anchor(text: &TextMap, a: &NewAnchor, fp: &str, now: &str) -> Anchor
                 start_line,
                 end_line,
                 quote,
-                heading_path: text.heading_path_at(start_line),
+                heading_path: text.heading_path_of(s, start_line),
                 meta: meta(
                     text.before(s, CONTEXT_CHARS),
                     text.after(e, CONTEXT_CHARS),
                     fp,
                 ),
+            }
+        }
+        None if start == 0 => {
+            let (line, at) = match reattached.and_then(|c| pinned_index(c, text)) {
+                Some(h) => (text.headings()[h].line, text.heading_start(h).unwrap_or(0)),
+                None => (text.top_line().unwrap_or(1), 0),
+            };
+            AnchorParts {
+                start_line: line,
+                end_line: line,
+                quote,
+                heading_path: text.heading_path_of(at, line),
+                meta: meta(String::new(), String::new(), ""),
             }
         }
         None => AnchorParts {
@@ -236,6 +261,7 @@ fn resolve<'t>(
         span,
         current_text: None,
         pinned_heading: None,
+        pinned_at: None,
     };
     let stored = (c.start_line, c.end_line);
     let meta = c.anchor.as_ref();
@@ -270,7 +296,11 @@ fn resolve<'t>(
     }
 
     let mut detached = at(AnchorState::Detached, stored, None);
-    detached.pinned_heading = pinned_heading(c, text);
+    if let Some(h) = pinned_index(c, text) {
+        let heading = &text.headings()[h];
+        detached.pinned_heading = Some((heading.text.clone(), heading.line));
+        detached.pinned_at = text.heading_start(h);
+    }
     detached
 }
 
@@ -495,15 +525,16 @@ fn remove(have: &mut [u16], need: &[u16], id: u32) -> bool {
     matched
 }
 
-/// The deepest heading of the comment's path that's still in the note, and its line: of the
-/// headings with that text, the one nearest the comment's stored line.
-fn pinned_heading(c: &Comment, text: &TextMap) -> Option<(String, u32)> {
+/// The index in the note's headings of the deepest heading of the comment's path that's still in
+/// the note: of the headings with that text, the one nearest the comment's stored line.
+fn pinned_index(c: &Comment, text: &TextMap) -> Option<usize> {
     c.heading_path.iter().rev().find_map(|wanted| {
         text.headings()
             .iter()
-            .filter(|h| h.text == *wanted)
-            .min_by_key(|h| h.line.abs_diff(c.start_line))
-            .map(|h| (h.text.clone(), h.line))
+            .enumerate()
+            .filter(|(_, h)| h.text == *wanted)
+            .min_by_key(|(_, h)| h.line.abs_diff(c.start_line))
+            .map(|(i, _)| i)
     })
 }
 
@@ -527,7 +558,7 @@ pub fn refresh_anchored(review: &mut Review, resolved: &[Resolved], text: &TextM
         else {
             continue;
         };
-        let heading_path = text.heading_path_at(r.start_line);
+        let heading_path = text.heading_path_of(s, r.start_line);
         let prefix = text.before(s, CONTEXT_CHARS);
         let suffix = match (is_capped(&c.quote), &c.anchor) {
             (true, Some(a)) => a.suffix.clone(),

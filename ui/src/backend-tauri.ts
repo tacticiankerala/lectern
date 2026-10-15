@@ -13,6 +13,7 @@ import type { FrameFocus } from "./generated/FrameFocus";
 import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
+import type { PageBlock } from "./generated/PageBlock";
 import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -126,12 +127,12 @@ export class TauriBackend implements Backend {
     return invoke("open_in_editor", { path, line: line ?? null });
   }
 
-  loadReview(path: string): Promise<ReviewPayload> {
-    return invoke("load_review", { path });
+  loadReview(path: string, page?: PageBlock[]): Promise<ReviewPayload> {
+    return invoke("load_review", { path, page: page ?? null });
   }
 
-  reviewOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
-    return invoke("review_op", { path, op });
+  reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload> {
+    return invoke("review_op", { path, op, page: page ?? null });
   }
 
   getSettings(): Promise<SettingsSnapshot> {

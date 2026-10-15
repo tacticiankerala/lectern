@@ -1,8 +1,9 @@
 // An HTML page's session with its bridge (crates/lectern-core/assets/page-bridge.js), which runs in
 // the page's sandboxed frame: what the page reports (its text, headings, scroll position,
-// selection, colour scheme and clicked links), and what Lectern asks of it (highlights, scrolling
-// and the colours to paint with). Also the notice of what the page loads from the web. Loaded on
-// first use, when a page opens.
+// selection, colour scheme, clicked links and clicks on text a comment marks), and what Lectern
+// asks of it (highlights, scrolling and the colours to paint with). Also the notice of what the
+// page loads from the web. Loaded on first use, when a page opens. It is the page the review
+// comments see (comments-page.ts): its blocks are the text core anchors them against.
 //
 // The page can post to Lectern itself, so nothing it sends is trusted: frame-view.ts takes only
 // messages from the frame's own window, and every field is checked here, by type and size. A
@@ -12,10 +13,12 @@
 // every half second, the latest, so a page that keeps changing doesn't rebuild find and the
 // outline all the time. An anchor, or a place to restore, waits until the page is ready; an anchor
 // wins.
+import type { PageSurface } from "./comments-page";
 import { h } from "./dom";
 import type { FindPage, Span } from "./find";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { OutlineItem } from "./generated/OutlineItem";
+import type { PageBlock } from "./generated/PageBlock";
 import type { PageLoads } from "./generated/PageLoads";
 
 /** The most text a page reports, in UTF-16 code units, as the bridge caps it. */
@@ -32,12 +35,6 @@ const TEXT_EVERY_MS = 500;
 /** How often a link is followed, at most, in milliseconds. */
 const FOLLOW_EVERY_MS = 1000;
 
-/** A block of the page's text, as the bridge reports it. */
-export interface PageBlock {
-  text: string;
-  headingLevel?: number;
-}
-
 /** A heading of the page: its block's text, its element's id, and where its block starts. */
 export interface PageHeading {
   level: number;
@@ -53,6 +50,10 @@ export interface PageScroll {
   top: number;
 }
 
+/**
+ * The text selected in a page: its quote, its offsets into the page's text, and the box of its
+ * last line in the frame's viewport.
+ */
 export interface PageSelection {
   quote: string;
   start: number;
@@ -73,7 +74,8 @@ export type BridgeMessage =
   | { type: "selection"; selection: PageSelection | null }
   | { type: "scroll"; scroll: PageScroll }
   | { type: "link"; href: string }
-  | { type: "scheme"; dark: boolean };
+  | { type: "scheme"; dark: boolean }
+  | { type: "comment-click"; offset: number };
 
 type Fields = Record<string, unknown>;
 
@@ -195,6 +197,10 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
         return isText(data.href, MAX_HREF) ? { type: "link", href: data.href } : null;
       case "scheme":
         return typeof data.dark === "boolean" ? { type: "scheme", dark: data.dark } : null;
+      case "comment-click":
+        return isCount(data.offset) && data.offset <= MAX_TEXT
+          ? { type: "comment-click", offset: data.offset }
+          : null;
       default:
         return null;
     }
@@ -284,6 +290,10 @@ export interface PageHost {
   follow(target: FollowTarget): void;
   /** Opens Preferences, for the notice's link. */
   preferences(): void;
+  /** The text selected in the page changed (`PageFrame.selection`). */
+  selection(): void;
+  /** The reader clicked text a comment marks, at `offset` into the page's text. */
+  commentClicked(offset: number): void;
 }
 
 /** Colours to paint a highlight layer with. */
@@ -310,9 +320,11 @@ function readerActed(): boolean {
   return activation === undefined || activation.isActive;
 }
 
-export class PageFrame implements FindPage {
+export class PageFrame implements FindPage, PageSurface {
   /** The page's text: its blocks joined by single spaces. */
   text = "";
+  /** The blocks, as the page reported them. */
+  blocks: PageBlock[] = [];
   /** Where each block starts in `text`. */
   starts: number[] = [];
   /** How far down the page is scrolled, 0 to 1, as it last said. */
@@ -387,12 +399,16 @@ export class PageFrame implements FindPage {
         break;
       case "selection":
         this.selection = message.selection;
+        this.host.selection();
         break;
       case "scheme":
         this.dark = message.dark;
         break;
       case "link":
         this.link(message.href);
+        break;
+      case "comment-click":
+        this.host.commentClicked(message.offset);
         break;
     }
   }
@@ -417,6 +433,16 @@ export class PageFrame implements FindPage {
   /** Scrolls the text at `offset` to the middle, if it is out of sight. */
   reveal(offset: number): void {
     this.post({ type: "scroll-to", offset, reveal: true });
+  }
+
+  /** Scrolls the text at `offset` to the top. */
+  scrollTo(offset: number): void {
+    this.post({ type: "scroll-to", offset });
+  }
+
+  /** The frame's box in Lectern's viewport. */
+  frameBox(): DOMRect {
+    return this.frame.getBoundingClientRect();
   }
 
   /** Scrolls the heading `id` to the top; false when the page has no such heading. */
@@ -543,6 +569,7 @@ export class PageFrame implements FindPage {
       at += block.text.length + 1;
     }
     this.starts = starts;
+    this.blocks = blocks;
     this.text = blocks.map((b) => b.text).join(" ");
     // The outline is listed again only when the headings changed, not with every change of text.
     const listed = JSON.stringify(this.headings) === JSON.stringify(headings);

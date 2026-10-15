@@ -207,8 +207,15 @@ export function textBefore(index: TextIndex, range: Range, chars = PREFIX_CHARS)
   if (at === -1) {
     return "";
   }
-  // Characters as Rust counts them: code points, not UTF-16 units.
-  return Array.from(index.text.slice(Math.max(0, at - 2 * chars), at))
+  return charsBefore(index.text, at, chars);
+}
+
+/**
+ * Up to `chars` characters of `text` just before `at`, as core keeps the text before a quote:
+ * characters as Rust counts them, code points, not UTF-16 units.
+ */
+export function charsBefore(text: string, at: number, chars = PREFIX_CHARS): string {
+  return Array.from(text.slice(Math.max(0, at - 2 * chars), at))
     .slice(-chars)
     .join("");
 }

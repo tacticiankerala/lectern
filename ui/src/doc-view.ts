@@ -9,7 +9,6 @@
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
 import { HEADINGS, findById, samePath } from "./dom";
-import type { FindPage } from "./find";
 import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
@@ -17,6 +16,7 @@ import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
+import type { PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
 import { placeAt } from "./reflow";
 import { effectiveTheme } from "./themes";
@@ -55,10 +55,17 @@ export class DocView {
       },
       scrolled: () => {
         app.schedulePositionSave();
+        app.pageScrolled();
       },
       follow: (target) => void this.followTarget(target, undefined),
       preferences: () => {
         app.actions.run("preferences");
+      },
+      selection: () => {
+        app.pageSelectionChanged();
+      },
+      commentClicked: (offset) => {
+        app.pageCommentClicked(offset);
       },
     });
     host.addEventListener("click", (e) => {
@@ -170,8 +177,11 @@ export class DocView {
     this.frame.close();
   }
 
-  /** The HTML page showing, which find searches through its text; null for anything else. */
-  get page(): FindPage | null {
+  /**
+   * The HTML page showing, once its session has started: find searches its text, and comments go
+   * on it. Null for anything else.
+   */
+  get page(): PageFrame | null {
     return this.frame.page;
   }
 

@@ -27,6 +27,7 @@ use url::Url;
 
 use crate::ipc::{HtmlPages, PageLoads};
 use crate::library::pathmap::PAGE_ORIGIN;
+use crate::text::decode_utf16;
 
 /// Lectern's bridge: one script, inserted at the top of every page, that reports the page's text,
 /// headings, selection, scroll position and clicked links to Lectern, and paints its highlights.
@@ -260,35 +261,19 @@ pub struct PreparedPage {
 }
 
 /// `html` as served, with the bridge in (`inject_bridge`). A page in UTF-16 (by its byte order
-/// mark, which the browser goes by first) is decoded, an unpaired surrogate or an odd last byte
-/// becoming U+FFFD, and served as UTF-8: the bridge is UTF-8. Any other keeps its bytes, and the
-/// charset it declares (`declared_charset`).
+/// mark, which the browser goes by first) is decoded as `text::decode_utf16` decodes it, an
+/// unpaired surrogate or an odd last byte becoming U+FFFD, and served as UTF-8: the bridge is
+/// UTF-8. Any other keeps its bytes, and the charset it declares (`declared_charset`).
 pub fn prepare_page(html: &[u8], nonce: &str) -> PreparedPage {
-    let little = html.starts_with(&[0xFF, 0xFE]);
-    if !little && !html.starts_with(&[0xFE, 0xFF]) {
-        return PreparedPage {
+    match decode_utf16(html) {
+        Some(page) => PreparedPage {
+            body: inject_bridge(page.text.as_bytes(), nonce),
+            charset: Some("utf-8".to_owned()),
+        },
+        None => PreparedPage {
             body: inject_bridge(html, nonce),
             charset: declared_charset(html),
-        };
-    }
-    let (pairs, odd) = html[2..].as_chunks::<2>();
-    let units: Vec<u16> = pairs
-        .iter()
-        .map(|&pair| {
-            if little {
-                u16::from_le_bytes(pair)
-            } else {
-                u16::from_be_bytes(pair)
-            }
-        })
-        .collect();
-    let mut text = String::from_utf16_lossy(&units);
-    if !odd.is_empty() {
-        text.push('\u{FFFD}');
-    }
-    PreparedPage {
-        body: inject_bridge(text.as_bytes(), nonce),
-        charset: Some("utf-8".to_owned()),
+        },
     }
 }
 

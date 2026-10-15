@@ -23,7 +23,12 @@ jumpLine: number | null,
 /**
  * When detached: the deepest heading of the comment's path still in the note.
  */
-pinnedHeading: string | null, quote: string, 
+pinnedHeading: string | null, 
+/**
+ * Where that heading starts in the note's visible text, counted as `text_start` is: which of
+ * the headings with its text it is, for a page, which has no lines to go to.
+ */
+pinnedAt: number | null, quote: string, 
 /**
  * Where the quote (or the passage it became, when it moved) is in the note's visible text,
  * the text the UI builds from the page too: from `text_start` up to `text_end`, counted in

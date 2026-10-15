@@ -1106,6 +1106,7 @@ describe("review comments switched off in another window", () => {
         headingPath: [],
         jumpLine: null,
         pinnedHeading: null,
+        pinnedAt: null,
         quote: "an old paragraph",
         textStart: null,
         textEnd: null,

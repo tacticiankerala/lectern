@@ -260,6 +260,80 @@ describe("the page bridge", () => {
     expect((await cleared).selection).toBeNull();
   });
 
+  it("places the selection by the box of its last line", async () => {
+    const p = page("<body><p>Sign-ups rose, but conversion dipped in week 3.</p></body>");
+    await p.next("ready");
+    const box = (x: number, y: number, width: number, height: number) =>
+      ({ x, y, left: x, top: y, width, height, right: x + width, bottom: y + height }) as DOMRect;
+    const RangeOf = (p.win as unknown as { Range: typeof Range }).Range;
+    RangeOf.prototype.getClientRects = () =>
+      [box(40, 100, 300, 18), box(10, 118, 0, 0), box(10, 118, 120, 18)] as unknown as DOMRectList;
+    RangeOf.prototype.getBoundingClientRect = () => box(10, 100, 330, 36);
+    const para = p.doc.querySelector("p");
+    if (!para?.firstChild) throw new Error("no paragraph");
+    const range = p.doc.createRange();
+    range.setStart(para.firstChild, 19);
+    range.setEnd(para.firstChild, 47);
+    p.win.getSelection()?.addRange(range);
+    const selected = p.next("selection");
+    p.doc.dispatchEvent(new Event("selectionchange"));
+    const message = (await selected).selection as Record<string, unknown>;
+    expect(message.quote).toBe("conversion dipped in week 3.");
+    expect(message.rect).toEqual({ x: 10, y: 118, width: 120, height: 18 });
+  });
+
+  it("reports a plain click on text a comment marks, with where it fell", async () => {
+    const p = page(
+      '<body><h1>Report</h1><p>Sign-ups rose, but conversion dipped in week 3, <a href="other.html">see why</a>.</p></body>',
+    );
+    const ready = await p.next("ready");
+    const text = textOf(ready.blocks);
+    const para = p.doc.querySelector("p");
+    const link = p.doc.querySelector("a");
+    if (!para?.firstChild || !link?.firstChild) throw new Error("no paragraph");
+    const start = text.indexOf("conversion dipped");
+    // Where a click lands: here, a caret in the paragraph's text, `at` characters in.
+    let caret: { offsetNode: Node; offset: number } = { offsetNode: para.firstChild, offset: 0 };
+    (p.doc as unknown as { caretPositionFromPoint: () => unknown }).caretPositionFromPoint = () =>
+      caret;
+    // A click, and a moment for what it posts to arrive.
+    const click = async (target: Element, at: number, node = para.firstChild): Promise<void> => {
+      if (!node) throw new Error("no node");
+      caret = { offsetNode: node, offset: at };
+      const MouseEventOf = (p.win as unknown as { MouseEvent: typeof MouseEvent }).MouseEvent;
+      target.dispatchEvent(
+        new MouseEventOf("click", { bubbles: true, cancelable: true, button: 0, clientX: 5 }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+    };
+    const clicks = () => p.messages.filter((m) => m.type === "comment-click");
+    // Nothing marked yet.
+    await click(para, 25);
+    expect(clicks()).toEqual([]);
+    p.send({
+      lx: 1,
+      type: "paint",
+      layer: "comment",
+      ranges: [{ start, end: start + "conversion dipped".length }],
+    });
+    await click(para, 25);
+    expect(clicks()).toEqual([
+      { lx: 1, type: "comment-click", offset: text.indexOf("sion dipped") },
+    ]);
+    // Its last character, from its right half.
+    await click(para, 36);
+    expect(clicks().at(-1)?.offset).toBe(start + "conversion dipped".length);
+    // Outside the marks, on a link, or ending a selection: nothing.
+    await click(para, 5);
+    await click(link, 2, link.firstChild);
+    const range = p.doc.createRange();
+    range.setStart(para.firstChild, 19);
+    range.setEnd(para.firstChild, 30);
+    p.win.getSelection()?.addRange(range);
+    await click(para, 25);
+    expect(clicks()).toHaveLength(2);
+  });
+
   it("paints ranges of the text by layer, and clears them", async () => {
     const p = page(
       "<body><h1>Report</h1><p>Rendered by   <b>script</b>.</p><p>And rendered again.</p></body>",

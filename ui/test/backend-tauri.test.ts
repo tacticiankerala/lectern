@@ -34,6 +34,22 @@ beforeEach(() => {
 });
 
 describe("TauriBackend", () => {
+  it("sends an HTML page's text with its review commands, and none for a note", async () => {
+    const backend = new TauriBackend();
+    const page = [{ text: "Results", headingLevel: 2 }, { text: "Conversion dipped." }];
+    const op = { op: "reply", id: 1, text: "Weekly." } as const;
+    await backend.loadReview("C:\\V\\a.md");
+    await backend.loadReview("C:\\V\\report.html", page);
+    await backend.reviewOp("C:\\V\\report.html", op, page);
+    await backend.reviewOp("C:\\V\\a.md", op);
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["load_review", { path: "C:\\V\\a.md", page: null }],
+      ["load_review", { path: "C:\\V\\report.html", page }],
+      ["review_op", { path: "C:\\V\\report.html", op, page }],
+      ["review_op", { path: "C:\\V\\a.md", op, page: null }],
+    ]);
+  });
+
   it("listens on its own window only", () => {
     const backend = new TauriBackend();
     backend.on("settings-changed", () => undefined);

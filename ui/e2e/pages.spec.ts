@@ -3,7 +3,7 @@
 // page do, the notice of what a page loads, the theme, and keys from inside the frame (which only
 // Rust sees, so the fake sends them on request).
 import { expect, test, type Page } from "@playwright/test";
-import { launch, openFixture } from "./util";
+import { fixturePath, launch, openFixture } from "./util";
 
 /** The frame a page shows in. */
 function frame(page: Page) {
@@ -199,4 +199,117 @@ test("Lectern's shortcuts pressed inside a page, as Rust sends them, run as they
     window.__fake.frameKey({ key: "Escape", code: "Escape" });
   });
   await expect(page.locator("body")).not.toHaveClass(/focus/);
+});
+
+/** The text of each range the page's bridge paints in a highlight layer, in the page. */
+function painted(page: Page, layer: string) {
+  return inside(page)
+    .locator("body")
+    .evaluate((_, name) => {
+      const highlight = CSS.highlights.get(`lx-${name}`);
+      return highlight ? [...highlight].map((range) => (range as Range).toString()) : [];
+    }, layer);
+}
+
+test("a comment on words selected in a page is painted there, again when it reopens, and a click on them shows it", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/report.html");
+  await reported(page);
+  await page.locator("#lx-tab-comments").click();
+  await expect(page.locator("#lx-comments-pane .comments-empty")).toHaveText(
+    "No comments yet. Select text in the page to comment on it.",
+  );
+  // The reader selects the words inside the page.
+  await inside(page)
+    .locator("p", { hasText: "conversion dipped" })
+    .evaluate((p) => {
+      const text = p.firstChild as Text;
+      const start = text.data.indexOf("conversion dipped in week 3");
+      const range = document.createRange();
+      range.setStart(text, start);
+      range.setEnd(text, start + "conversion dipped in week 3".length);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+    });
+  const button = page.locator(".lx-sel-comment");
+  await expect(button).toBeVisible();
+  // By the selection's last line, over the page's frame.
+  const words = await inside(page)
+    .locator("body")
+    .evaluate(() => {
+      const box = getSelection()?.getRangeAt(0).getBoundingClientRect();
+      return box ? { bottom: box.bottom, right: box.right } : null;
+    });
+  const frameBox = await frame(page).boundingBox();
+  const buttonBox = await button.boundingBox();
+  if (!words || !frameBox || !buttonBox) throw new Error("no boxes");
+  expect(
+    Math.abs(buttonBox.y + buttonBox.height / 2 - (frameBox.y + words.bottom - 9)),
+  ).toBeLessThan(12);
+  await button.click();
+  await page.locator(".comment-editor textarea").fill("weekly, not daily");
+  await page.keyboard.press("Control+Enter");
+  const card = page.locator(".comment-card[data-id='1']");
+  await expect(card.locator(".comment-quote")).toHaveText("conversion dipped in week 3");
+  await expect.poll(() => painted(page, "comment")).toEqual(["conversion dipped in week 3"]);
+  await expect.poll(() => painted(page, "comment-focus")).toEqual(["conversion dipped in week 3"]);
+
+  // Changed on disk, the page loads again, reports its text, and its comment is painted again.
+  const report = fixturePath("artifacts/report.html");
+  const before = await frame(page).getAttribute("src");
+  await page.evaluate((path) => {
+    window.__fake.emit("doc-changed", { path });
+  }, report);
+  await expect(frame(page)).not.toHaveAttribute("src", before ?? "");
+  await expect.poll(() => painted(page, "comment")).toEqual(["conversion dipped in week 3"]);
+  // Opened again from elsewhere, nothing selected: a click on the words shows the comment.
+  const open = (path: string) =>
+    page.evaluate((path) => {
+      window.__fake.emit("open-request", { path, t0Ms: null, folder: false });
+    }, path);
+  await open(fixturePath("artifacts/other.html"));
+  await expect(page).toHaveTitle("other.html — Lectern");
+  await open(report);
+  await expect(page).toHaveTitle("report.html — Lectern");
+  await expect.poll(() => painted(page, "comment")).toEqual(["conversion dipped in week 3"]);
+  await expect(card).not.toHaveClass(/selected/);
+  // Clicked by where the words are in their paragraph, which holds while the page settles.
+  const paragraph = inside(page).locator("p", { hasText: "conversion dipped" });
+  const position = await paragraph.evaluate((p) => {
+    const range = [...(CSS.highlights.get("lx-comment") ?? [])][0] as Range | undefined;
+    const words = range?.getBoundingClientRect();
+    const box = p.getBoundingClientRect();
+    return words
+      ? { x: words.x - box.x + words.width / 2, y: words.y - box.y + words.height / 2 }
+      : null;
+  });
+  if (!position) throw new Error("no marked words");
+  await paragraph.click({ position });
+  await expect(card).toHaveClass(/selected/);
+});
+
+test("Ctrl+Alt+M inside a page, as Rust sends it, comments on the words selected there", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/report.html");
+  await reported(page);
+  await inside(page)
+    .locator("p", { hasText: "Rendered by script" })
+    .evaluate((p) => {
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+    });
+  await expect(page.locator(".lx-sel-comment")).toBeVisible();
+  await page.evaluate(() => {
+    window.__fake.frameKey({ key: "m", code: "KeyM", ctrl: true, alt: true });
+  });
+  await page.locator(".comment-editor textarea").fill("Which script?");
+  await page.keyboard.press("Control+Enter");
+  await expect(page.locator(".comment-card[data-id='1'] .comment-quote")).toHaveText(
+    "Rendered by script",
+  );
+  await expect.poll(() => painted(page, "comment")).toEqual(["Rendered by script"]);
 });

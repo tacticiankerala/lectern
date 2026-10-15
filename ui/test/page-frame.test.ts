@@ -63,6 +63,10 @@ describe("messages from a page's bridge", () => {
       type: "scheme",
       dark: true,
     });
+    expect(parseBridgeMessage({ lx: 1, type: "comment-click", offset: 26 })).toEqual({
+      type: "comment-click",
+      offset: 26,
+    });
   });
 
   it("are dropped, never thrown, when anything is off", () => {
@@ -88,6 +92,11 @@ describe("messages from a page's bridge", () => {
       { lx: 1, type: "link", href: "x".repeat(10_000) },
       { lx: 1, type: "selection", selection: { quote: "x", start: 5, end: 2, rect: {} } },
       { lx: 1, type: "scheme" },
+      { lx: 1, type: "comment-click" },
+      { lx: 1, type: "comment-click", offset: -1 },
+      { lx: 1, type: "comment-click", offset: 2.5 },
+      { lx: 1, type: "comment-click", offset: "26" },
+      { lx: 1, type: "comment-click", offset: MAX_TEXT + 1 },
     ];
     bad.forEach((data, i) => {
       expect(() => parseBridgeMessage(data)).not.toThrow();
@@ -203,6 +212,8 @@ function session(restore: number | null = null, anchor: string | null = null) {
     scrolled: vi.fn<PageHost["scrolled"]>(),
     follow: vi.fn<PageHost["follow"]>(),
     preferences: vi.fn<PageHost["preferences"]>(),
+    selection: vi.fn<PageHost["selection"]>(),
+    commentClicked: vi.fn<PageHost["commentClicked"]>(),
   };
   const page = new PageFrame(
     frame,
@@ -290,6 +301,40 @@ describe("a page's session", () => {
     expect(page.fraction).toBe(0.75);
     expect(page.top).toBe(22);
     expect(host.scrolled).toHaveBeenCalled();
+  });
+
+  it("keeps the page's blocks, as core takes them, and its selection, and says when they change", () => {
+    const { page, host } = session();
+    page.receive(READY);
+    expect(page.blocks).toEqual(READY.blocks);
+    const selection = {
+      quote: "Rendered by",
+      start: 22,
+      end: 33,
+      rect: { x: 10, y: 20, width: 80, height: 18 },
+    };
+    page.receive({ lx: 1, type: "selection", selection });
+    expect(page.selection).toEqual(selection);
+    expect(host.selection).toHaveBeenCalledTimes(1);
+    page.receive({ lx: 1, type: "selection", selection: null });
+    expect(page.selection).toBeNull();
+    expect(host.selection).toHaveBeenCalledTimes(2);
+  });
+
+  it("hands on a click on text a comment marks, and scrolls an offset to the top", () => {
+    const { page, posted, host, frame } = session();
+    page.receive(READY);
+    page.receive({ lx: 1, type: "comment-click", offset: 25 });
+    expect(host.commentClicked).toHaveBeenCalledWith(25);
+    page.scrollTo(22);
+    page.paint("comment", [{ start: 22, end: 30 }]);
+    page.clear("comment-focus");
+    expect(posted.slice(1)).toEqual([
+      { lx: 1, type: "scroll-to", offset: 22 },
+      { lx: 1, type: "paint", layer: "comment", ranges: [{ start: 22, end: 30 }] },
+      { lx: 1, type: "clear", layer: "comment-focus" },
+    ]);
+    expect(page.frameBox()).toEqual(frame.getBoundingClientRect());
   });
 
   it("follows a link the reader clicked, at most one a second, and none a page sends by itself", () => {

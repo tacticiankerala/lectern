@@ -5,7 +5,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeBackend } from "../dev/backend-fake";
 import { App } from "../src/app";
-import { A, appRoot, fixtures, rendered, settle } from "./helpers";
+import type { ReviewPayload } from "../src/generated/ReviewPayload";
+import { A, appRoot, deferred, fixtures, rendered, settle } from "./helpers";
 
 const PAGE = "C:\\V\\artifacts\\report.html";
 const OTHER = "C:\\V\\artifacts\\other.html";
@@ -29,6 +30,73 @@ const READY = {
   scroll: { fraction: 0, top: 0 },
   dark: false,
 };
+
+/** The report as its bridge reports it with the paragraph comments go on. */
+const WITH_TEXT = {
+  ...READY,
+  headings: [
+    { level: 1, text: "Weekly report", id: "lx-heading-1", offset: 0 },
+    { level: 2, text: "Results", id: "results", offset: 14 },
+    { level: 2, text: "Next steps", id: "next-steps", offset: 97 },
+  ],
+  blocks: [
+    { text: "Weekly report", headingLevel: 1 },
+    { text: "Results", headingLevel: 2 },
+    { text: "Sign-ups rose steadily, but conversion dipped in week 3 before recovering." },
+    { text: "Next steps", headingLevel: 2 },
+    { text: "Rendered by script" },
+  ],
+};
+const TEXT = WITH_TEXT.blocks.map((b) => b.text).join(" ");
+/** Where the commented words start in the page's text. */
+const DIP = TEXT.indexOf("conversion dipped in week 3");
+
+/** The page's sidecar, with C1 on the commented words. */
+function pageReview(): ReviewPayload {
+  return {
+    notePath: PAGE,
+    sidecarPath: `${PAGE}.review.md`,
+    noteWslPath: null,
+    sidecarWslPath: null,
+    exists: true,
+    readOnly: null,
+    comments: [
+      {
+        id: 1,
+        status: "open",
+        state: "anchored",
+        startLine: 12,
+        endLine: 12,
+        headingPath: ["Weekly report", "Results"],
+        jumpLine: 12,
+        pinnedHeading: null,
+        pinnedAt: null,
+        quote: "conversion dipped in week 3",
+        textStart: DIP,
+        textEnd: DIP + 27,
+        currentText: null,
+        entries: [
+          { author: "you", name: "You", kind: null, text: "weekly", html: "<p>weekly</p>" },
+        ],
+      },
+    ],
+    unreadable: [],
+    openCount: 1,
+  };
+}
+
+/** Waits for the comments module, its Comments tab shown with nothing read-only. */
+async function commentsShown(): Promise<void> {
+  document.querySelector<HTMLElement>("#lx-tab-comments")?.click();
+  await vi.waitFor(() => {
+    expect(document.querySelector("#lx-comments-pane .comments-empty")?.textContent).toBe(
+      "No comments yet. Select text in the page to comment on it.",
+    );
+  });
+  expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-banner")?.hidden).toBe(
+    true,
+  );
+}
 
 async function started(
   initial = PAGE,
@@ -305,13 +373,265 @@ describe("an HTML page", () => {
     });
   });
 
-  it("takes no comments yet, and says so", async () => {
-    await started();
-    document.querySelector<HTMLElement>("#lx-tab-comments")?.click();
+  it("takes a comment on text selected in it, and paints it there", async () => {
+    const { fake } = await started();
+    const sent = posts();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    await bridge(WITH_TEXT);
+    await commentsShown();
+    await bridge({
+      type: "selection",
+      selection: {
+        quote: "conversion dipped in week 3",
+        start: DIP,
+        end: DIP + 27,
+        rect: { x: 120, y: 200, width: 90, height: 18 },
+      },
+    });
+    const button = document.querySelector<HTMLButtonElement>(".lx-sel-comment");
     await vi.waitFor(() => {
-      expect(document.querySelector("#lx-comments-pane .comments-banner")?.textContent).toBe(
-        "Comments on pages arrive in Task 5.",
+      expect(button?.hidden).toBe(false);
+    });
+    // By the selection's last line, inside the frame (here at the pane's corner).
+    expect(button?.style.top).toBe("209px");
+    button?.click();
+    const area = document.querySelector<HTMLTextAreaElement>(".comment-editor textarea");
+    if (!area) throw new Error("no editor");
+    area.value = "weekly, not daily";
+    area.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>(".comment-editor .btn.primary")?.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector(".comment-card.selected")?.getAttribute("data-id")).toBe("1");
+    });
+    expect(reviewOp).toHaveBeenCalledWith(
+      PAGE,
+      {
+        op: "add",
+        anchor: {
+          startLine: 0,
+          endLine: 0,
+          quote: "conversion dipped in week 3",
+          prefix: TEXT.slice(DIP - 32, DIP),
+        },
+        text: "weekly, not daily",
+      },
+      WITH_TEXT.blocks,
+    );
+    const marked = [{ start: DIP, end: DIP + 27 }];
+    expect(sent).toContainEqual({ lx: 1, type: "paint", layer: "comment", ranges: marked });
+    expect(sent).toContainEqual({ lx: 1, type: "paint", layer: "comment-focus", ranges: marked });
+    // No dots and no "+" for a page.
+    expect(document.querySelector(".lx-cdot")).toBeNull();
+    expect(document.querySelector<HTMLElement>(".lx-block-plus")?.hidden).toBe(true);
+  });
+
+  it("shows a comment's card when its text is clicked in the page, and the card goes to it", async () => {
+    const { fake } = await started();
+    fake.setReview(PAGE, pageReview());
+    const sent = posts();
+    await bridge(WITH_TEXT);
+    const marked = [{ start: DIP, end: DIP + 27 }];
+    await vi.waitFor(() => {
+      expect(sent).toContainEqual({ lx: 1, type: "paint", layer: "comment", ranges: marked });
+    });
+    await bridge({ type: "comment-click", offset: DIP + 5 });
+    await vi.waitFor(() => {
+      expect(document.querySelector(".comment-card.selected")?.getAttribute("data-id")).toBe("1");
+    });
+    expect(document.querySelector("#lx-tab-comments")?.getAttribute("aria-selected")).toBe("true");
+    expect(sent).toContainEqual({ lx: 1, type: "paint", layer: "comment-focus", ranges: marked });
+    // Text no comment marks shows nothing.
+    await bridge({ type: "comment-click", offset: 2 });
+    document.querySelector<HTMLButtonElement>(".comment-card[data-id='1'] .comment-place")?.click();
+    expect(sent).toContainEqual({ lx: 1, type: "scroll-to", offset: DIP });
+  });
+
+  it("takes a detached comment to the heading core pinned it to, of several with its text", async () => {
+    const { fake } = await started();
+    const blocks = [
+      { text: "First", headingLevel: 1 },
+      { text: "Results", headingLevel: 2 },
+      { text: "Early figures." },
+      { text: "Second", headingLevel: 1 },
+      { text: "Results", headingLevel: 2 },
+    ];
+    const text = blocks.map((b) => b.text).join(" ");
+    const second = text.lastIndexOf("Results");
+    const review = pageReview();
+    const [c1] = review.comments;
+    if (!c1) throw new Error("no comment");
+    fake.setReview(PAGE, {
+      ...review,
+      comments: [
+        {
+          ...c1,
+          state: "detached",
+          quote: "Late figures came in",
+          headingPath: ["Second", "Results"],
+          pinnedHeading: "Results",
+          pinnedAt: second,
+          textStart: null,
+          textEnd: null,
+        },
+      ],
+    });
+    const sent = posts();
+    await bridge({ ...READY, headings: [], blocks });
+    const place = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(
+        ".comment-card[data-id='1'] .comment-place",
       );
+      if (!button) throw new Error("no card");
+      return button;
+    });
+    place.click();
+    expect(sent).toContainEqual({ lx: 1, type: "scroll-to", offset: second });
+    expect(sent).not.toContainEqual({ lx: 1, type: "scroll-to", offset: text.indexOf("Results") });
+  });
+
+  it("loads its comments once it has reported its text, and again as the text changes", async () => {
+    const { fake } = await started();
+    fake.setReview(PAGE, pageReview());
+    const load = vi.spyOn(fake, "loadReview");
+    await settle();
+    expect(load.mock.calls.filter(([path]) => path === PAGE)).toEqual([]);
+    await bridge(WITH_TEXT);
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenLastCalledWith(PAGE, WITH_TEXT.blocks);
+    });
+    const changed = [{ text: "A line the page added." }, ...WITH_TEXT.blocks];
+    await bridge({ type: "blocks", headings: WITH_TEXT.headings, blocks: changed });
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenLastCalledWith(PAGE, changed);
+    });
+    // The agent writing to the page's sidecar loads it again, with the page's text.
+    fake.emit("review-changed", { path: PAGE });
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenCalledTimes(3);
+    });
+    expect(load).toHaveBeenLastCalledWith(PAGE, changed);
+  });
+
+  it("loads its comments again when its text changes while they first load", async () => {
+    const { fake, app } = await started();
+    fake.setReview(PAGE, pageReview());
+    const real = fake.loadReview.bind(fake);
+    const gate = deferred();
+    const load = vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await gate.promise;
+      return real(path, page);
+    });
+    await bridge(WITH_TEXT);
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+    const changed = [{ text: "A line the page added." }, ...WITH_TEXT.blocks];
+    await bridge({ type: "blocks", headings: WITH_TEXT.headings, blocks: changed });
+    await vi.waitFor(() => {
+      expect(app.view.page?.text).toContain("A line the page added.");
+    });
+    gate.resolve();
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenCalledTimes(2);
+    });
+    expect(load).toHaveBeenLastCalledWith(PAGE, changed);
+  });
+
+  it("leaves re-attach mode, or hides the Comment button, on Esc pressed inside it", async () => {
+    const { fake } = await started();
+    const review = pageReview();
+    const [c1] = review.comments;
+    if (!c1) throw new Error("no comment");
+    fake.setReview(PAGE, { ...review, comments: [{ ...c1, state: "detached", quote: "gone" }] });
+    await bridge(WITH_TEXT);
+    const reattach = await vi.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(
+        ".comment-card[data-id='1'] [data-action='reattach']",
+      );
+      if (!button) throw new Error("no re-attach button");
+      return button;
+    });
+    reattach.click();
+    const banner = document.querySelector<HTMLElement>(".comments-attach");
+    expect(banner?.hidden).toBe(false);
+    fake.frameKey({ key: "Escape", code: "Escape" });
+    expect(banner?.hidden).toBe(true);
+    await bridge({
+      type: "selection",
+      selection: {
+        quote: "Results",
+        start: 14,
+        end: 21,
+        rect: { x: 0, y: 0, width: 0, height: 0 },
+      },
+    });
+    const button = document.querySelector<HTMLButtonElement>(".lx-sel-comment");
+    await vi.waitFor(() => {
+      expect(button?.hidden).toBe(false);
+    });
+    fake.frameKey({ key: "Escape", code: "Escape" });
+    expect(button?.hidden).toBe(true);
+  });
+
+  it("puts its Comment button away when another document opens", async () => {
+    const { app } = await started();
+    await bridge(WITH_TEXT);
+    await commentsShown();
+    await bridge({
+      type: "selection",
+      selection: {
+        quote: "Results",
+        start: 14,
+        end: 21,
+        rect: { x: 0, y: 0, width: 0, height: 0 },
+      },
+    });
+    const button = document.querySelector<HTMLButtonElement>(".lx-sel-comment");
+    await vi.waitFor(() => {
+      expect(button?.hidden).toBe(false);
+    });
+    await app.open(OTHER);
+    expect(button?.hidden).toBe(true);
+  });
+
+  it("takes Ctrl+Alt+M from inside it: a comment on its selection, else on the block at the top", async () => {
+    const { fake } = await started();
+    const reviewOp = vi.spyOn(fake, "reviewOp");
+    await bridge(WITH_TEXT);
+    await commentsShown();
+    const save = async (text: string): Promise<void> => {
+      fake.frameKey({ key: "m", code: "KeyM", ctrl: true, alt: true });
+      const area = document.querySelector<HTMLTextAreaElement>(".comment-editor textarea");
+      await vi.waitFor(() => {
+        expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(false);
+      });
+      if (!area) throw new Error("no editor");
+      area.value = text;
+      area.dispatchEvent(new Event("input"));
+      document.querySelector<HTMLButtonElement>(".comment-editor .btn.primary")?.click();
+      await vi.waitFor(() => {
+        expect(document.querySelector<HTMLElement>(".comment-editor")?.hidden).toBe(true);
+      });
+    };
+    await save("Which week?");
+    expect(reviewOp.mock.calls[0]?.[1]).toEqual({
+      op: "add",
+      anchor: { startLine: 0, endLine: 0, quote: "Weekly report", prefix: "" },
+      text: "Which week?",
+    });
+    await bridge({
+      type: "selection",
+      selection: {
+        quote: "Rendered by",
+        start: TEXT.indexOf("Rendered by"),
+        end: TEXT.indexOf("Rendered by") + 11,
+        rect: { x: 0, y: 0, width: 0, height: 0 },
+      },
+    });
+    await save("Which script?");
+    expect(reviewOp.mock.calls[1]?.[1]).toMatchObject({
+      anchor: { quote: "Rendered by" },
+      text: "Which script?",
     });
   });
 

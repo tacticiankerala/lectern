@@ -41,6 +41,7 @@ function comment(over: Partial<CommentView> & { id: number }): CommentView {
     headingPath: [],
     jumpLine: 1,
     pinnedHeading: null,
+    pinnedAt: null,
     quote: "",
     textStart: null,
     textEnd: null,
