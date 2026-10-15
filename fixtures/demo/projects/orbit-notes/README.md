@@ -11,7 +11,7 @@ A calm notes app that works the same with or without a signal. Notes live on the
 
 ## Now
 
-Offline sync is the big piece this quarter: [[offline-sync|the plan]], and the [[2026-09-18-sync-spike|spike]] that shaped it.
+Offline sync is the big piece this quarter: [[offline-sync|the plan]], and the [[2026-09-18-sync-spike|spike]] that shaped it. The beta's first week is in [the sync report](artifacts/2026-09-25-sync-beta-report.html).
 
 ## Next
 

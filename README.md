@@ -11,12 +11,13 @@ A fast, native Markdown reader for Windows, made for long documents and folders 
   <sub>Windows 10 (1809 or later) and Windows 11, x64. Free and open source.</sub>
 </p>
 
-Lectern opens your Markdown the way you meant it to look: tables that wrap, highlighted code, task lists, frontmatter and wikilinks that go somewhere. Point it at a folder of notes, or an Obsidian vault, and read. It never edits your notes.
+Lectern opens your Markdown the way you meant it to look: tables that wrap, highlighted code, task lists, frontmatter and wikilinks that go somewhere. Point it at a folder of notes, or an Obsidian vault, and read. The HTML pages, PDFs and text files among your notes open in Lectern too. It never edits your notes.
 
 ## Features
 
 - **Your notes as a library.** Add folders and browse them in the sidebar, or collapse it to give the page the room. Click any breadcrumb to pick a nearby file or folder from a list that goes away once you've chosen. A folder with a README shows that README's `status:` as a badge.
 - **Faithful rendering.** GitHub-flavoured Markdown: tables, task lists, footnotes, alerts, raw HTML (made safe), and highlighted code. Frontmatter shows as a tidy properties strip, with a count of done tasks.
+- **HTML pages, PDFs and text files too.** HTML pages, such as the reports and dashboards an AI agent writes, run in a sandbox, take comments, and have an outline and find. PDFs open in the built-in viewer. Text files take comments like notes. **Open in default app**, in the ⋯ menu, hands any of them to its usual app.
 - **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations. Right-click one to copy its Windows or WSL path.
 - **Find anything.** Quick open by name, search across the whole library, and find in the page.
 - **Made for reading.** Eight themes, five bundled fonts or any font you have, and control over size, line height and width. An outline, a reading-progress line, and a focus mode.
@@ -50,9 +51,9 @@ When you upgrade from an earlier version, your folders and settings become a wor
   <img src="docs/screenshots/comments.png" alt="The Comments tab beside a plan in the Paper theme: Claude's question on a highlighted passage, a detached comment with Claude's reply, and a resolved comment">
 </p>
 
-You can comment on a note as you read it, then hand the comments to Claude, Codex or any other AI agent. A comment is a passage of the note, quoted, with your remark under it. Select some text and press the **Comment** button that appears, press **+** in the margin beside a paragraph, or press Ctrl+Alt+M. Comments show as highlights in the page and as cards in the right-hand panel's **Comments** tab.
+You can comment on a note, a text file or an HTML page as you read it, then hand the comments to Claude, Codex or any other AI agent. A comment is a passage of the note, quoted, with your remark under it. Select some text and press the **Comment** button that appears, press **+** in the margin beside a paragraph of a note or text file, or press Ctrl+Alt+M. Comments show as highlights in the page and as cards in the right-hand panel's **Comments** tab.
 
-Lectern saves them beside the note, in a plain Markdown file named after it: `plan.md` gets `plan.review.md`. The note itself is never changed.
+Lectern saves them beside the note, in a plain Markdown file named after it: `plan.md` gets `plan.review.md`, and `report.html` gets `report.html.review.md`. The note itself is never changed.
 
 **Copy comments**, in that tab, copies the open ones as text ready to paste into an agent, with the note's Windows and WSL paths. Or point the agent at the `.review.md` file. The agent answers by adding, at the end of a comment, a paragraph that starts with its own name and `reply`, `question`, `pushback` or `resolved`, such as `**Codex (question):**`, and the answer shows up in Lectern within a couple of seconds.
 
@@ -72,6 +73,30 @@ note: plan.md
 When the note changes, each comment follows its text. One whose text was reworded is marked "text changed", and one whose text is gone is kept as **Detached** with its original quote, so no comment is ever lost.
 
 The comments button beside **Aa** shows how many are open. Click it, or press Ctrl+Shift+M, to hide or show them. To turn comments off altogether, untick **Review comments** under **Reading** in Preferences.
+
+## HTML pages, PDFs and text files
+
+The library shows HTML pages (`.html`, `.htm`), PDFs and text files (`.txt`) beside your notes, each marked with its type. Quick open finds them by name, search reads text files as well as notes, and a link to one from a note opens it in Lectern.
+
+**HTML pages**, such as the reports and dashboards an AI agent writes, show as the page itself, across the reading area, charts and all. The outline lists the page's headings, Ctrl+F finds words in it, and Lectern keeps your place. A page with a dark mode follows Lectern's theme. A link in a page to a note or another page opens in Lectern, and a web link opens in your browser. Comments work as on a note: select some text and press **Comment**. The quote is what anchors a comment; its line number is Lectern's best guess at where those words are in the page's source.
+
+**PDFs** open in the PDF viewer built into WebView2, the same one Edge uses, with its own zoom, page list and search: click into the PDF, then press Ctrl+F. PDFs don't take comments.
+
+**Text files** read like a note, in the code font, wrapped to the reading width. They take comments like notes: `todo.txt` gets `todo.txt.review.md`.
+
+**Open in default app**, in the ⋯ menu, hands a page, a PDF or a text file to the app Windows normally opens it with.
+
+The demo library in [`fixtures/demo`](fixtures/demo) has one of each: Orbit Notes' sync report, Seedbed's notes from a call and Pocket Ledger's one-pager.
+
+### What a page may do
+
+Every page runs in a sandbox, away from your files and from Lectern. Its scripts can't read the files beside it, though the styles, scripts and images it links to load. Many agent-made pages also load a chart library or a font from the internet, so the **HTML pages** setting, in Preferences, decides how far a page may go:
+
+- **Run scripts and allow the internet**, the default.
+- **Run scripts offline:** the page's scripts run, but nothing loads from the internet.
+- **No page scripts:** the page shows as written, offline and without its scripts.
+
+**The notice.** When a page loads anything from the internet, a slim bar above it says where from, such as "This page loads from cdn.jsdelivr.net". Under the other two settings it names what was stopped instead, "Blocked loads from cdn.jsdelivr.net", with a link to change the setting. Click × to dismiss it. A page that loads nothing from the internet shows no notice.
 
 ## Gallery
 
@@ -162,10 +187,11 @@ Open the **Aa** panel in the toolbar to change how documents look.
 
 ## Privacy
 
-Lectern has no telemetry, accounts or analytics. It contacts the network for two things only:
+Lectern has no telemetry, accounts or analytics. It contacts the network for three things only:
 
 - **Update checks:** once a day, a request to GitHub Releases for the latest version. Turn it off in Preferences under **Updates**.
 - **Remote images** that your notes link to (`https://` addresses), loaded as any browser would.
+- **What HTML pages load** from the internet, such as a chart library or a font. A notice above the page names where from. Choose **Run scripts offline** or **No page scripts** under **HTML pages** in Preferences, and pages load nothing from the internet.
 
 Your settings, reading positions and logs stay on your PC, in `%APPDATA%\io.github.tacticiankerala.lectern` and `%LOCALAPPDATA%\io.github.tacticiankerala.lectern`.
 
