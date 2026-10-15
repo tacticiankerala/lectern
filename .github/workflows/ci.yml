@@ -158,23 +158,70 @@ jobs:
       # Opens the 3,000-line fixture plan and quits once it has painted, twice. The first launch
       # pays for the fresh runner's first WebView2 start-up and only has to paint; the second is
       # measured. The bound is generous for a shared runner; the real cold-start target is
-      # measured on a dev machine.
+      # measured on a dev machine. After each launch the step waits for its WebView2 processes to
+      # exit: one still running holds up the next launch's WebView2 start-up until it is gone.
       - name: Smoke run
         shell: pwsh
         timeout-minutes: 5
         run: |
           $exe = (Resolve-Path target/release/lectern.exe).Path
           $doc = (Resolve-Path fixtures/vault/work/alpha/plans/2026-01-01-big-plan.md).Path
+          # Lists the WebView2 processes a launch left running: those started after it began whose
+          # parent chain leads to its Lectern process, or breaks at a parent that is gone.
+          function Get-LeftoverWebView2([int] $lecternId, [DateTimeOffset] $began) {
+            $byId = @{}
+            Get-CimInstance Win32_Process -Property Name, ProcessId, ParentProcessId, CreationDate |
+              ForEach-Object { $byId[[int] $_.ProcessId] = $_ }
+            foreach ($proc in $byId.Values) {
+              if ($proc.Name -ne 'msedgewebview2.exe') { continue }
+              if ([DateTimeOffset] $proc.CreationDate -lt $began) { continue }
+              $node = $proc
+              for ($hops = 0; $hops -lt 16; $hops++) {
+                $parentId = [int] $node.ParentProcessId
+                if ($parentId -eq $lecternId) { $proc; break }
+                $parent = $byId[$parentId]
+                # The parent is gone, or its ID now names a process that started later.
+                if (-not $parent -or $parent.CreationDate -gt $node.CreationDate) { $proc; break }
+                if ($parent.Name -ne 'msedgewebview2.exe') { break }
+                $node = $parent
+              }
+            }
+          }
+          # Waits up to 30 s for a launch's WebView2 processes to exit and logs how long it took.
+          function Wait-WebView2Exit([string] $label, [int] $lecternId, [DateTimeOffset] $began) {
+            $seen = [Collections.Generic.HashSet[int]]::new()
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($true) {
+              $left = @(Get-LeftoverWebView2 $lecternId $began)
+              foreach ($proc in $left) { [void] $seen.Add([int] $proc.ProcessId) }
+              if ($left.Count -eq 0 -or $clock.ElapsedMilliseconds -ge 30000) { break }
+              Start-Sleep -Milliseconds 100
+            }
+            $clock.Stop()
+            Write-Host ("$label launch: waited $($clock.ElapsedMilliseconds) ms for its WebView2" +
+              " processes to exit ($($seen.Count) seen)")
+            if ($left.Count -gt 0) {
+              Write-Host "$label launch: $($left.Count) WebView2 processes still running after 30 s"
+            }
+          }
           # Launches Lectern once, prints its perf marks and returns its first-paint time in ms.
           function Measure-FirstPaint([string] $label) {
             $log = Join-Path $env:RUNNER_TEMP "perf-$label.jsonl"
+            $began = [DateTimeOffset]::UtcNow
             $p = Start-Process -FilePath $exe -PassThru `
               -ArgumentList "`"$doc`"", '--perf-log', "`"$log`"", '--exit-after-paint'
+            $exited = $false
             try {
-              if (-not $p.WaitForExit(60000)) { throw "$label launch: Lectern did not quit within 60 s" }
+              $exited = $p.WaitForExit(60000)
+              if (-not $exited) { throw "$label launch: Lectern did not quit within 60 s" }
             } finally {
-              Stop-Process -Name lectern -Force -ErrorAction SilentlyContinue
+              # By ID, and only while it runs: once it has quit, its ID may name another process.
+              if (-not $exited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             }
+            $ended = [DateTimeOffset]::UtcNow
+            Write-Host ("$label launch: start unixMs $($began.ToUnixTimeMilliseconds())," +
+              " exit unixMs $($ended.ToUnixTimeMilliseconds())")
+            Wait-WebView2Exit $label $p.Id $began
             if (-not (Test-Path $log)) { throw "$label launch: Lectern wrote no perf log" }
             $marks = @(Get-Content $log | ForEach-Object { $_ | ConvertFrom-Json })
             Write-Host "$label launch:"
