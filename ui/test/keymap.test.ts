@@ -47,6 +47,8 @@ describe("actionFor", () => {
       // WebView2 would otherwise reload the whole page.
       [{ key: "r", ctrlKey: true }, "reload"],
       [{ key: ",", ctrlKey: true }, "preferences"],
+      // The recent files menu: history, as in browsers.
+      [{ key: "h", ctrlKey: true }, "recent-files"],
       // Caps Lock gives capitals without Shift.
       [{ key: "P", ctrlKey: true }, "quick-open"],
       // Keyboards with Back and Forward keys.
@@ -95,6 +97,8 @@ describe("actionFor", () => {
     expect(actionFor(key({ key: "c", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "b", ctrlKey: true, shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "p", metaKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "h" }))).toBeNull();
+    expect(actionFor(key({ key: "H", ctrlKey: true, shiftKey: true }))).toBeNull();
   });
 });
 

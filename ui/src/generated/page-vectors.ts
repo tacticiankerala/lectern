@@ -45,6 +45,39 @@ export const INJECTIONS: readonly { page: string; injected: string }[] = [
   { page: "<!DOCTYPE html><!-- c --><html><!-- d --><head>", injected: "<!DOCTYPE html><!-- c --><html><!-- d --><head><script nonce=\"NONCE\">BRIDGE</script>" },
 ];
 
+/** The charset `prepare_page` serves each page with, its bytes a character each. */
+export const CHARSETS: readonly { page: string; charset: string | null }[] = [
+  { page: "<!doctype html><html><head><meta charset=\"UTF-8\"><title>x", charset: "utf-8" },
+  { page: "<head><META http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\">", charset: "windows-1252" },
+  { page: "<meta charset=shift_jis>", charset: "shift_jis" },
+  { page: "<meta/charset=big5>", charset: "big5" },
+  { page: "<meta charset=\"koi8-r\" charset=\"utf-8\">", charset: "koi8-r" },
+  { page: "<meta charset=\"\">", charset: "utf-8" },
+  { page: "<meta charset=\"no such label!\">", charset: "utf-8" },
+  { page: "<!-- <meta charset=\"shift_jis\"> --><meta charset=\"utf-8\">", charset: "utf-8" },
+  { page: "<!--><meta charset=\"koi8-r\">", charset: "koi8-r" },
+  { page: "<!---><meta charset=\"koi8-r\">", charset: "koi8-r" },
+  { page: "<!-- unclosed <meta charset=\"koi8-r\">", charset: "utf-8" },
+  { page: "<meta content=\"text/html; charset=windows-1252\">", charset: "utf-8" },
+  { page: "<meta http-equiv=\"refresh\" content=\"0; charset=koi8-r\">", charset: "utf-8" },
+  { page: "<meta content='text/html; charset=\"iso-8859-2\"' http-equiv=Content-Type>", charset: "iso-8859-2" },
+  { page: "<meta http-equiv=content-type content=\"text/html;charset = gbk ;x\">", charset: "gbk" },
+  { page: "<p title='<meta charset=koi8-r>'><meta charset=utf-8>", charset: "utf-8" },
+  { page: "<?xml version=\"1.0\"?><meta charset=euc-kr>", charset: "euc-kr" },
+  { page: "<metal charset=koi8-r>", charset: "utf-8" },
+  { page: "<meta charset=\"UTF-16LE\">", charset: "utf-8" },
+  { page: "<meta charset=\"windows-1252\"><p>Hi</p>", charset: "windows-1252" },
+  { page: "<html><head><meta charset=\"windows-1252\"><title>Caf\u00e9", charset: "windows-1252" },
+  { page: "<title>Tide notes \u00c2\u00b7 \u00e2\u0080\u009cSpring\u00e2\u0080\u009d week</title>", charset: "utf-8" },
+  { page: "<p>Hi</p>", charset: "utf-8" },
+  { page: "", charset: "utf-8" },
+  { page: "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                <meta charset=\"koi8-r\">", charset: "utf-8" },
+  { page: "<title>Caf\u00e9</title>", charset: null },
+  { page: "\u00ef\u00bb\u00bf<p>Hi</p>", charset: null },
+  { page: "\u00ff\u00fe<\u0000p\u0000>\u0000", charset: "utf-8" },
+  { page: "\u00fe\u00ff\u0000<\u0000p\u0000>", charset: "utf-8" },
+];
+
 /** Where the bridge takes its open's key (`BRIDGE_KEY_SLOT`). */
 export const BRIDGE_KEY_SLOT = "\"LECTERN_BRIDGE_KEY\"";
 

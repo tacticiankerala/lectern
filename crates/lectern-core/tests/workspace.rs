@@ -834,6 +834,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
             sidebar_font_size: Some(2),
             review_comments: Some(false),
             html_pages: Some(HtmlPages::Static),
+            recent_in_menu: Some(99),
             ..SettingsPatch::default()
         },
     );
@@ -858,6 +859,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
     assert_eq!(shared.sidebar_font_size, 11);
     assert!(!shared.review_comments);
     assert_eq!(shared.html_pages, HtmlPages::Static);
+    assert_eq!(shared.recent_in_menu, 20);
 }
 
 // Open routing.

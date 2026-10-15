@@ -4,7 +4,7 @@
 /// How many leading bytes are checked for a NUL when deciding a file is binary.
 const BINARY_SNIFF_LEN: usize = 8 * 1024;
 
-const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+pub(crate) const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 const UTF16_LE_BOM: &[u8] = b"\xFF\xFE";
 const UTF16_BE_BOM: &[u8] = b"\xFE\xFF";
 

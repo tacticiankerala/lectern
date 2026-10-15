@@ -39,6 +39,17 @@ async function htmlPages(page: Page, mode: "full" | "offline" | "static"): Promi
   }, mode);
 }
 
+test("a page that declares no charset, a fragment from <title> on, reads as UTF-8", async ({
+  page,
+}) => {
+  await openFixture(page, "artifacts/fragment.html");
+  await reported(page);
+  await expect(inside(page).locator("h1")).toHaveText("Tide notes · week 3");
+  await expect(inside(page).locator("p").nth(1)).toHaveText(
+    "The harbour’s “low water” mark held twice · both mornings.",
+  );
+});
+
 test("a page shows in its sandbox, styled by its own sheet, its headings in the outline", async ({
   page,
 }) => {

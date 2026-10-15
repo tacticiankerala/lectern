@@ -97,6 +97,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reviewComments: true,
   commentsVisible: true,
   htmlPages: "full",
+  recentInMenu: 10,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -918,8 +919,11 @@ export class App {
     });
   }
 
-  /** Drops `path` from the recent files for good, then shows the welcome screen. */
-  private async removeRecent(path: string): Promise<void> {
+  /**
+   * Drops `path` from the recent files for good; without a document on screen, the welcome screen
+   * shows again, without it.
+   */
+  async removeRecent(path: string): Promise<void> {
     try {
       this.state.recent = await this.backend.removeRecent(path);
     } catch (e) {

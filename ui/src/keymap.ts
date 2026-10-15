@@ -9,6 +9,7 @@ export type Action =
   | "open-file"
   | "add-folder"
   | "quick-open"
+  | "recent-files"
   | "search"
   | "find"
   | "find-next"
@@ -42,6 +43,8 @@ const CTRL: Record<string, [Action | null, Action | null]> = {
   o: ["open-file", "toggle-outline"],
   n: ["new-window", "add-folder"],
   p: ["quick-open", null],
+  // History, as in browsers: the recent files menu.
+  h: ["recent-files", null],
   f: ["find", "search"],
   t: [null, "toggle-theme"],
   b: ["toggle-library", null],

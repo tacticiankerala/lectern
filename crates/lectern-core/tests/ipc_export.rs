@@ -11,7 +11,9 @@ use lectern_core::ipc::{
     SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
-use lectern_core::page::{inject_script, page_policy, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS};
+use lectern_core::page::{
+    inject_script, page_policy, prepare_page, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS,
+};
 use lectern_core::review::anchor::AnchorState;
 use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::text::PageBlock;
@@ -186,8 +188,9 @@ fn frame_keys_exported() {
 }
 
 /// Pages as Lectern serves them, for the UI's test that the fake's dev server (`ui/dev/`) serves
-/// them the same: each mode's policies, where the bridge goes in pages made to trip it up, and
-/// which files beside a page it may read.
+/// them the same: each mode's policies, where the bridge goes in pages made to trip it up, the
+/// charset each page made to trip up the prescan is served with, and which files beside a page it
+/// may read.
 #[test]
 fn page_vectors_exported() {
     // JSON, with the byte order mark spelled out rather than invisible.
@@ -256,6 +259,66 @@ fn page_vectors_exported() {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // Bytes, a character each, anything past ASCII spelled out.
+    let bytes = |page: &[u8]| {
+        let text: String = page.iter().map(|&b| char::from(b)).collect();
+        serde_json::to_string(&text)
+            .unwrap()
+            .chars()
+            .map(|c| {
+                if c.is_ascii() {
+                    c.to_string()
+                } else {
+                    format!("\\u{:04x}", u32::from(c))
+                }
+            })
+            .collect::<String>()
+    };
+    let mut late = vec![b' '; 1024];
+    late.extend_from_slice(b"<meta charset=\"koi8-r\">");
+    let charset_pages: Vec<&[u8]> = vec![
+        b"<!doctype html><html><head><meta charset=\"UTF-8\"><title>x",
+        b"<head><META http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\">",
+        b"<meta charset=shift_jis>",
+        b"<meta/charset=big5>",
+        b"<meta charset=\"koi8-r\" charset=\"utf-8\">",
+        b"<meta charset=\"\">",
+        b"<meta charset=\"no such label!\">",
+        b"<!-- <meta charset=\"shift_jis\"> --><meta charset=\"utf-8\">",
+        b"<!--><meta charset=\"koi8-r\">",
+        b"<!---><meta charset=\"koi8-r\">",
+        b"<!-- unclosed <meta charset=\"koi8-r\">",
+        b"<meta content=\"text/html; charset=windows-1252\">",
+        b"<meta http-equiv=\"refresh\" content=\"0; charset=koi8-r\">",
+        b"<meta content='text/html; charset=\"iso-8859-2\"' http-equiv=Content-Type>",
+        b"<meta http-equiv=content-type content=\"text/html;charset = gbk ;x\">",
+        b"<p title='<meta charset=koi8-r>'><meta charset=utf-8>",
+        b"<?xml version=\"1.0\"?><meta charset=euc-kr>",
+        b"<metal charset=koi8-r>",
+        b"<meta charset=\"UTF-16LE\">",
+        b"<meta charset=\"windows-1252\"><p>Hi</p>",
+        b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9",
+        "<title>Tide notes · “Spring” week</title>".as_bytes(),
+        b"<p>Hi</p>",
+        b"",
+        &late,
+        b"<title>Caf\xe9</title>",
+        b"\xEF\xBB\xBF<p>Hi</p>",
+        b"\xFF\xFE<\0p\0>\0",
+        b"\xFE\xFF\0<\0p\0>",
+    ];
+    let charsets = charset_pages
+        .iter()
+        .map(|page| {
+            let charset = prepare_page(page, None).charset;
+            format!(
+                "  {{ page: {}, charset: {} }},",
+                bytes(page),
+                charset.as_deref().map_or("null".to_owned(), quote)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let shared = SHARED_EXTENSIONS
         .iter()
         .map(|ext| quote(ext))
@@ -267,6 +330,8 @@ fn page_vectors_exported() {
          export const PAGE_POLICIES: readonly {{\n  mode: string;\n  token: string | null;\n  enforced: string;\n  reportOnly: string | null;\n}}[] = [\n{policies}\n];\n\n\
          /** Where `inject_script` puts `<script nonce=\"NONCE\">BRIDGE</script>` in each page. */\n\
          export const INJECTIONS: readonly {{ page: string; injected: string }}[] = [\n{injections}\n];\n\n\
+         /** The charset `prepare_page` serves each page with, its bytes a character each. */\n\
+         export const CHARSETS: readonly {{ page: string; charset: string | null }}[] = [\n{charsets}\n];\n\n\
          /** Where the bridge takes its open's key (`BRIDGE_KEY_SLOT`). */\n\
          export const BRIDGE_KEY_SLOT = {};\n\n\
          /** The extensions of the files beside a page it may read (`SHARED_EXTENSIONS`): its scripts and fonts. */\n\
@@ -282,6 +347,10 @@ fn page_vectors_exported() {
     ), "{ts}");
     assert!(
         ts.contains(r#"SHARED_EXTENSIONS: readonly string[] = ["js", "mjs", "woff", "woff2", "ttf", "otf"];"#),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(r#"{ page: "<title>Caf\u00e9</title>", charset: null },"#),
         "{ts}"
     );
 }

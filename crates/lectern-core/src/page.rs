@@ -2,8 +2,8 @@
 //! at the top of an open's own page, signed with the open's key (no other page gets it), the
 //! content security policy each *HTML pages* setting gives, the encoding a page
 //! declares (kept in the response's type, as the bridge pushes the page's own declaration down; a
-//! UTF-16 page is served as UTF-8), and the policy reports through which the browser names the
-//! hosts a page loaded from.
+//! UTF-16 page is served as UTF-8, and so is one that declares nothing and is valid UTF-8), and
+//! the policy reports through which the browser names the hosts a page loaded from.
 //!
 //! Where the bridge goes, and which encoding a page declares, are read as the browser's tokenizer
 //! and prescan read them, so no page can put a script of its own ahead of the bridge, or the bridge
@@ -30,7 +30,7 @@ use url::Url;
 
 use crate::ipc::{HtmlPages, PageLoads};
 use crate::library::pathmap::PAGE_ORIGIN;
-use crate::text::decode_utf16;
+use crate::text::{decode_utf16, UTF8_BOM};
 
 /// Lectern's bridge: one script, inserted at the top of an open's own page, that reports the page's
 /// text, headings, selection, scroll position and clicked links to Lectern, and paints its
@@ -291,7 +291,10 @@ pub struct PreparedPage {
 /// a page that isn't its open's own, as written. A page in UTF-16 (by its byte order mark, which
 /// the browser goes by first) is decoded as `text::decode_utf16` decodes it, an unpaired surrogate
 /// or an odd last byte becoming U+FFFD, and served as UTF-8: the bridge is UTF-8. Any other keeps
-/// its bytes, and the charset it declares (`declared_charset`).
+/// its bytes, and the charset it declares (`declared_charset`). One that declares none (no byte
+/// order mark, and nothing the prescan finds) is served as UTF-8 when it is valid UTF-8, as an
+/// agent's saved fragment (no doctype, no `<meta charset>`) is: WebView2 would read it as
+/// Windows-1252. Otherwise the browser guesses, as it would.
 pub fn prepare_page(html: &[u8], bridge: Option<(&str, &str)>) -> PreparedPage {
     let with_bridge = |bytes: &[u8]| match bridge {
         Some((nonce, key)) => inject_bridge(bytes, nonce, key),
@@ -304,7 +307,10 @@ pub fn prepare_page(html: &[u8], bridge: Option<(&str, &str)>) -> PreparedPage {
         },
         None => PreparedPage {
             body: with_bridge(html),
-            charset: declared_charset(html),
+            charset: declared_charset(html).or_else(|| {
+                (!html.starts_with(UTF8_BOM) && std::str::from_utf8(html).is_ok())
+                    .then(|| "utf-8".to_owned())
+            }),
         },
     }
 }

@@ -1,8 +1,8 @@
-// What the user asks for: shortcuts, the header's buttons and menus, the sidebar's and links'
-// context menus, copying paths in Windows or WSL form, quick open, Preferences, find in page,
-// full-text search, update checks, About and the breadcrumb chooser (all loaded on first use),
-// focus mode, the sidebars' visibility and widths, showing or hiding the review comments, a new
-// window and quitting.
+// What the user asks for: shortcuts, the header's buttons and menus (the recent files menu among
+// them, recent-files.ts), the sidebar's and links' context menus, copying paths in Windows or WSL
+// form, quick open, Preferences, find in page, full-text search, update checks, About and the
+// breadcrumb chooser (all loaded on first use), focus mode, the sidebars' visibility and widths,
+// showing or hiding the review comments, a new window and quitting.
 import type { About } from "./about";
 import type { App } from "./app";
 import {
@@ -28,6 +28,7 @@ import type { Menu, MenuEntry } from "./menu";
 import { blockAt } from "./position";
 import type { Preferences } from "./preferences";
 import type { QuickOpen } from "./quick-open";
+import { recentChoices, type RecentChoice } from "./recent-files";
 import { FlowHold, keepFlow } from "./reflow";
 import type { SearchPanel } from "./search-panel";
 import { bumpFontSize, bumpSidebarFontSize, toggleThemeMode } from "./themes";
@@ -58,6 +59,8 @@ export class Actions {
   /** The menu open, if any. */
   private menu: Menu | null = null;
   private readonly moreButton: HTMLButtonElement;
+  /** The clock: the recent files menu, off while it would list none. */
+  private readonly recentButton: HTMLButtonElement;
   private readonly libraryButton: HTMLButtonElement;
   /** Shows or hides every comment surface; its badge counts the open comments. */
   private readonly commentsButton: HTMLButtonElement;
@@ -105,12 +108,21 @@ export class Actions {
     outlineButton.addEventListener("click", () => {
       this.toggleSidebar("outline");
     });
+    this.recentButton = iconButton("lx-recent-btn", "Recent files", ICONS.recent, "Ctrl+H");
+    this.recentButton.setAttribute("aria-haspopup", "menu");
+    this.recentButton.addEventListener("click", () => {
+      void this.toggleRecentMenu();
+    });
+    this.syncRecentButton();
+    app.on("doc", () => {
+      this.syncRecentButton();
+    });
     this.moreButton = iconButton("lx-more-btn", "More", ICONS.more);
     this.moreButton.setAttribute("aria-haspopup", "menu");
     this.moreButton.addEventListener("click", () => {
       void this.toggleMoreMenu();
     });
-    app.layout.headerActions.append(outlineButton, this.moreButton);
+    app.layout.headerActions.append(outlineButton, this.recentButton, this.moreButton);
     app.on("library", () => {
       this.preferences?.refresh();
     });
@@ -152,6 +164,10 @@ export class Actions {
         return true;
       case "quick-open":
         void this.showQuickOpen();
+        return true;
+      case "recent-files":
+        if (this.recentChoices().length === 0) return false;
+        void this.toggleRecentMenu();
         return true;
       case "search":
         this.app.openSearch();
@@ -452,11 +468,12 @@ export class Actions {
   }
 
   /**
-   * Before `opening` opens: closes the menu and every other overlay (the workspaces' dropdown, the
-   * breadcrumb chooser, quick open, search, Preferences, About, the reading panel), so only one is
-   * ever on top. The find bar stays: it sits above the document rather than over it, as before.
+   * Before `opening` (or a menu, given none) opens: closes the menu and every other overlay (the
+   * workspaces' dropdown, the breadcrumb chooser, quick open, search, Preferences, About, the
+   * reading panel), so only one is ever on top. The find bar stays: it sits above the document
+   * rather than over it, as before.
    */
-  closeOverlays(opening: { close(): void }): void {
+  closeOverlays(opening?: { close(): void }): void {
     this.menu?.close(false);
     for (const overlay of [
       this.app.workspaces.menu,
@@ -490,7 +507,10 @@ export class Actions {
     }
   }
 
-  /** Opens a menu, replacing any other; it forgets itself once closed. */
+  /**
+   * Opens a menu, replacing any other; it forgets itself once closed, and the button it hangs
+   * from, if any, is no longer expanded.
+   */
   private async openMenu(
     entries: MenuEntry[],
     at: HTMLElement | { x: number; y: number },
@@ -501,10 +521,63 @@ export class Actions {
     const menu: Menu = new Menu(this.app.layout.overlayRoot, entries, at, () => {
       if (this.menu === menu) {
         this.menu = null;
-        this.moreButton.setAttribute("aria-expanded", "false");
+        menu.anchor?.setAttribute("aria-expanded", "false");
       }
     });
     this.menu = menu;
+  }
+
+  /**
+   * The recent files menu, from the clock or Ctrl+H, once every other overlay is closed; again, it
+   * closes.
+   */
+  private async toggleRecentMenu(): Promise<void> {
+    if (this.menu?.isOpen && this.menu.anchor === this.recentButton) {
+      this.menu.close();
+      return;
+    }
+    this.closeOverlays();
+    await this.openMenu(this.recentEntries(), this.recentButton);
+    this.recentButton.setAttribute("aria-expanded", "true");
+  }
+
+  /** The recent files the menu lists: every one but the file on screen, up to the setting. */
+  private recentChoices(): RecentChoice[] {
+    const { recent, library, settings } = this.app.state;
+    return recentChoices(recent, this.app.nav.currentPath(), library.roots, settings.recentInMenu);
+  }
+
+  /** The recent files menu's entries: the files, each with its ×, then quick open. */
+  private recentEntries(): MenuEntry[] {
+    const choices = this.recentChoices();
+    const files: MenuEntry[] = choices.map((choice) => ({
+      label: choice.title,
+      detail: choice.folder,
+      title: `${choice.path}\nDelete removes it`,
+      digit: choice.key ?? "",
+      run: () => void this.app.open(choice.path, { push: true }),
+      remove: {
+        label: `Remove ${choice.title} from recent`,
+        title: "Remove from recent",
+        run: () => this.removeRecent(choice.path),
+      },
+    }));
+    return [
+      ...(files.length > 0 ? files : [{ note: "No other recent files" }]),
+      { label: "All files…", keys: "Ctrl+P", footer: true, run: () => void this.showQuickOpen() },
+    ];
+  }
+
+  /** Drops `path` from the recent files for good; answers the recent files menu's entries left. */
+  private async removeRecent(path: string): Promise<MenuEntry[]> {
+    await this.app.removeRecent(path);
+    this.syncRecentButton();
+    return this.recentEntries();
+  }
+
+  /** The clock is off while the menu would list no file. */
+  private syncRecentButton(): void {
+    this.recentButton.disabled = this.recentChoices().length === 0;
   }
 
   private async toggleMoreMenu(): Promise<void> {

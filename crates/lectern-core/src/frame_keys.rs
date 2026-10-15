@@ -60,6 +60,7 @@ const CHORDS: &[(&str, u8)] = &[
     ("n", C),
     ("N", C | S),
     ("p", C),
+    ("h", C),
     ("f", C),
     ("F", C | S),
     ("T", C | S),

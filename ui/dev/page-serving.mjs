@@ -1,7 +1,8 @@
 // How the fake's dev server serves an HTML page (dev/serve.mjs), as `lectern_core::page` does: its
 // policies, where Lectern's bridge goes in it, read as the browser's tokenizer reads a page's
-// prologue, and which files beside it the page may read. test/page-serving.test.ts holds them to
-// what Rust gives (src/generated/page-vectors.ts).
+// prologue, the charset it goes out with, found as the browser's prescan finds a declared one, and
+// which files beside it the page may read. test/page-serving.test.ts holds them to what Rust gives
+// (src/generated/page-vectors.ts).
 
 const ALWAYS = "object-src 'none'; form-action 'none'; base-uri 'self'";
 
@@ -162,4 +163,200 @@ function startTag(html, at, name) {
     }
   }
   return null;
+}
+
+/** How far into a page the browser looks for the encoding it declares. */
+const CHARSET_PRESCAN = 1024;
+
+/**
+ * As `lectern_core::page::prepare_page` gives it, the charset a page's type carries, from its
+ * bytes: UTF-8 for a page in UTF-16 (by its byte order mark), which goes out as UTF-8; else the
+ * charset it declares; else, with no UTF-8 byte order mark, UTF-8 when it is valid UTF-8; else
+ * none.
+ */
+export function servedCharset(bytes) {
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
+    return "utf-8";
+  }
+  const declared = declaredCharset(bytes);
+  if (declared !== null) return declared;
+  const bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  return !bom && validUtf8(bytes) ? "utf-8" : null;
+}
+
+function validUtf8(bytes) {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * As `lectern_core::page::declared_charset`: the encoding a `<meta>` in the first 1024 bytes
+ * declares, outside comments and other tags, lower-cased; UTF-16 labels mean UTF-8. Each byte is a
+ * character here.
+ */
+function declaredCharset(bytes) {
+  const html = String.fromCharCode(...bytes.subarray(0, CHARSET_PRESCAN));
+  const cursor = { at: 0 };
+  while (cursor.at < html.length) {
+    const at = cursor.at;
+    const rest = html.slice(at);
+    if (rest.startsWith("<!--")) {
+      const end = html.indexOf("-->", at + 2);
+      cursor.at = end < 0 ? html.length : end + 2;
+    } else if (
+      rest.slice(0, 5).toLowerCase() === "<meta" &&
+      (rest[5] === "/" || isSpace(rest[5]))
+    ) {
+      cursor.at += 6;
+      const charset = metaCharset(html, cursor);
+      if (charset !== null) return charset;
+      continue;
+    } else if (rest[0] === "<" && (isAlpha(rest[1]) || (rest[1] === "/" && isAlpha(rest[2])))) {
+      while (cursor.at < html.length && !isSpace(html[cursor.at]) && html[cursor.at] !== ">") {
+        cursor.at++;
+      }
+      while (attribute(html, cursor) !== null);
+    } else if (rest.startsWith("<!") || rest.startsWith("</") || rest.startsWith("<?")) {
+      const end = html.indexOf(">", at);
+      cursor.at = end < 0 ? html.length : end;
+    }
+    cursor.at++;
+  }
+  return null;
+}
+
+function isAlpha(c) {
+  return c !== undefined && /^[A-Za-z]$/.test(c);
+}
+
+/** ASCII letters lower-cased, and nothing else. */
+function lower(c) {
+  return c >= "A" && c <= "Z" ? c.toLowerCase() : c;
+}
+
+/** As `meta_charset`: what a `<meta>`'s attributes, read from `cursor`, declare; null for none. */
+function metaCharset(html, cursor) {
+  const seen = new Set();
+  let pragma = false;
+  // Whether the charset came from `content=` (and needs the pragma), or from `charset=`.
+  let needsPragma = null;
+  let charset = null;
+  for (let attr = attribute(html, cursor); attr !== null; attr = attribute(html, cursor)) {
+    const [name, value] = attr;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (name === "http-equiv" && value === "content-type") {
+      pragma = true;
+    } else if (name === "content" && charset === null) {
+      const found = contentCharset(value);
+      if (found !== null) {
+        charset = found;
+        needsPragma = true;
+      }
+    } else if (name === "charset") {
+      charset = value;
+      needsPragma = false;
+    }
+  }
+  if (needsPragma === null || (needsPragma && !pragma) || charset === null) return null;
+  if (!/^[A-Za-z0-9_.:-]+$/.test(charset)) return null;
+  return isUtf16(charset) ? "utf-8" : charset;
+}
+
+/** As `is_utf16`: whether `label` names UTF-16 (`utf-16le` or `utf-16be`, by any label). */
+function isUtf16(label) {
+  return (
+    label.startsWith("utf-16") ||
+    [
+      "unicode",
+      "unicodefeff",
+      "unicodefffe",
+      "ucs-2",
+      "csunicode",
+      "iso-10646-ucs-2",
+      "unicode-1-1",
+    ].includes(label)
+  );
+}
+
+/**
+ * As `attribute`: the next attribute of a tag, read from `cursor` as the prescan reads one, its
+ * name and value lower-cased; null at the tag's end, or the bytes'.
+ */
+function attribute(html, cursor) {
+  const at = () => html[cursor.at];
+  while (at() !== undefined && (isSpace(at()) || at() === "/")) cursor.at++;
+  if (at() === undefined || at() === ">") return null;
+  let name = "";
+  for (;;) {
+    const c = at();
+    if (c === undefined) return null;
+    if (c === "=" && name !== "") {
+      cursor.at++;
+      break;
+    }
+    if (isSpace(c)) {
+      while (isSpace(at())) cursor.at++;
+      if (at() === undefined) return null;
+      if (at() !== "=") return [name, ""];
+      cursor.at++;
+      break;
+    }
+    if (c === "/" || c === ">") return [name, ""];
+    name += lower(c);
+    cursor.at++;
+  }
+  while (isSpace(at())) cursor.at++;
+  const first = at();
+  if (first === undefined) return null;
+  let value = "";
+  if (first === '"' || first === "'") {
+    for (;;) {
+      cursor.at++;
+      const c = at();
+      if (c === undefined) return null;
+      if (c === first) {
+        cursor.at++;
+        return [name, value];
+      }
+      value += lower(c);
+    }
+  }
+  if (first === ">") return [name, value];
+  for (;;) {
+    const c = at();
+    if (c === undefined) return null;
+    if (isSpace(c) || c === ">") return [name, value];
+    value += lower(c);
+    cursor.at++;
+  }
+}
+
+/** As `content_charset`: the charset in a meta's `content` value (`text/html; charset=…`). */
+function contentCharset(content) {
+  let at = 0;
+  for (;;) {
+    const found = content.indexOf("charset", at);
+    if (found < 0) return null;
+    at = found + 7;
+    while (isSpace(content[at])) at++;
+    if (content[at] === "=") {
+      at++;
+      break;
+    }
+  }
+  while (isSpace(content[at])) at++;
+  const first = content[at];
+  if (first === undefined) return null;
+  if (first === '"' || first === "'") {
+    const end = content.indexOf(first, at + 1);
+    return end < 0 ? null : content.slice(at + 1, end);
+  }
+  let end = at;
+  while (end < content.length && !isSpace(content[end]) && content[end] !== ";") end++;
+  return end > at ? content.slice(at, end) : null;
 }

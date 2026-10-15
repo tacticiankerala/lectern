@@ -153,6 +153,7 @@ status: active
 | Ctrl+O | Open a file |
 | Ctrl+Shift+N | Add a folder to the library |
 | Ctrl+P | Quick open |
+| Ctrl+H | Recent files in this workspace; press 1–9 or 0 to open one |
 | Ctrl+Shift+. | Open the breadcrumb chooser on the current file's folder |
 | Ctrl+Shift+F | Search the library |
 | Ctrl+F, then F3 / Shift+F3 | Find in the page, next and previous match |

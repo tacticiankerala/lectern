@@ -123,6 +123,7 @@ fn in_a_page_lecterns_shortcuts_are_handled_and_esc_goes_through_too() {
         (vk('O'), CTRL, "o"),
         (vk('F'), CTRL, "f"),
         (vk('P'), CTRL, "p"),
+        (vk('H'), CTRL, "h"),
         (vk('M'), CTRL_ALT, "m"),
         (VK_F3, NONE, "F3"),
         (VK_F3, SHIFT, "F3"),
@@ -181,6 +182,7 @@ fn in_a_pdf_the_viewer_keeps_its_find_print_and_zoom() {
         (VK_F11, NONE, "F11"),
         (vk('F'), CTRL_SHIFT, "F"),
         (vk('O'), CTRL, "o"),
+        (vk('H'), CTRL, "h"),
         (VK_OEM_PLUS, CTRL_ALT, "="),
     ] {
         assert_eq!(

@@ -113,6 +113,8 @@ pub struct Settings {
     pub comments_visible: bool,
     /// What HTML pages may do (scripts and the internet by default). Every window shares it.
     pub html_pages: HtmlPages,
+    /// How many recent files the header's recent files menu lists, 5–20 (10 by default).
+    pub recent_in_menu: u8,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -142,6 +144,7 @@ pub struct SettingsPatch {
     pub review_comments: Option<bool>,
     pub comments_visible: Option<bool>,
     pub html_pages: Option<HtmlPages>,
+    pub recent_in_menu: Option<u8>,
 }
 
 /// A window's settings as a command answers or `settings-changed` carries them, with the revision
