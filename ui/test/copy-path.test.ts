@@ -24,6 +24,7 @@ const HTML = `
 <pre><code id="spaced">S:\\Notes\\My Vault\\plan.md</code></pre>
 <pre><code id="two">cat /mnt/s/a.md /mnt/s/b.md</code></pre>
 <pre><code id="big"></code></pre>
+<p><code id="line-ref">spec/a_spec.rb:12</code> <code id="ticked">\`S:\\Notes\\plan.md:12\`</code> <code id="quoted">"app/x y.rb"</code></p>
 <p id="prose">See plan.md for more.</p>
 <p id="inline">Run <code id="rel">${RELATIVE}</code> now.</p>
 <p>
@@ -180,6 +181,8 @@ describe("a selection read as paths", () => {
       "S:\\Notes\\My Vault\\plan.md",
       "S:/Notes/My Vault/plan.md",
       " /mnt/s/Notes/My Vault/plan.md\n",
+      "S:\\Notes\\Report - final.md",
+      "/home/me/notes/a - b -- c.md",
       '"\\\\nas\\share\\My Notes\\x.md"',
     ]) {
       expect(pathsIn(text), text).toEqual({ kind: "text", path: text });
@@ -188,6 +191,7 @@ describe("a selection read as paths", () => {
       "/mnt/s/a.md /mnt/s/b.md",
       "S:\\My Vault\\a.md C:\\x.md",
       "/home/me/run.sh --fast",
+      "/home/me/run.sh -v",
       "S:\\x\\a b.md | less",
       "/x/a b.md > out.txt",
       "/x/a b.md; ls",
@@ -241,12 +245,14 @@ describe("the copy path shortcuts", () => {
     if (!code) throw new Error("no code text");
     select(code, 0, "/home/me/projects/app/run.sh\n".length);
     expect(press("W")).toBe(true);
-    expect(await copied()).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\projects\\app\\run.sh");
+    // The line break selected with it stays.
+    expect(await copied()).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\projects\\app\\run.sh\n");
   });
 
-  it("send the open file, a wikilink's target and a link's absolute path as exact paths, and a selected path as text", async () => {
+  it("send the open file and a wikilink's target as exact paths, a link's path as written, and a selected path as text", async () => {
     const { fake } = await started();
     const pathForms = vi.spyOn(fake, "pathForms");
+    const writtenForms = vi.spyOn(fake, "writtenForms");
     expect(press("W")).toBe(true);
     expect(pathForms).toHaveBeenLastCalledWith(A, true);
     el("to-plan").focus();
@@ -254,12 +260,11 @@ describe("the copy path shortcuts", () => {
     expect(pathForms).toHaveBeenLastCalledWith(PLAN, true);
     el("to-absolute").focus();
     expect(press("W")).toBe(true);
-    expect(pathForms).toHaveBeenLastCalledWith("/home/me/notes/v1.0#archive.md", true);
-    // A relative one only changes its separators, here.
-    const calls = pathForms.mock.calls.length;
+    expect(writtenForms).toHaveBeenLastCalledWith("/home/me/notes/v1.0#archive.md");
     el("to-report").focus();
     expect(press("W")).toBe(true);
-    expect(pathForms).toHaveBeenCalledTimes(calls);
+    expect(writtenForms).toHaveBeenLastCalledWith("../artifacts/report.html");
+    expect(pathForms).toHaveBeenCalledTimes(2);
     const code = el("code").firstChild;
     if (!code) throw new Error("no code text");
     select(code, 0, "/home/me/projects/app/run.sh".length);
@@ -346,6 +351,19 @@ describe("the copy path shortcuts", () => {
     expect(pathForms).not.toHaveBeenCalled();
     expect(convertPaths).not.toHaveBeenCalled();
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("keep everything around a selected path but its format: a line, backticks, quotes", async () => {
+    await started();
+    selectAll("line-ref");
+    expect(press("W")).toBe(true);
+    expect(await copied()).toBe("spec\\a_spec.rb:12");
+    selectAll("ticked");
+    expect(pressAgain("C")).toBe(true);
+    expect(await copied()).toBe("`/mnt/s/Notes/plan.md:12`");
+    selectAll("quoted");
+    expect(pressAgain("W")).toBe(true);
+    expect(await copied()).toBe('"app\\x y.rb"');
   });
 
   it("say how many paths had no form, and copy them as written", async () => {
@@ -576,21 +594,23 @@ describe("a link's right-click menu", () => {
   });
 
   it("copies a link's written path literally: a `#` or a trailing quote is part of it", async () => {
-    await started();
+    const { fake } = await started();
+    const writtenForms = vi.spyOn(fake, "writtenForms");
     await choose(el("to-hash"), "Copy as Windows path");
     expect(await copied()).toBe("..\\notes\\v1.0#archive.md");
     await choose(el("to-hash"), "Copy as WSL path");
     expect(await copied()).toBe("../notes/v1.0#archive.md");
     await choose(el("to-apostrophe"), "Copy as Windows path");
     expect(await copied()).toBe("docs\\owners'");
+    expect(writtenForms).toHaveBeenLastCalledWith("docs/owners'");
   });
 
-  it("copies a link's absolute written path as an exact path", async () => {
+  it("copies a link's absolute written path as Rust maps it, the `#` kept", async () => {
     const { fake } = await started();
-    const pathForms = vi.spyOn(fake, "pathForms");
+    const writtenForms = vi.spyOn(fake, "writtenForms");
     await choose(el("to-absolute"), "Copy as WSL path");
     expect(await copied()).toBe("/home/me/notes/v1.0#archive.md");
-    expect(pathForms).toHaveBeenLastCalledWith("/home/me/notes/v1.0#archive.md", true);
+    expect(writtenForms).toHaveBeenLastCalledWith("/home/me/notes/v1.0#archive.md");
     await choose(el("to-absolute"), "Copy as Windows path");
     expect(await copied()).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\notes\\v1.0#archive.md");
   });
@@ -598,6 +618,7 @@ describe("a link's right-click menu", () => {
   it("copies a link written with a bare file name as written, in either form", async () => {
     const { fake } = await started();
     const pathForms = vi.spyOn(fake, "pathForms");
+    const writtenForms = vi.spyOn(fake, "writtenForms");
     await choose(el("to-sibling"), "Copy as Windows path");
     expect(await copied()).toBe("plan.md");
     await vi.waitFor(() => {
@@ -614,6 +635,7 @@ describe("a link's right-click menu", () => {
     expect(press("W")).toBe(true);
     expect(await copied()).toBe("plan.md");
     expect(pathForms).not.toHaveBeenCalled();
+    expect(writtenForms).toHaveBeenLastCalledWith("plan.md");
   });
 
   it("copies where a wikilink leads, written with no path", async () => {

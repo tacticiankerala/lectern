@@ -135,10 +135,11 @@ function isPathToken(token: string): boolean {
  * - `exact`: a path on this machine (the open file, a tree row, where a wikilink leads), which Rust
  *   takes as it is;
  * - `written`: the path a link was written with, which the renderer has already decoded and
- *   stripped of its fragment and line: an absolute one is taken as an exact path, any other only
- *   changes its separators (a bare file name has none to change), nothing trimmed, never resolved;
- * - `text`: one path as written in a selection or a broken link's text, which Rust cleans up and
- *   maps as a link, or, relative, only changes its separators;
+ *   stripped of its fragment and line, so Rust takes it as it is (`written_forms`): an absolute one
+ *   mapped as the link is, any other only changing its separators (a bare file name has none);
+ * - `text`: one path in a selection or a broken link's text, which Rust maps by itself (an
+ *   absolute one as a link is, a relative one only changing its separators), keeping the quotes,
+ *   backticks, `:line` or `#anchor` around it;
  * - `paths`: text holding paths (a selected command or block), each converted where it is.
  */
 export type PathToCopy =
@@ -150,16 +151,12 @@ export type PathToCopy =
 /** Where an absolute path starts: `X:\`, `X:/`, `\\` or `/`. */
 const ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/;
 
-/** Whether `path` is absolute: a drive, a UNC or a Linux path. */
-export function isAbsolute(path: string): boolean {
-  return ABSOLUTE.test(path);
-}
-
 /**
  * What makes a line that starts as an absolute path read as a command: another absolute path or a
- * flag after whitespace, or a shell operator.
+ * flag (`-x`, `--name`) after whitespace, or a shell operator. A dash on its own, as in
+ * `Report - final.md`, is part of a name.
  */
-const COMMAND = /\s(?:[A-Za-z]:[\\/]|\\\\|\/|-)|[|;&<>]/;
+const COMMAND = /\s(?:[A-Za-z]:[\\/]|\\\\|\/|--?[A-Za-z])|[|;&<>]/;
 
 /** One character of the whitespace, quotes and backticks that core trims from around a path. */
 const AROUND = /[\p{White_Space}"'`“”‘’]/u;
@@ -181,7 +178,7 @@ function trimmed(text: string): string {
  */
 export function pathsIn(text: string): PathToCopy | null {
   const line = trimmed(text);
-  if (isAbsolute(line) && !/[\n\r]/.test(line) && !COMMAND.test(line)) {
+  if (ABSOLUTE.test(line) && !/[\n\r]/.test(line) && !COMMAND.test(line)) {
     return { kind: "text", path: text };
   }
   const tokens = pathTokens(text);

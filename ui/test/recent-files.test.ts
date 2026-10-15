@@ -316,6 +316,22 @@ describe("the menu", () => {
     expect(names.sort()).toEqual(["a.md", "b.md", "d.md"]);
   });
 
+  it("closes on Ctrl+H once × has emptied it, though it lists none", async () => {
+    const { app } = await started({ recent: [recent(A, "Aye"), recent(B, "Bee")], initial: B });
+    const menu = await openRecent(app);
+    removeButton(menu, "Aye").click();
+    await vi.waitFor(() => {
+      expect(rows(menu)).toEqual([]);
+    });
+    expect(shownMenu()).toBe(menu);
+    expect(app.actions.run("recent-files")).toBe(true);
+    await vi.waitFor(() => {
+      expect(shownMenu()).toBeNull();
+    });
+    // Now shut, with nothing to list, it stays shut.
+    expect(app.actions.run("recent-files")).toBe(false);
+  });
+
   it("forgets one from the welcome screen's list as well, and says when none is left", async () => {
     const { app } = await started({ recent: [recent(A, "Aye"), recent(C, "Sea")] });
     const welcome = () =>

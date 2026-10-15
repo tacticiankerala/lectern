@@ -125,6 +125,10 @@ export class TauriBackend implements Backend {
     return invoke("convert_paths", { text, form });
   }
 
+  writtenForms(raw: string): Promise<PathForms> {
+    return invoke("written_forms", { raw });
+  }
+
   revealInExplorer(path: string): Promise<void> {
     return invoke("reveal_in_explorer", { path });
   }

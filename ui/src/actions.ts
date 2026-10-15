@@ -15,7 +15,6 @@ import {
   TOAST_PATH_CHARS,
   copiedWith,
   inNoteOrComment,
-  isAbsolute,
   linkPaths,
   middleTruncate,
   selectedPaths,
@@ -174,7 +173,8 @@ export class Actions {
         void this.showQuickOpen();
         return true;
       case "recent-files":
-        if (this.recentChoices().length === 0) return false;
+        // An open menu closes, even one × has emptied; a shut one opens only with files to list.
+        if (!this.recentMenuOpen() && this.recentChoices().length === 0) return false;
         void this.toggleRecentMenu();
         return true;
       case "search":
@@ -544,13 +544,18 @@ export class Actions {
    * closes.
    */
   private async toggleRecentMenu(): Promise<void> {
-    if (this.menu?.isOpen && this.menu.anchor === this.recentButton) {
-      this.menu.close();
+    if (this.recentMenuOpen()) {
+      this.menu?.close();
       return;
     }
     this.closeOverlays();
     await this.openMenu(this.recentEntries(), this.recentButton);
     this.recentButton.setAttribute("aria-expanded", "true");
+  }
+
+  /** Whether the recent files menu is open. */
+  private recentMenuOpen(): boolean {
+    return this.menu?.isOpen === true && this.menu.anchor === this.recentButton;
   }
 
   /** The recent files the menu lists: every one but the file on screen, up to the setting. */
@@ -830,16 +835,9 @@ export class Actions {
   /**
    * Copies `target` in `form`, as Rust works it out, and says so in a toast. One path with no such
    * form copies nothing, and the toast says so; text holding paths is copied with those that have
-   * one converted, and the toast counts both. A link's relative path as written only changes its
-   * separators, here.
+   * one converted, and the toast counts both.
    */
   private async copyAs(target: PathToCopy, form: PathForm): Promise<void> {
-    if (target.kind === "written" && !isAbsolute(target.path)) {
-      const path =
-        form === "windows" ? target.path.replaceAll("/", "\\") : target.path.replaceAll("\\", "/");
-      await this.copyText(path, COPIED[form]);
-      return;
-    }
     if (target.kind === "paths") {
       let result: ConvertedPaths;
       try {
@@ -853,7 +851,10 @@ export class Actions {
     }
     let forms: PathForms;
     try {
-      forms = await this.app.backend.pathForms(target.path, target.kind !== "text");
+      forms =
+        target.kind === "written"
+          ? await this.app.backend.writtenForms(target.path)
+          : await this.app.backend.pathForms(target.path, target.kind === "exact");
     } catch (e) {
       this.app.toast(String(e));
       return;

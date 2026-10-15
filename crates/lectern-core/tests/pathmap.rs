@@ -405,23 +405,76 @@ fn forms_of_an_unmapped_share_have_no_wsl_form() {
     );
 }
 
+/// A selection keeps everything but its path's format: the quotes, backticks, `:line` or
+/// `#anchor` around the path, and the whitespace, stay as they are, and only the path between them
+/// is mapped (by itself, so the index and the mappings see the path alone).
 #[test]
-fn forms_drop_line_suffixes_anchors_quotes_and_backticks() {
-    let plan = path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"));
-    for raw in [
-        r"`S:\Notes\plan.md:12`",
-        r"S:\Notes\plan.md:12:5",
-        r"S:\Notes\plan.md#L12",
-        r"S:\Notes\plan.md#next-steps",
-        r#"  "S:\Notes\plan.md"  "#,
-        "'S:\\Notes\\plan.md'\n",
+fn forms_keep_what_surrounds_the_path() {
+    for (raw, windows, wsl) in [
+        (
+            r"`S:\Notes\plan.md:12`",
+            r"`S:\Notes\plan.md:12`",
+            "`/mnt/s/Notes/plan.md:12`",
+        ),
+        (
+            r"S:\Notes\plan.md:12:5",
+            r"S:\Notes\plan.md:12:5",
+            "/mnt/s/Notes/plan.md:12:5",
+        ),
+        (
+            r"S:\Notes\plan.md#L12",
+            r"S:\Notes\plan.md#L12",
+            "/mnt/s/Notes/plan.md#L12",
+        ),
+        (
+            "/mnt/s/Notes/plan.md#next-steps",
+            r"S:\Notes\plan.md#next-steps",
+            "/mnt/s/Notes/plan.md#next-steps",
+        ),
+        (
+            r#"  "S:\Notes\plan.md"  "#,
+            r#"  "S:\Notes\plan.md"  "#,
+            r#"  "/mnt/s/Notes/plan.md"  "#,
+        ),
+        (
+            "'/mnt/s/Notes/plan.md'\n",
+            "'S:\\Notes\\plan.md'\n",
+            "'/mnt/s/Notes/plan.md'\n",
+        ),
+        (
+            "spec/a_spec.rb:12",
+            r"spec\a_spec.rb:12",
+            "spec/a_spec.rb:12",
+        ),
+        (r#""app/x y.rb""#, r#""app\x y.rb""#, r#""app/x y.rb""#),
     ] {
-        assert_eq!(ubuntu().forms(raw, None), plan, "{raw:?}");
+        assert_eq!(
+            ubuntu().forms(raw, None),
+            path_forms(Some(windows), Some(wsl)),
+            "{raw:?}"
+        );
     }
     // A `#` inside a folder name is part of the path.
     assert_eq!(
         ubuntu().forms(r"C:\src\C#\app.cs", None),
         path_forms(Some(r"C:\src\C#\app.cs"), Some("/mnt/c/src/C#/app.cs"))
+    );
+}
+
+/// The index looks up the path alone, not its `:line`: a moved note's link written with a line
+/// still finds the file, and keeps the line.
+#[test]
+fn forms_look_up_the_path_without_what_surrounds_it() {
+    let (_tmp, root) = common::vault_copy();
+    let ix = common::index_of(&root);
+    let readme = common::native_join(&root, "work/alpha/README.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ubuntu()
+            .forms("`/home/me/shared/vault/work/alpha/README.md:3`", Some(&ix))
+            .windows,
+        Some(format!("`{readme}:3`"))
     );
 }
 
@@ -433,9 +486,13 @@ fn forms_keep_a_hash_in_a_file_name() {
         Some("/mnt/s/Notes/Meeting #3.md"),
     );
     assert_eq!(ubuntu().forms(r"S:\Notes\Meeting #3.md", None), meeting);
+    // `#agenda` is an anchor, kept after the path; the `#3` stays part of the name.
     assert_eq!(
-        ubuntu().forms(r"S:\Notes\Meeting #3.md#agenda", None),
-        meeting
+        ubuntu().forms("/mnt/s/Notes/Meeting #3.md#agenda", None),
+        path_forms(
+            Some(r"S:\Notes\Meeting #3.md#agenda"),
+            Some("/mnt/s/Notes/Meeting #3.md#agenda"),
+        )
     );
     assert_eq!(
         ubuntu().forms("/home/me/Issue #12 fix.md", None),
@@ -457,13 +514,16 @@ fn forms_of_a_relative_path_flip_its_separators() {
     );
     assert_eq!(
         ubuntu().forms(r"`spec\a\b_spec.rb:12`", None),
-        path_forms(Some(r"spec\a\b_spec.rb"), Some("spec/a/b_spec.rb"))
+        path_forms(
+            Some(r"`spec\a\b_spec.rb:12`"),
+            Some("`spec/a/b_spec.rb:12`")
+        )
     );
     assert_eq!(
         ubuntu().forms("../artifacts/report.html#summary", None),
         path_forms(
-            Some(r"..\artifacts\report.html"),
-            Some("../artifacts/report.html")
+            Some(r"..\artifacts\report.html#summary"),
+            Some("../artifacts/report.html#summary")
         )
     );
     assert_eq!(
@@ -500,6 +560,65 @@ fn forms_of_a_bare_name_or_a_url_are_none() {
     ] {
         assert_eq!(ubuntu().forms(raw, None), path_forms(None, None), "{raw:?}");
     }
+}
+
+/// A link's path as written (`data-written`): the renderer has already decoded it and dropped its
+/// fragment and line, so nothing more is trimmed, and a `#` or a quote is part of a name.
+#[test]
+fn written_forms_take_a_links_path_as_it_is() {
+    for (written, windows, wsl) in [
+        (
+            "../notes/v1.0#archive.md",
+            r"..\notes\v1.0#archive.md",
+            "../notes/v1.0#archive.md",
+        ),
+        ("docs/owners'", r"docs\owners'", "docs/owners'"),
+        // A bare file name has no separators to change.
+        ("plan.md", "plan.md", "plan.md"),
+        (
+            "/home/me/notes/v1.0#archive.md",
+            r"\\wsl.localhost\Ubuntu\home\me\notes\v1.0#archive.md",
+            "/home/me/notes/v1.0#archive.md",
+        ),
+        (
+            r"S:\Notes\v1.0#archive.md",
+            r"S:\Notes\v1.0#archive.md",
+            "/mnt/s/Notes/v1.0#archive.md",
+        ),
+    ] {
+        assert_eq!(
+            ubuntu().written_forms(written, None),
+            path_forms(Some(windows), Some(wsl)),
+            "{written}"
+        );
+    }
+    for written in ["", r"\notes\plan.md", r"C:notes\plan.md"] {
+        assert_eq!(
+            ubuntu().written_forms(written, None),
+            path_forms(None, None),
+            "{written:?}"
+        );
+    }
+}
+
+/// An absolute path a link was written with maps with the index, as the link itself does, so the
+/// copy is the file the link opens rather than where the path once pointed.
+#[test]
+fn written_forms_map_an_absolute_path_with_the_index_as_the_link_does() {
+    let (_tmp, root) = common::vault_copy();
+    let ix = common::index_of(&root);
+    let written = "/home/dev/shared/vault/work/alpha/README.md";
+    let readme = common::native_join(&root, "work/alpha/README.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ubuntu().written_forms(written, Some(&ix)).windows,
+        Some(readme)
+    );
+    assert_eq!(
+        ubuntu().literal_forms(written).windows.as_deref(),
+        Some(r"\\wsl.localhost\Ubuntu\home\dev\shared\vault\work\alpha\README.md")
+    );
 }
 
 fn tokens(text: &str) -> Vec<&str> {
@@ -578,7 +697,7 @@ fn forms_map_a_whole_path_with_spaces_that_convert_paths_splits() {
         Some("/home/me/vault/plan.md")
     );
     assert_eq!(
-        m.convert_paths(plan, PathForm::Wsl, None).text,
+        m.convert_paths(plan, PathForm::Wsl).text,
         "/mnt/s/Notes/My Vault/plan.md"
     );
 }
@@ -595,11 +714,11 @@ fn converted(text: &str, converted: u32, unconverted: u32) -> ConvertedPaths {
 fn convert_paths_flips_the_relative_paths_in_a_command() {
     let command = "bundle exec rubocop app/services/x spec/services/x";
     assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Windows, None),
+        ubuntu().convert_paths(command, PathForm::Windows),
         converted(r"bundle exec rubocop app\services\x spec\services\x", 2, 0)
     );
     assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Wsl, None),
+        ubuntu().convert_paths(command, PathForm::Wsl),
         converted(command, 2, 0)
     );
 }
@@ -607,15 +726,15 @@ fn convert_paths_flips_the_relative_paths_in_a_command() {
 #[test]
 fn convert_paths_maps_absolute_paths_both_ways() {
     assert_eq!(
-        ubuntu().convert_paths("cat /mnt/s/Notes/plan.md", PathForm::Windows, None),
+        ubuntu().convert_paths("cat /mnt/s/Notes/plan.md", PathForm::Windows),
         converted(r"cat S:\Notes\plan.md", 1, 0)
     );
     assert_eq!(
-        ubuntu().convert_paths(r"cat S:\Notes\plan.md", PathForm::Wsl, None),
+        ubuntu().convert_paths(r"cat S:\Notes\plan.md", PathForm::Wsl),
         converted("cat /mnt/s/Notes/plan.md", 1, 0)
     );
     assert_eq!(
-        ubuntu().convert_paths("bash /home/me/run.sh", PathForm::Windows, None),
+        ubuntu().convert_paths("bash /home/me/run.sh", PathForm::Windows),
         converted(r"bash \\wsl.localhost\Ubuntu\home\me\run.sh", 1, 0)
     );
 }
@@ -623,11 +742,11 @@ fn convert_paths_maps_absolute_paths_both_ways() {
 #[test]
 fn convert_paths_keeps_quotes_around_a_quoted_path() {
     assert_eq!(
-        ubuntu().convert_paths(r#""/mnt/s/My Vault/a.md""#, PathForm::Windows, None),
+        ubuntu().convert_paths(r#""/mnt/s/My Vault/a.md""#, PathForm::Windows),
         converted(r#""S:\My Vault\a.md""#, 1, 0)
     );
     assert_eq!(
-        ubuntu().convert_paths(r"code 'S:\My Vault\a.md' -n", PathForm::Wsl, None),
+        ubuntu().convert_paths(r"code 'S:\My Vault\a.md' -n", PathForm::Wsl),
         converted("code '/mnt/s/My Vault/a.md' -n", 1, 0)
     );
 }
@@ -635,14 +754,13 @@ fn convert_paths_keeps_quotes_around_a_quoted_path() {
 #[test]
 fn convert_paths_converts_a_flags_value_only() {
     assert_eq!(
-        ubuntu().convert_paths("--config=app/x.yml", PathForm::Windows, None),
+        ubuntu().convert_paths("--config=app/x.yml", PathForm::Windows),
         converted(r"--config=app\x.yml", 1, 0)
     );
     assert_eq!(
         ubuntu().convert_paths(
             r#"run -f=a/b.yml --out="/mnt/s/My Vault/x""#,
-            PathForm::Windows,
-            None
+            PathForm::Windows
         ),
         converted(r#"run -f=a\b.yml --out="S:\My Vault\x""#, 2, 0)
     );
@@ -652,10 +770,7 @@ fn convert_paths_converts_a_flags_value_only() {
 fn convert_paths_leaves_urls_alone() {
     let text = "curl https://example.com/a/b";
     for form in [PathForm::Windows, PathForm::Wsl] {
-        assert_eq!(
-            ubuntu().convert_paths(text, form, None),
-            converted(text, 0, 0)
-        );
+        assert_eq!(ubuntu().convert_paths(text, form), converted(text, 0, 0));
     }
 }
 
@@ -664,7 +779,7 @@ fn convert_paths_keeps_line_breaks_indentation_and_what_surrounds_a_path() {
     let block =
         "cd app/services\n    rspec spec/a_spec.rb:12\r\n\tcat `docs/x.md`, /mnt/c/x.md#top\n";
     assert_eq!(
-        ubuntu().convert_paths(block, PathForm::Windows, None),
+        ubuntu().convert_paths(block, PathForm::Windows),
         converted(
             "cd app\\services\n    rspec spec\\a_spec.rb:12\r\n\tcat `docs\\x.md`, C:\\x.md#top\n",
             4,
@@ -676,20 +791,17 @@ fn convert_paths_keeps_line_breaks_indentation_and_what_surrounds_a_path() {
 #[test]
 fn convert_paths_counts_a_path_with_no_form_and_leaves_it_as_written() {
     assert_eq!(
-        ubuntu().convert_paths(r"\\nas\share\x.md", PathForm::Wsl, None),
+        ubuntu().convert_paths(r"\\nas\share\x.md", PathForm::Wsl),
         converted(r"\\nas\share\x.md", 0, 1)
     );
     assert_eq!(
-        ubuntu().convert_paths(r"cp \\nas\share\x.md S:\Notes\x.md", PathForm::Wsl, None),
+        ubuntu().convert_paths(r"cp \\nas\share\x.md S:\Notes\x.md", PathForm::Wsl),
         converted(r"cp \\nas\share\x.md /mnt/s/Notes/x.md", 1, 1)
     );
     // A user mapping gives the share one.
     assert_eq!(
-        mapper(&[("/home/me/shared", r"\\nas\share")]).convert_paths(
-            r"\\nas\share\x.md",
-            PathForm::Wsl,
-            None
-        ),
+        mapper(&[("/home/me/shared", r"\\nas\share")])
+            .convert_paths(r"\\nas\share\x.md", PathForm::Wsl),
         converted("/home/me/shared/x.md", 1, 0)
     );
 }
@@ -765,10 +877,13 @@ fn literal_forms_keep_hashes_and_line_numbers_in_names() {
             Some("/home/me/logs/run:12")
         )
     );
-    // Text written as a path still loses its line anchor.
+    // As text, the `:12` is a line, kept after the path rather than mapped as part of it.
     assert_eq!(
-        ubuntu().forms(r"S:\Notes\plan.md#L12", None),
-        path_forms(Some(r"S:\Notes\plan.md"), Some("/mnt/s/Notes/plan.md"))
+        ubuntu().forms("/home/me/logs/run.md:12", None),
+        path_forms(
+            Some(r"\\wsl.localhost\Ubuntu\home\me\logs\run.md:12"),
+            Some("/home/me/logs/run.md:12")
+        )
     );
 }
 

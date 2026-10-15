@@ -232,8 +232,9 @@ export class Menu {
     this.onClose();
   }
 
-  private items(): HTMLButtonElement[] {
-    return [...this.el.querySelectorAll<HTMLButtonElement>(".menu-item:not(:disabled)")];
+  /** The items that can take the focus: buttons not disabled, and notes. */
+  private items(): HTMLElement[] {
+    return [...this.el.querySelectorAll<HTMLElement>(".menu-item:not(:disabled)")];
   }
 
   /**

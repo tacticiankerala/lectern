@@ -618,8 +618,8 @@ fn path_token_vectors_exported() {
             format!(
                 "  {{ text: {}, tokens: [{tokens}], windows: {}, wsl: {} }},",
                 quote(text),
-                converted(&mapper.convert_paths(text, PathForm::Windows, None)),
-                converted(&mapper.convert_paths(text, PathForm::Wsl, None)),
+                converted(&mapper.convert_paths(text, PathForm::Windows)),
+                converted(&mapper.convert_paths(text, PathForm::Wsl)),
             )
         })
         .collect::<Vec<_>>()

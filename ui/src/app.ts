@@ -920,8 +920,9 @@ export class App {
   }
 
   /**
-   * Drops `path` from the recent files for good; without a document on screen, the welcome screen
-   * shows again, without it.
+   * Drops `path` from the recent files for good. The welcome screen, if it is up, shows again
+   * without it, and so it does in place of `path`'s own error screen; another file's error screen
+   * stays.
    */
   async removeRecent(path: string): Promise<void> {
     try {
@@ -930,7 +931,8 @@ export class App {
       this.toast(String(e));
       return;
     }
-    if (this.state.doc === null) {
+    const error = this.state.error;
+    if (this.state.doc === null && (error === null || samePath(error.path, path))) {
       this.show(null);
     }
   }

@@ -275,6 +275,24 @@ describe("App recent files", () => {
     expect(app.state.recent.map((r) => r.path)).toEqual([A]);
   });
 
+  it("keeps a file's error screen when another file leaves the recent files", async () => {
+    const gone = "C:\\V\\gone.md";
+    const { fake, app } = setup(null, [recentEntry(gone, "Gone"), recentEntry(A, "Aye")]);
+    fake.startupGate.resolve();
+    await app.start();
+    await app.open(gone);
+    expect(document.querySelector("#lx-doc .state-error")).not.toBeNull();
+    // As from the recent files menu's ×.
+    await app.removeRecent(A);
+    expect(app.state.recent.map((r) => r.path)).toEqual([gone]);
+    expect(app.state.error?.path).toBe(gone);
+    expect(document.querySelector("#lx-doc .state-error")).not.toBeNull();
+    expect(document.querySelector("#lx-doc .welcome")).toBeNull();
+    // Forgetting the failing file itself goes back to the welcome screen.
+    await app.removeRecent(gone);
+    expect(document.querySelector("#lx-doc .welcome")).not.toBeNull();
+  });
+
   it("removes an entry from the welcome screen's recent list", async () => {
     const { fake, app } = setup(null, [recentEntry(A, "Aye"), recentEntry(B, "Bee")]);
     fake.startupGate.resolve();

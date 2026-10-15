@@ -51,18 +51,25 @@ export interface Backend {
   /**
    * The Windows and WSL forms of a path, for copying. `literal`: an exact path on this machine (the
    * open file, a tree row, where a wikilink leads), taken as it is, a `#` or `:12` included.
-   * Otherwise text written as a path (a selection, a link's destination, a broken link), trimmed,
-   * without a line or anchor suffix: an absolute one mapped as a link is, with the index; a
-   * relative one only changes its separators. Strings and the index alone, never the disk. A form
-   * it has none of is null.
+   * Otherwise text holding one path (a selection, a broken link's text): the path, without the
+   * quotes, backticks, line or anchor around it, mapped by itself (an absolute one as a link is,
+   * with the index; a relative one only changing its separators), and what was around it kept.
+   * Strings and the index alone, never the disk. A form it has none of is null.
    */
   pathForms(raw: string, literal: boolean): Promise<PathForms>;
   /**
    * `text`, a selection holding paths (a command, a block), with each path in it in `form` by the
    * rules `pathForms` applies to text (a relative one only changes its separators), and every
-   * other character as it is. Rejects with a message for the reader past 64 KB.
+   * other character as it is. Paths are mapped without the index. Rejects with a message for the
+   * reader past 64 KB.
    */
   convertPaths(text: string, form: PathForm): Promise<ConvertedPaths>;
+  /**
+   * The Windows and WSL forms of the path a link was written with (`data-written`), taken as it is
+   * (a `#` or a quote is part of a name): an absolute one mapped with the index, as the link is; a
+   * relative one only changing its separators; a bare file name the same in both.
+   */
+  writtenForms(raw: string): Promise<PathForms>;
   revealInExplorer(path: string): Promise<void>;
   openInEditor(path: string, line?: number): Promise<void>;
   /**

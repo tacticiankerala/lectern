@@ -150,8 +150,19 @@ pub async fn path_forms(
     Ok(window_state(&window, &state)?.path_forms(&raw, literal))
 }
 
-/// `text`, a selection holding paths, with each path in `form`, mapped as `path_forms` maps
-/// text. Strings and the in-memory index only, so it needs no blocking thread.
+/// The Windows and WSL forms of the path a link was written with, taken as it is. Strings and
+/// the in-memory index only, so it needs no blocking thread.
+#[tauri::command]
+pub async fn written_forms(
+    raw: String,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<PathForms, String> {
+    Ok(window_state(&window, &state)?.written_forms(&raw))
+}
+
+/// `text`, a selection holding paths, with each path in `form`. Strings only, but up to 64 KB of
+/// them, so on the blocking pool.
 #[tauri::command]
 pub async fn convert_paths(
     text: String,
@@ -159,7 +170,10 @@ pub async fn convert_paths(
     window: WebviewWindow,
     state: Shared<'_>,
 ) -> Result<ConvertedPaths, String> {
-    window_state(&window, &state)?.convert_paths(&text, form)
+    blocking(window_state(&window, &state)?, move |s| {
+        s.convert_paths(&text, form)
+    })
+    .await?
 }
 
 #[tauri::command]

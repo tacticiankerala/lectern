@@ -70,17 +70,17 @@ describe("FakeBackend path forms", () => {
     });
   });
 
-  it("drops line suffixes, anchors, quotes and backticks", async () => {
+  it("keeps the line, anchor, quotes and backticks around a path, converting the path alone", async () => {
     const fake = new FakeBackend(fixtures());
-    const plan = { windows: "S:\\Notes\\plan.md", wsl: "/mnt/s/Notes/plan.md" };
-    for (const raw of [
-      "`S:\\Notes\\plan.md:12`",
-      "S:\\Notes\\plan.md:12:5",
-      "S:\\Notes\\plan.md#L12",
-      "S:\\Notes\\plan.md#next-steps",
-      ' "S:\\Notes\\plan.md" ',
-    ]) {
-      expect(await fake.pathForms(raw, false), raw).toEqual(plan);
+    for (const [raw, windows, wsl] of [
+      ["`S:\\Notes\\plan.md:12`", "`S:\\Notes\\plan.md:12`", "`/mnt/s/Notes/plan.md:12`"],
+      ["/mnt/s/Notes/plan.md:12:5", "S:\\Notes\\plan.md:12:5", "/mnt/s/Notes/plan.md:12:5"],
+      ["S:\\Notes\\plan.md#L12", "S:\\Notes\\plan.md#L12", "/mnt/s/Notes/plan.md#L12"],
+      [' "S:\\Notes\\plan.md" ', ' "S:\\Notes\\plan.md" ', ' "/mnt/s/Notes/plan.md" '],
+      ["spec/a_spec.rb:12", "spec\\a_spec.rb:12", "spec/a_spec.rb:12"],
+      ['"app/x y.rb"', '"app\\x y.rb"', '"app/x y.rb"'],
+    ] as const) {
+      expect(await fake.pathForms(raw, false), raw).toEqual({ windows, wsl });
     }
     expect(await fake.pathForms("C:\\src\\C#\\app.cs", false)).toEqual({
       windows: "C:\\src\\C#\\app.cs",
@@ -89,7 +89,10 @@ describe("FakeBackend path forms", () => {
     // A `#` is an anchor only after a file name with an extension.
     const meeting = { windows: "S:\\Notes\\Meeting #3.md", wsl: "/mnt/s/Notes/Meeting #3.md" };
     expect(await fake.pathForms("S:\\Notes\\Meeting #3.md", false)).toEqual(meeting);
-    expect(await fake.pathForms("S:\\Notes\\Meeting #3.md#agenda", false)).toEqual(meeting);
+    expect(await fake.pathForms("/mnt/s/Notes/Meeting #3.md#agenda", false)).toEqual({
+      windows: "S:\\Notes\\Meeting #3.md#agenda",
+      wsl: "/mnt/s/Notes/Meeting #3.md#agenda",
+    });
   });
 
   it("flips a relative path's separators, and gives a bare name or a URL neither form", async () => {
@@ -99,8 +102,8 @@ describe("FakeBackend path forms", () => {
       wsl: "app/services/x/writing_type.rb",
     });
     expect(await fake.pathForms("`spec\\a\\b_spec.rb:12`", false)).toEqual({
-      windows: "spec\\a\\b_spec.rb",
-      wsl: "spec/a/b_spec.rb",
+      windows: "`spec\\a\\b_spec.rb:12`",
+      wsl: "`spec/a/b_spec.rb:12`",
     });
     for (const raw of ["notes.md", "https://example.com/a/b", "C:notes\\plan.md", "\\notes\\x"]) {
       expect(await fake.pathForms(raw, false), raw).toEqual({ windows: null, wsl: null });
@@ -130,6 +133,25 @@ describe("FakeBackend path forms", () => {
     );
   });
 
+  it("takes a link's path as written, as core's written_forms does", async () => {
+    const fake = new FakeBackend(fixtures());
+    for (const [written, windows, wsl] of [
+      ["../notes/v1.0#archive.md", "..\\notes\\v1.0#archive.md", "../notes/v1.0#archive.md"],
+      ["docs/owners'", "docs\\owners'", "docs/owners'"],
+      ["plan.md", "plan.md", "plan.md"],
+      [
+        "/home/me/notes/v1.0#archive.md",
+        "\\\\wsl.localhost\\Ubuntu\\home\\me\\notes\\v1.0#archive.md",
+        "/home/me/notes/v1.0#archive.md",
+      ],
+    ] as const) {
+      expect(await fake.writtenForms(written), written).toEqual({ windows, wsl });
+    }
+    for (const written of ["", "\\notes\\plan.md", "C:notes\\plan.md"]) {
+      expect(await fake.writtenForms(written), written).toEqual({ windows: null, wsl: null });
+    }
+  });
+
   it("converts the paths in a text as core does", async () => {
     const fake = new FakeBackend(fixtures());
     for (const vector of PATH_TOKEN_VECTORS) {
@@ -142,7 +164,9 @@ describe("FakeBackend path forms", () => {
   it("refuses text past core's limit", async () => {
     const fake = new FakeBackend(fixtures());
     const long = "a/b ".repeat(CONVERT_LIMIT / 4) + "c";
-    await expect(fake.convertPaths(long, "wsl")).rejects.toMatch(/too long/);
+    await expect(fake.convertPaths(long, "wsl")).rejects.toBe(
+      "The selection is too long to convert.",
+    );
     expect((await fake.convertPaths(long.slice(0, CONVERT_LIMIT), "wsl")).converted).toBe(
       CONVERT_LIMIT / 4,
     );
@@ -160,9 +184,9 @@ describe("FakeBackend path forms", () => {
       windows: "\\\\wsl.localhost\\Ubuntu\\home\\me\\logs\\run:12",
       wsl: "/home/me/logs/run:12",
     });
-    // As text, the same `#` is an anchor.
+    // As text, the same `#` is an anchor, kept after the path.
     expect((await fake.pathForms("S:\\Notes\\plan.md#draft.md", false)).windows).toBe(
-      "S:\\Notes\\plan.md",
+      "S:\\Notes\\plan.md#draft.md",
     );
   });
 });

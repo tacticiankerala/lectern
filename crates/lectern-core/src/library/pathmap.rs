@@ -144,11 +144,11 @@ impl PathMapper {
             .map(|(_, linux, rest)| linux_join(linux, rest))
     }
 
-    /// Both forms of the text `raw`, written as a path (a selection, a link's destination, or a
-    /// broken link's text), for pasting into a terminal. Surrounding whitespace, quotes and
-    /// backticks, and a trailing `:line`, `#Lline` or `#anchor`, are dropped first. Only strings
-    /// and the in-memory index are consulted, never the disk, so it answers at once even for a
-    /// path on a share that stalls.
+    /// Both forms of the text `raw`, written as a path (a selection, or a broken link's text), for
+    /// pasting into a terminal. Only the path's format changes: whitespace, quotes and backticks
+    /// around it, and a trailing `:line`, `#Lline` or `#anchor`, stay as they are, and the path
+    /// between them is mapped by itself. Only strings and the in-memory index are consulted, never
+    /// the disk, so it answers at once even for a path on a share that stalls.
     ///
     /// For an absolute path, the Windows form is where [`PathMapper::map`] puts it, verified or
     /// not, so it may be the file a moved note's link finds; the WSL form is
@@ -157,10 +157,33 @@ impl PathMapper {
     /// paths in notes are often relative to somewhere else, such as a repository. Anything else,
     /// such as a bare file name or a URL, has neither form.
     pub fn forms(&self, raw: &str, index: Option<&LibraryIndex>) -> PathForms {
-        self.bare_forms(bare_path(raw), index)
+        let span = bare_span(raw);
+        let forms = self.bare_forms(&raw[span.clone()], index);
+        let around = |path: String| format!("{}{path}{}", &raw[..span.start], &raw[span.end..]);
+        PathForms {
+            windows: forms.windows.map(around),
+            wsl: forms.wsl.map(around),
+        }
     }
 
-    /// [`PathMapper::forms`] of a path already stripped by `bare_path`.
+    /// Both forms of `path` as a link was written with it (`data-written`). The renderer has
+    /// already decoded it and dropped its query, fragment and line, so nothing more is trimmed: a
+    /// `#` or a quote in it is part of a name. An absolute one maps as [`PathMapper::forms`] maps
+    /// it, with the index, so it is the file the link opens; a relative one only changes its
+    /// separators, and a bare file name, which has none, is the same in both forms. It is never
+    /// resolved against the note.
+    pub fn written_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
+        if !path.is_empty() && !path.contains(['/', '\\']) {
+            return PathForms {
+                windows: Some(path.to_owned()),
+                wsl: Some(path.to_owned()),
+            };
+        }
+        self.bare_forms(path, index)
+    }
+
+    /// The forms of a path with nothing around it: a relative one with its separators changed, an
+    /// absolute one where [`PathMapper::map`] puts it.
     fn bare_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
         if is_relative(path) {
             return PathForms {
@@ -176,38 +199,29 @@ impl PathMapper {
     }
 
     /// `text` with each of its path tokens (see [`path_tokens`]) in `form`, by the rules of
-    /// [`PathMapper::forms`]; every other byte stays as it is, and so do the quotes, backticks
+    /// [`PathMapper::forms`]: every other byte stays as it is, and so do the quotes, backticks
     /// and `:line` or `#anchor` around a path. A path with no such form stays as written and
-    /// counts as unconverted.
-    pub fn convert_paths(
-        &self,
-        text: &str,
-        form: PathForm,
-        index: Option<&LibraryIndex>,
-    ) -> ConvertedPaths {
+    /// counts as unconverted. The tokens are mapped without the index (user mappings, `/mnt/<x>`
+    /// and WSL only, never a moved file), so a long selection costs no look through the library
+    /// for each of its paths.
+    pub fn convert_paths(&self, text: &str, form: PathForm) -> ConvertedPaths {
         let mut out = String::with_capacity(text.len());
         let (mut converted, mut unconverted) = (0, 0);
         let mut done = 0;
         for token in path_tokens(text) {
             out.push_str(&text[done..token.start]);
             let raw = &text[token.clone()];
-            let span = bare_span(raw);
-            let forms = self.bare_forms(&raw[span.clone()], index);
+            let forms = self.forms(raw, None);
             let path = match form {
                 PathForm::Windows => forms.windows,
                 PathForm::Wsl => forms.wsl,
             };
-            match path {
-                Some(path) => {
-                    out.push_str(&raw[..span.start]);
-                    out.push_str(&path);
-                    out.push_str(&raw[span.end..]);
-                    converted += 1;
-                }
-                None => {
-                    out.push_str(raw);
-                    unconverted += 1;
-                }
+            if let Some(path) = path {
+                out.push_str(&path);
+                converted += 1;
+            } else {
+                out.push_str(raw);
+                unconverted += 1;
             }
             done = token.end;
         }
@@ -245,14 +259,10 @@ impl PathMapper {
     }
 }
 
-/// `raw` without surrounding whitespace, quotes or backticks, and without a trailing `#anchor`,
-/// `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name with an extension
-/// (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs` keep theirs.
-fn bare_path(raw: &str) -> &str {
-    &raw[bare_span(raw)]
-}
-
-/// Where in `raw` the path `bare_path` leaves is.
+/// Where the path is in `raw`: without surrounding whitespace, quotes or backticks, and without a
+/// trailing `#anchor`, `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name
+/// with an extension (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs`
+/// keep theirs.
 fn bare_span(raw: &str) -> Range<usize> {
     let quoted =
         |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’');

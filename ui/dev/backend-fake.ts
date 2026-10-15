@@ -637,9 +637,10 @@ function underMapping(
 }
 
 /**
- * As core's `PathMapper::forms` and `literal_forms`, without the index. Text (`literal` false) is
- * trimmed, and loses a trailing `#anchor` (after a file name with an extension), `:line` or
- * `#Lline`; an exact path is taken as it is. A relative path (text only) flips its separators.
+ * As core's `PathMapper::forms` and `literal_forms`, without the index. Text (`literal` false) has
+ * its path converted by itself, the whitespace, quotes and backticks around it and a trailing
+ * `#anchor` (after a file name with an extension), `:line` or `#Lline` kept as they are; an exact
+ * path is taken as it is. A relative path (text only) flips its separators.
  * Otherwise a Linux path under a mapped folder is under its Windows folder, a drive or UNC path is
  * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path goes through
  * `FAKE_DISTRO`; the WSL form is under a mapped folder, a WSL share's Linux path or a drive's
@@ -650,7 +651,21 @@ function pathForms(raw: string, literal: boolean, mappings: FolderMapping[]): Pa
     return mappedForms(raw, mappings);
   }
   const [start, end] = bareSpan(raw);
-  return bareForms(raw.slice(start, end), mappings);
+  const forms = bareForms(raw.slice(start, end), mappings);
+  const around = (path: string | null) =>
+    path === null ? null : raw.slice(0, start) + path + raw.slice(end);
+  return { windows: around(forms.windows), wsl: around(forms.wsl) };
+}
+
+/**
+ * As core's `PathMapper::written_forms`: a link's path as written, nothing trimmed. A bare file name
+ * is the same in both forms; anything else converts as `bareForms` says.
+ */
+function writtenForms(path: string, mappings: FolderMapping[]): PathForms {
+  if (path !== "" && !/[\\/]/.test(path)) {
+    return { windows: path, wsl: path };
+  }
+  return bareForms(path, mappings);
 }
 
 /** `pathForms` of text already trimmed by `bareSpan`. */
@@ -696,11 +711,12 @@ function mappedForms(path: string, mappings: FolderMapping[]): PathForms {
 }
 
 /** Why a selection's paths weren't converted, as Rust says it: it is past `CONVERT_LIMIT`. */
-const TOO_LONG = "This selection is too long to convert. Select up to 64 KB at a time.";
+const TOO_LONG = "The selection is too long to convert.";
 
 /**
  * As core's `PathMapper::convert_paths`: each path token (`pathTokens`) in `form`, by
- * `pathForms`' rules for text, what surrounds its path kept; one with no such form as written.
+ * `pathForms`' rules for text, what surrounds its path kept; one with no such form as written. The
+ * fake has no index, as core's conversion doesn't use one.
  */
 function convertPaths(text: string, form: PathForm, mappings: FolderMapping[]): ConvertedPaths {
   let out = "";
@@ -709,14 +725,13 @@ function convertPaths(text: string, form: PathForm, mappings: FolderMapping[]): 
   let unconverted = 0;
   for (const token of pathTokens(text)) {
     const raw = text.slice(token.start, token.end);
-    const [start, end] = bareSpan(raw);
-    const path = bareForms(raw.slice(start, end), mappings)[form];
+    const path = pathForms(raw, false, mappings)[form];
     out += text.slice(done, token.start);
     if (path === null) {
       out += raw;
       unconverted++;
     } else {
-      out += raw.slice(0, start) + path + raw.slice(end);
+      out += path;
       converted++;
     }
     done = token.end;
@@ -1026,6 +1041,10 @@ export class FakeBackend implements Backend, FakeControl {
 
   pathForms(raw: string, literal: boolean): Promise<PathForms> {
     return Promise.resolve(pathForms(raw, literal, folderMappings(this.settings.pathMappings)));
+  }
+
+  writtenForms(raw: string): Promise<PathForms> {
+    return Promise.resolve(writtenForms(raw, folderMappings(this.settings.pathMappings)));
   }
 
   convertPaths(text: string, form: PathForm): Promise<ConvertedPaths> {
