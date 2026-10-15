@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use lectern_core::ipc::{
-    Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
-    PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload,
-    UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    Candidate, ConvertedPaths, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult,
+    OpenWhere, PathForm, PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot,
+    StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::PageBlock;
@@ -148,6 +148,18 @@ pub async fn path_forms(
     state: Shared<'_>,
 ) -> Result<PathForms, String> {
     Ok(window_state(&window, &state)?.path_forms(&raw, literal))
+}
+
+/// `text`, a selection holding paths, with each path in `form`, mapped as `path_forms` maps
+/// text. Strings and the in-memory index only, so it needs no blocking thread.
+#[tauri::command]
+pub async fn convert_paths(
+    text: String,
+    form: PathForm,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<ConvertedPaths, String> {
+    window_state(&window, &state)?.convert_paths(&text, form)
 }
 
 #[tauri::command]

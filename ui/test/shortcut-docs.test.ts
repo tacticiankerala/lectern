@@ -20,7 +20,7 @@ describe("the shortcut cheat sheets", () => {
     expect(keys).toContain("Ctrl+Shift+M");
     expect(keys).toContain("Ctrl+Alt+M");
     expect(keys).toContain("Ctrl+N");
-    expect(keys).toContain("Ctrl+Shift+C / Ctrl+Shift+L");
+    expect(keys).toContain("Ctrl+Shift+C / Ctrl+Shift+W");
   });
 
   it("so does the README, with Quit and copying paths too, and describes the chooser and Sidebar text", () => {
@@ -32,8 +32,12 @@ describe("the shortcut cheat sheets", () => {
     expect(readme).toContain("| Ctrl+Alt+M |");
     expect(readme).toContain("| Ctrl+N | New window");
     expect(readme).toContain("| Ctrl+Q | Quit Lectern");
-    expect(readme).toContain("| Ctrl+Shift+C |");
-    expect(readme).toContain("| Ctrl+Shift+L |");
+    expect(readme).toContain("| Ctrl+C | Copy the selection as it is |");
+    expect(readme).toContain("| Ctrl+Shift+C | Copy as WSL path");
+    expect(readme).toContain("| Ctrl+Shift+W | Copy as Windows path");
+    // The swap is called out, and Ctrl+Shift+L is no longer listed.
+    expect(readme).toMatch(/Up to v0\.4\.0, Ctrl\+Shift\+C copied the Windows path/);
+    expect(readme).not.toContain("| Ctrl+Shift+L |");
     expect(readme).toContain("**Sidebar text**");
     expect(readme).toMatch(/breadcrumb/i);
   });

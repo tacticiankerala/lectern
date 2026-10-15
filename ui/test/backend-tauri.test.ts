@@ -110,6 +110,14 @@ describe("TauriBackend", () => {
     ]);
   });
 
+  it("asks for a selection's paths in one form", async () => {
+    const backend = new TauriBackend();
+    await backend.convertPaths("rubocop app/x spec/x", "windows");
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["convert_paths", { text: "rubocop app/x spec/x", form: "windows" }],
+    ]);
+  });
+
   it("stops every listener before the page reloads, each once", async () => {
     const backend = new TauriBackend();
     const off = backend.on("doc-changed", () => undefined);

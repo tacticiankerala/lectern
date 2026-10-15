@@ -40,9 +40,9 @@ describe("actionFor", () => {
       [{ key: "b", ctrlKey: true }, "toggle-library"],
       [{ key: "O", ctrlKey: true, shiftKey: true }, "toggle-outline"],
       [{ key: "e", ctrlKey: true }, "open-editor"],
-      // The path in Windows form, and in WSL form.
-      [{ key: "C", ctrlKey: true, shiftKey: true }, "copy-windows-path"],
-      [{ key: "L", ctrlKey: true, shiftKey: true }, "copy-wsl-path"],
+      // The path in WSL form, and in Windows form.
+      [{ key: "C", ctrlKey: true, shiftKey: true }, "copy-wsl-path"],
+      [{ key: "W", ctrlKey: true, shiftKey: true }, "copy-windows-path"],
       [{ key: "F5" }, "reload"],
       // WebView2 would otherwise reload the whole page.
       [{ key: "r", ctrlKey: true }, "reload"],
@@ -94,7 +94,10 @@ describe("actionFor", () => {
     expect(actionFor(key({ key: "ArrowLeft", altKey: true, ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "ArrowLeft", altKey: true, shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "F5", ctrlKey: true }))).toBeNull();
+    // Ctrl+C is the browser's own copy; Ctrl+Shift+L copied the WSL path up to v0.4.0.
     expect(actionFor(key({ key: "c", ctrlKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "L", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(actionFor(key({ key: "w", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "b", ctrlKey: true, shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "p", metaKey: true }))).toBeNull();
     expect(actionFor(key({ key: "h" }))).toBeNull();

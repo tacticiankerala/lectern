@@ -5,15 +5,21 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use lectern_core::ipc::{EditorPref, FollowKind, FollowResult, FollowTarget, PathForms};
+use lectern_core::ipc::{
+    ConvertedPaths, EditorPref, FollowKind, FollowResult, FollowTarget, PathForm, PathForms,
+};
 use lectern_core::library::doc_kind;
-use lectern_core::library::pathmap::Mapped;
+use lectern_core::library::pathmap::{Mapped, CONVERT_LIMIT};
 use lectern_core::library::scan::probe_with;
 
 use super::paths::path_string;
 use super::sync::read;
 use super::{trust, WindowState};
 use crate::shell::{self, FileKind};
+
+/// Why a selection's paths weren't converted: it is past `CONVERT_LIMIT`. The fake backend
+/// (`ui/dev/backend-fake.ts`) says the same.
+const TOO_LONG: &str = "This selection is too long to convert. Select up to 64 KB at a time.";
 
 /// What following a link comes to, before anything is launched.
 #[derive(Debug, PartialEq, Eq)]
@@ -134,9 +140,10 @@ impl WindowState {
     }
 
     /// The Windows and WSL forms of a path the user is copying: `literal`, an exact path (the open
-    /// file, a tree row, a resolved link's target), taken as it is; else text written as a path (a
-    /// selection), mapped as a link is, with this window's index. Never touches the disk, so a
-    /// stalled share can't hold it up.
+    /// file, a tree row, where a wikilink leads), taken as it is; else text written as a path (a
+    /// selection, a link's destination), mapped as a link is, with this window's index, or, when
+    /// relative, with its separators changed. Never touches the disk, so a stalled share can't hold
+    /// it up.
     pub fn path_forms(&self, raw: &str, literal: bool) -> PathForms {
         let mapper = self.mapper();
         if literal {
@@ -145,6 +152,18 @@ impl WindowState {
         let index = self.index();
         let index = (!index.roots.is_empty()).then_some(&*index);
         mapper.forms(raw, index)
+    }
+
+    /// `text` (a selected command or block) with each path in it in `form`, mapped as
+    /// `path_forms` maps text; refused past `CONVERT_LIMIT`. Never touches the disk.
+    pub fn convert_paths(&self, text: &str, form: PathForm) -> Result<ConvertedPaths, String> {
+        if text.len() > CONVERT_LIMIT {
+            return Err(TOO_LONG.to_owned());
+        }
+        let mapper = self.mapper();
+        let index = self.index();
+        let index = (!index.roots.is_empty()).then_some(&*index);
+        Ok(mapper.convert_paths(text, form, index))
     }
 
     /// Opens a local file in the editor (VS Code, a custom command, or else Explorer), at `line`

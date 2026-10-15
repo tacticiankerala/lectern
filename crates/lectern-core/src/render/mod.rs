@@ -33,7 +33,7 @@ pub use plain::render_plain;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.
-pub const RENDER_VERSION: u32 = 6;
+pub const RENDER_VERSION: u32 = 7;
 
 /// What a render needs besides the Markdown source.
 #[derive(Debug, Clone, Copy)]

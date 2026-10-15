@@ -37,7 +37,7 @@ const SHORTCUTS: [string, string][] = [
   ["Ctrl+Alt+M", "Add a comment"],
   ["F11", "Focus mode"],
   ["Ctrl+E", "Open in editor"],
-  ["Ctrl+Shift+C / Ctrl+Shift+L", "Copy Windows / WSL path"],
+  ["Ctrl+Shift+C / Ctrl+Shift+W", "Copy as WSL / Windows path"],
   ["Ctrl+N", "New window"],
 ];
 

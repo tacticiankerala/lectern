@@ -133,6 +133,9 @@ fn in_a_page_lecterns_shortcuts_are_handled_and_esc_goes_through_too() {
         (VK_OEM_PLUS, CTRL, "="),
         (VK_OEM_MINUS, CTRL_SHIFT, "_"),
         (vk('0'), CTRL, "0"),
+        // Copying paths: the WSL form, and the Windows form.
+        (vk('C'), CTRL_SHIFT, "C"),
+        (vk('W'), CTRL_SHIFT, "W"),
     ] {
         assert_eq!(
             decided(code, m, page),
@@ -151,6 +154,8 @@ fn in_a_page_lecterns_shortcuts_are_handled_and_esc_goes_through_too() {
         (vk('C'), CTRL),
         (vk('V'), CTRL),
         (vk('0'), CTRL_SHIFT),
+        // Copied the WSL path up to v0.4.0; free since.
+        (vk('L'), CTRL_SHIFT),
         (VK_LEFT, NONE),
         (VK_F5, CTRL),
         (vk('O'), CTRL_ALT),

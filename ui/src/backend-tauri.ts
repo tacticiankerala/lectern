@@ -5,6 +5,7 @@ import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { Candidate } from "./generated/Candidate";
+import type { ConvertedPaths } from "./generated/ConvertedPaths";
 import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
@@ -14,6 +15,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForm } from "./generated/PathForm";
 import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
@@ -117,6 +119,10 @@ export class TauriBackend implements Backend {
 
   pathForms(raw: string, literal: boolean): Promise<PathForms> {
     return invoke("path_forms", { raw, literal });
+  }
+
+  convertPaths(text: string, form: PathForm): Promise<ConvertedPaths> {
+    return invoke("convert_paths", { text, form });
   }
 
   revealInExplorer(path: string): Promise<void> {

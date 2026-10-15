@@ -3,9 +3,10 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lectern_core::ipc::PathForms;
+use lectern_core::ipc::{ConvertedPaths, PathForm, PathForms};
 use lectern_core::library::pathmap::{
-    page_path, page_token, page_url, split_line_suffix, LineRef, Mapped, PathMapper, PAGE_ORIGIN,
+    page_path, page_token, page_url, path_tokens, split_line_suffix, LineRef, Mapped, PathMapper,
+    PAGE_ORIGIN,
 };
 
 fn mapper(mappings: &[(&str, &str)]) -> PathMapper {
@@ -446,10 +447,251 @@ fn forms_keep_a_hash_in_a_file_name() {
 }
 
 #[test]
-fn forms_of_a_relative_path_are_none() {
-    for raw in ["notes/plan.md", "`plan.md:12`", ""] {
+fn forms_of_a_relative_path_flip_its_separators() {
+    assert_eq!(
+        ubuntu().forms("app/services/x/writing_type.rb", None),
+        path_forms(
+            Some(r"app\services\x\writing_type.rb"),
+            Some("app/services/x/writing_type.rb")
+        )
+    );
+    assert_eq!(
+        ubuntu().forms(r"`spec\a\b_spec.rb:12`", None),
+        path_forms(Some(r"spec\a\b_spec.rb"), Some("spec/a/b_spec.rb"))
+    );
+    assert_eq!(
+        ubuntu().forms("../artifacts/report.html#summary", None),
+        path_forms(
+            Some(r"..\artifacts\report.html"),
+            Some("../artifacts/report.html")
+        )
+    );
+    assert_eq!(
+        ubuntu().forms(r"docs/My Notes\plan.md", None),
+        path_forms(
+            Some(r"docs\My Notes\plan.md"),
+            Some("docs/My Notes/plan.md")
+        )
+    );
+}
+
+#[test]
+fn forms_of_a_relative_path_are_never_resolved() {
+    let (_tmp, root) = common::vault_copy();
+    let ix = common::index_of(&root);
+    // The index holds this file, but the path stays relative to wherever it was written.
+    assert_eq!(
+        ubuntu().forms("work/alpha/README.md", Some(&ix)),
+        path_forms(Some(r"work\alpha\README.md"), Some("work/alpha/README.md"))
+    );
+}
+
+#[test]
+fn forms_of_a_bare_name_or_a_url_are_none() {
+    for raw in [
+        "notes.md",
+        "`plan.md:12`",
+        "",
+        "https://example.com/a/b",
+        "mailto:me@example.com",
+        "host:/srv/notes/plan.md",
+        r"C:notes\plan.md",
+        r"\notes\plan.md",
+    ] {
         assert_eq!(ubuntu().forms(raw, None), path_forms(None, None), "{raw:?}");
     }
+}
+
+fn tokens(text: &str) -> Vec<&str> {
+    path_tokens(text).into_iter().map(|r| &text[r]).collect()
+}
+
+#[test]
+fn path_tokens_are_words_or_quoted_runs_holding_a_separator() {
+    assert_eq!(
+        tokens("bundle exec rubocop app/services/x spec/services/x"),
+        ["app/services/x", "spec/services/x"]
+    );
+    assert_eq!(
+        tokens(r#"cat "/mnt/s/My Vault/a.md" 'b c\d' "no path" it's"#),
+        ["/mnt/s/My Vault/a.md", r"b c\d"]
+    );
+    assert_eq!(tokens("x\t`a/b:12`,\n  c\\d"), ["`a/b:12`,", r"c\d"]);
+    // A quote closes on its own line, or it's an ordinary character.
+    assert_eq!(tokens("\"a/b\nc/d\""), ["\"a/b", "c/d\""]);
+    // What follows a closing quote is read afresh; any Unicode space separates words.
+    assert_eq!(
+        tokens("\"é/a\"b/c\u{a0}d/é\u{3000}'x/y"),
+        ["é/a", "b/c", "d/é", "'x/y"]
+    );
+    assert!(tokens("plain words, notes.md and v1.2").is_empty());
+}
+
+#[test]
+fn path_tokens_take_only_a_flags_value() {
+    assert_eq!(
+        tokens(r#"--config=app/x.yml -f=a\b --out="/mnt/s/My Vault/x" --flag"#),
+        ["app/x.yml", r"a\b", "/mnt/s/My Vault/x"]
+    );
+    // Without `=`, the whole word is the candidate.
+    assert_eq!(tokens("-Iinclude/x"), ["-Iinclude/x"]);
+}
+
+#[test]
+fn path_tokens_skip_urls() {
+    assert!(tokens("curl https://example.com/a/b file:///C:/x mailto:me@example.com/x").is_empty());
+    assert_eq!(tokens("see (https://example.com/a) and a/b"), ["a/b"]);
+}
+
+/// Each quoted run is scanned to its closing quote, never on to the end of its line, and no word
+/// is read twice: a long line of them takes linear time. Scanning to the line's end made this
+/// 600 KB line take minutes.
+#[test]
+fn path_tokens_read_a_long_line_of_quoted_runs_in_linear_time() {
+    let line = r#""a/b" "#.repeat(100_000);
+    let started = std::time::Instant::now();
+    let found = path_tokens(&line);
+    let elapsed = started.elapsed();
+    assert_eq!(found.len(), 100_000);
+    assert_eq!(&line[found[99_999].clone()], "a/b");
+    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+    // So does a long word of runs back to back, and of flags with quoted values.
+    for word in [r#""a/b""#.repeat(100_000), r#"-x="a/b""#.repeat(60_000)] {
+        let started = std::time::Instant::now();
+        assert!(!path_tokens(&word).is_empty());
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+    }
+}
+
+/// A path with spaces is one path to `forms`, so a user mapping applies to all of it; converted
+/// word by word, its first word alone can't reach the mapping.
+#[test]
+fn forms_map_a_whole_path_with_spaces_that_convert_paths_splits() {
+    let m = PathMapper {
+        wsl_distro: Some("Ubuntu".into()),
+        ..mapper(&[("/home/me/vault", r"S:\Notes\My Vault")])
+    };
+    let plan = r"S:\Notes\My Vault\plan.md";
+    assert_eq!(
+        m.forms(plan, None).wsl.as_deref(),
+        Some("/home/me/vault/plan.md")
+    );
+    assert_eq!(
+        m.convert_paths(plan, PathForm::Wsl, None).text,
+        "/mnt/s/Notes/My Vault/plan.md"
+    );
+}
+
+fn converted(text: &str, converted: u32, unconverted: u32) -> ConvertedPaths {
+    ConvertedPaths {
+        text: text.to_owned(),
+        converted,
+        unconverted,
+    }
+}
+
+#[test]
+fn convert_paths_flips_the_relative_paths_in_a_command() {
+    let command = "bundle exec rubocop app/services/x spec/services/x";
+    assert_eq!(
+        ubuntu().convert_paths(command, PathForm::Windows, None),
+        converted(r"bundle exec rubocop app\services\x spec\services\x", 2, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths(command, PathForm::Wsl, None),
+        converted(command, 2, 0)
+    );
+}
+
+#[test]
+fn convert_paths_maps_absolute_paths_both_ways() {
+    assert_eq!(
+        ubuntu().convert_paths("cat /mnt/s/Notes/plan.md", PathForm::Windows, None),
+        converted(r"cat S:\Notes\plan.md", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths(r"cat S:\Notes\plan.md", PathForm::Wsl, None),
+        converted("cat /mnt/s/Notes/plan.md", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths("bash /home/me/run.sh", PathForm::Windows, None),
+        converted(r"bash \\wsl.localhost\Ubuntu\home\me\run.sh", 1, 0)
+    );
+}
+
+#[test]
+fn convert_paths_keeps_quotes_around_a_quoted_path() {
+    assert_eq!(
+        ubuntu().convert_paths(r#""/mnt/s/My Vault/a.md""#, PathForm::Windows, None),
+        converted(r#""S:\My Vault\a.md""#, 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths(r"code 'S:\My Vault\a.md' -n", PathForm::Wsl, None),
+        converted("code '/mnt/s/My Vault/a.md' -n", 1, 0)
+    );
+}
+
+#[test]
+fn convert_paths_converts_a_flags_value_only() {
+    assert_eq!(
+        ubuntu().convert_paths("--config=app/x.yml", PathForm::Windows, None),
+        converted(r"--config=app\x.yml", 1, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths(
+            r#"run -f=a/b.yml --out="/mnt/s/My Vault/x""#,
+            PathForm::Windows,
+            None
+        ),
+        converted(r#"run -f=a\b.yml --out="S:\My Vault\x""#, 2, 0)
+    );
+}
+
+#[test]
+fn convert_paths_leaves_urls_alone() {
+    let text = "curl https://example.com/a/b";
+    for form in [PathForm::Windows, PathForm::Wsl] {
+        assert_eq!(
+            ubuntu().convert_paths(text, form, None),
+            converted(text, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn convert_paths_keeps_line_breaks_indentation_and_what_surrounds_a_path() {
+    let block =
+        "cd app/services\n    rspec spec/a_spec.rb:12\r\n\tcat `docs/x.md`, /mnt/c/x.md#top\n";
+    assert_eq!(
+        ubuntu().convert_paths(block, PathForm::Windows, None),
+        converted(
+            "cd app\\services\n    rspec spec\\a_spec.rb:12\r\n\tcat `docs\\x.md`, C:\\x.md#top\n",
+            4,
+            0
+        )
+    );
+}
+
+#[test]
+fn convert_paths_counts_a_path_with_no_form_and_leaves_it_as_written() {
+    assert_eq!(
+        ubuntu().convert_paths(r"\\nas\share\x.md", PathForm::Wsl, None),
+        converted(r"\\nas\share\x.md", 0, 1)
+    );
+    assert_eq!(
+        ubuntu().convert_paths(r"cp \\nas\share\x.md S:\Notes\x.md", PathForm::Wsl, None),
+        converted(r"cp \\nas\share\x.md /mnt/s/Notes/x.md", 1, 1)
+    );
+    // A user mapping gives the share one.
+    assert_eq!(
+        mapper(&[("/home/me/shared", r"\\nas\share")]).convert_paths(
+            r"\\nas\share\x.md",
+            PathForm::Wsl,
+            None
+        ),
+        converted("/home/me/shared/x.md", 1, 0)
+    );
 }
 
 #[test]
