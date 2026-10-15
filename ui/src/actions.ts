@@ -489,9 +489,20 @@ export class Actions {
     }
     const doc = this.app.state.doc;
     const path = this.app.nav.currentPath();
+    // A text file, a page or a PDF can also go to its default app; a note would come back here.
+    const defaultApp: MenuEntry[] =
+      doc && doc.kind !== "markdown"
+        ? [
+            {
+              label: "Open in default app",
+              run: () => void this.app.openWithDefaultApp(doc.path),
+            },
+          ]
+        : [];
     await this.openMenu(
       [
         { label: "Open in editor", keys: "Ctrl+E", disabled: !doc, run: () => this.openInEditor() },
+        ...defaultApp,
         {
           label: "Reveal in Explorer",
           disabled: path === null,

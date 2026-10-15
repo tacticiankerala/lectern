@@ -7,6 +7,7 @@ use ts_rs::TS;
 
 use crate::frontmatter::Frontmatter;
 use crate::library::tree::TreeNode;
+use crate::library::DocKind;
 use crate::render::{OutlineItem, TaskStats};
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -162,12 +163,16 @@ pub struct Crumb {
     pub readme: Option<String>,
 }
 
-/// A rendered document, ready to show.
+/// A rendered document, ready to show. An HTML page or a PDF shows in a frame: its `html` and
+/// `outline` are empty, with no frontmatter or tasks.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct DocPayload {
     pub path: String,
+    pub kind: DocKind,
+    /// Where the frame loads an HTML page or a PDF from; `None` for every other kind.
+    pub frame_url: Option<String>,
     pub title: String,
     pub html: String,
     pub outline: Vec<OutlineItem>,
@@ -191,6 +196,8 @@ pub enum OpenErrorKind {
     NotFound,
     Permission,
     Binary,
+    /// A text file too large to show.
+    TooLarge,
     Io,
 }
 

@@ -1,5 +1,6 @@
 // DOM helpers and the app's layout. Chrome ids carry the `lx-` prefix: document headings get slug
 // ids and raw HTML may carry ids, so lookups inside a document are scoped to it (`findById`).
+import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 
 /**
@@ -117,6 +118,9 @@ export function samePath(a: string, b: string): boolean {
 
 /** A path ending in one of the core's Markdown extensions, in any letter case. */
 export const MARKDOWN_PATH = new RegExp(`\\.(?:${MARKDOWN_EXTENSIONS.join("|")})$`, "i");
+
+/** A path ending in the extension of any document the core opens, in any letter case. */
+export const DOCUMENT_PATH = new RegExp(`\\.(?:${DOCUMENT_EXTENSIONS.join("|")})$`, "i");
 
 /** Runs a promise for its effect, logging a failure instead of leaving it unhandled. */
 export function quietly(promise: Promise<unknown>): void {

@@ -3,6 +3,7 @@
 *.png binary
 *.ico binary
 *.icns binary
+*.pdf binary
 fixtures/**/._* binary
 fixtures/**/.DS_Store binary
 # A sidecar golden that must keep its CRLF line endings (and BOM) byte for byte.

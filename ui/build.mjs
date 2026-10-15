@@ -1,7 +1,8 @@
 // Bundles the UI into dist/ (or dist-fake/ with --fake): app.js, the modules it loads on first use,
 // app.css, index.html and fonts/.
-// The fake build inlines dev/fixtures.json, which `npm run fixtures` writes, with each document's
-// Markdown from fixtures/vault added for the fake's full-text search.
+// The fake build inlines dev/fixtures.json, which `npm run fixtures` writes, with the text of each
+// note and text file from fixtures/vault added for the fake's full-text search, which reads no
+// HTML pages or PDFs, as Rust's doesn't.
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -24,6 +25,8 @@ if (fake) {
   const vault = path.join(root, "../fixtures/vault");
   data.sources = {};
   for (const doc of Object.keys(data.docs)) {
+    const kind = data.kinds?.[doc] ?? "markdown";
+    if (kind !== "markdown" && kind !== "text") continue;
     const rel = doc.slice(data.root.length + 1).split("\\");
     data.sources[doc] = await readFile(path.join(vault, ...rel), "utf8");
   }

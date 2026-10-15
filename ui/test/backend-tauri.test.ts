@@ -91,4 +91,23 @@ describe("TauriBackend", () => {
     await backend.stopListening();
     expect(tauri.stops.map((stop) => stop.mock.calls.length)).toEqual([1, 1, 1]);
   });
+
+  it("offers every kind of document in the file picker", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    await new TauriBackend().pickFile();
+    expect(vi.mocked(open).mock.calls).toEqual([
+      [
+        {
+          multiple: false,
+          directory: false,
+          filters: [
+            {
+              name: "Documents",
+              extensions: ["md", "markdown", "mdown", "mkd", "txt", "html", "htm", "pdf"],
+            },
+          ],
+        },
+      ],
+    ]);
+  });
 });

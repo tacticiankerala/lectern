@@ -33,6 +33,7 @@ export function fixtures(docs: Record<string, RenderedDoc> = {}): Fixtures {
       name: "V",
       path: ROOT,
       isDir: true,
+      kind: null,
       children: [],
       readme: null,
       status: null,
@@ -54,6 +55,8 @@ export function docPayload(
 ): DocPayload {
   return {
     path: A,
+    kind: "markdown",
+    frameUrl: null,
     title: "Aye",
     html: "",
     outline: [],

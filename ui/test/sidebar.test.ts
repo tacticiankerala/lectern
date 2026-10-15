@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { DocKind } from "../src/generated/DocKind";
 import type { RootView } from "../src/generated/RootView";
 import { Sidebar } from "../src/sidebar";
 
@@ -8,7 +9,16 @@ function root(path: string, truncated: boolean): RootView {
     path,
     name,
     state: { state: "ready" },
-    tree: { name, path, isDir: true, children: [], readme: null, status: null, comments: null },
+    tree: {
+      name,
+      path,
+      isDir: true,
+      kind: null,
+      children: [],
+      readme: null,
+      status: null,
+      comments: null,
+    },
     truncated,
   };
 }
@@ -43,6 +53,7 @@ describe("Sidebar", () => {
       name,
       path: `C:\\Notes\\${name}`,
       isDir: false,
+      kind: "markdown" as const,
       children: [],
       readme: null,
       status: null,
@@ -65,6 +76,50 @@ describe("Sidebar", () => {
     expect(el.querySelector(".tree-count")?.getAttribute("title")).toBe("2 open comments");
     sidebar.setCommentCounts(false);
     expect(el.querySelectorAll(".tree-count")).toHaveLength(0);
+  });
+
+  it("marks text files, HTML pages and PDFs with their type, which opens them too", () => {
+    const el = document.createElement("div");
+    const app = host();
+    const sidebar = new Sidebar(el, app);
+    const notes = root("C:\\Notes", false);
+    const file = (name: string, kind: DocKind) => ({
+      name,
+      path: `C:\\Notes\\${name}`,
+      isDir: false,
+      kind,
+      children: [],
+      readme: null,
+      status: null,
+      comments: null,
+    });
+    notes.tree?.children.push(
+      file("brief.pdf", "pdf"),
+      file("plan.md", "markdown"),
+      file("readme.txt", "text"),
+      file("report.html", "html"),
+    );
+    sidebar.start();
+    sidebar.setLibrary({ roots: [notes] });
+    const marks = () =>
+      [...el.querySelectorAll<HTMLElement>(".tree-row")].map((row) => [
+        row.dataset.path,
+        row.querySelector(".tree-kind")?.textContent ?? null,
+      ]);
+    expect(marks()).toEqual([
+      ["C:\\Notes", null],
+      ["C:\\Notes\\brief.pdf", "PDF"],
+      ["C:\\Notes\\plan.md", null],
+      ["C:\\Notes\\readme.txt", "TXT"],
+      ["C:\\Notes\\report.html", "HTML"],
+    ]);
+    // The name already says it, so screen readers skip the mark.
+    expect(el.querySelector(".tree-kind")?.getAttribute("aria-hidden")).toBe("true");
+    const report = [...el.querySelectorAll<HTMLElement>(".tree-row")].find(
+      (row) => row.dataset.path === "C:\\Notes\\report.html",
+    );
+    report?.querySelector<HTMLElement>(".tree-kind")?.click();
+    expect(app.open).toHaveBeenCalledWith("C:\\Notes\\report.html");
   });
 
   it("with no roots, offers to add a folder, until there is one", () => {

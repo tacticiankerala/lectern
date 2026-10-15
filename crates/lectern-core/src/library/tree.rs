@@ -1,4 +1,5 @@
-//! The library sidebar tree: Markdown files and the folders that lead to them.
+//! The library sidebar tree: the documents (notes, text files, HTML pages and PDFs) and the
+//! folders that lead to them.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -6,7 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{FileEntry, RootIndex};
+use super::{DocKind, FileEntry, RootIndex};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +17,8 @@ pub struct TreeNode {
     /// The absolute path.
     pub path: String,
     pub is_dir: bool,
+    /// A file's kind, which the sidebar marks for anything but Markdown. Never set for a folder.
+    pub kind: Option<DocKind>,
     /// Folders first, then files, each in natural order. Empty for files.
     pub children: Vec<TreeNode>,
     /// The absolute path of this folder's `README.md`.
@@ -34,11 +37,10 @@ struct Folder<'a> {
     files: Vec<(&'a str, &'a FileEntry)>,
 }
 
-/// The tree of `root`'s Markdown files. A folder appears only when it holds Markdown somewhere
-/// below it.
+/// The tree of `root`'s documents. A folder appears only when it holds one somewhere below it.
 pub fn build_tree(root: &RootIndex) -> TreeNode {
     let mut top = Folder::default();
-    for file in root.md_files() {
+    for file in root.documents() {
         let mut parts = file.rel.split('/');
         let Some(name) = parts.next_back() else {
             continue;
@@ -82,6 +84,7 @@ fn folder_node(root: &RootIndex, name: String, rel: String, folder: Folder) -> T
             name: name.to_owned(),
             path: abs_string(root, &file.rel),
             is_dir: false,
+            kind: file.kind(),
             children: Vec::new(),
             readme: None,
             status: None,
@@ -95,6 +98,7 @@ fn folder_node(root: &RootIndex, name: String, rel: String, folder: Folder) -> T
         name,
         path: abs_string(root, &rel),
         is_dir: true,
+        kind: None,
         children: folders,
         readme: readme.map(|file| abs_string(root, &file.rel)),
         status: readme.and_then(|file| file.fm_status.clone()),

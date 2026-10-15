@@ -22,6 +22,28 @@ describe("FakeBackend search", () => {
   });
 });
 
+describe("FakeBackend documents", () => {
+  it("matches a text file's name without its extension, as core does", async () => {
+    const readme = `${ROOT}\\notes\\readme.txt`;
+    const data = fixtures({ [readme]: rendered("readme", "<p>Saved as readme.txt.</p>") });
+    data.kinds = { [readme]: "text" };
+    data.sources = { [readme]: "Saved as readme.txt beside the notes." };
+    const results = await new FakeBackend(data).search("txt");
+    expect(results.map((r) => [r.rel, r.nameMatch])).toEqual([["notes/readme.txt", false]]);
+  });
+
+  it("takes any document's name for a file, never a folder to add", async () => {
+    const fake = new FakeBackend(fixtures());
+    const before = (await fake.getLibrary()).roots.length;
+    for (const path of ["C:\\Elsewhere\\brief.pdf", "C:\\Elsewhere\\page.HTML"]) {
+      const opened = await fake.openUserPath(path);
+      expect(opened.folder, path).toBe(false);
+      expect(opened.doc?.status, path).toBe("err");
+      expect(opened.library.roots, path).toHaveLength(before);
+    }
+  });
+});
+
 describe("FakeBackend path forms", () => {
   it("follows core's rules for drives, /mnt, WSL shares and Linux paths, with a fixed distro", async () => {
     const fake = new FakeBackend(fixtures());

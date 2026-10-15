@@ -26,7 +26,7 @@ use crate::library::pathmap::{
     PathMapper,
 };
 use crate::library::resolve::{resolve_relative, resolve_wikilink, WikiResolution};
-use crate::library::{is_markdown, LibraryIndex};
+use crate::library::{doc_kind, LibraryIndex};
 
 /// Inline code that names a file: an optional drive, UNC, `/`, `./` or `../` prefix, a folder
 /// separator, a 1–6 character extension and an optional `:line` or `:line:col`. No spaces.
@@ -95,7 +95,8 @@ pub(super) const BLOCKED_IMAGE_TITLE: &str = "Image on an unknown network locati
 
 /// A local place a link points at.
 enum Target {
-    /// A Markdown note, opened in Lectern. `anchor` is the heading part as written.
+    /// A document (a note, a text file, an HTML page or a PDF), opened in Lectern. `anchor` is the
+    /// heading part as written.
     Doc {
         path: PathBuf,
         anchor: Option<String>,
@@ -172,8 +173,8 @@ impl<'c> Links<'c> {
         Some(Href::Local(self.link_target(&path, anchor, line)))
     }
 
-    /// An explicit link's path. One the index can't confirm still links: a Markdown note opens
-    /// (and says when it's missing), anything else is checked when followed.
+    /// An explicit link's path. One the index can't confirm still links: a document opens (and
+    /// says when it's missing), anything else is checked when followed.
     fn link_target(&self, path: &str, anchor: Option<String>, line: Option<u32>) -> Target {
         if is_absolute(path) {
             return self.absolute_target(path, anchor, line);
@@ -185,7 +186,7 @@ impl<'c> Links<'c> {
             return local_target(found, anchor, line);
         }
         let joined = join_lexically(self.doc_path.parent().unwrap_or(Path::new("")), path);
-        if is_markdown(&joined.to_string_lossy()) {
+        if doc_kind(&joined.to_string_lossy()).is_some() {
             Target::Doc {
                 path: joined,
                 anchor,
@@ -372,7 +373,7 @@ fn join_lexically(dir: &Path, rel: &str) -> PathBuf {
 }
 
 fn local_target(path: PathBuf, anchor: Option<String>, line: Option<u32>) -> Target {
-    if is_markdown(&path.to_string_lossy()) {
+    if doc_kind(&path.to_string_lossy()).is_some() {
         Target::Doc { path, anchor, line }
     } else {
         Target::File { path, line }

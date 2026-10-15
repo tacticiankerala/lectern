@@ -112,6 +112,16 @@ fn wikilink_ignores_case() {
     );
 }
 
+/// `notes/readme.txt` sits nearer than the vault's README, but wikilinks reach Markdown notes only.
+#[test]
+fn wikilink_never_resolves_to_a_text_file() {
+    let v = Vault::new();
+    assert_eq!(
+        v.wiki("notes/résumé notes.md", "readme"),
+        v.found("README.md")
+    );
+}
+
 #[test]
 fn wikilink_by_frontmatter_name() {
     let v = Vault::new();

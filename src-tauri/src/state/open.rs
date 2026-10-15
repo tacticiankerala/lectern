@@ -10,11 +10,14 @@ use lectern_core::cache::CacheKey;
 use lectern_core::ipc::{
     DocPayload, OpenError, OpenErrorKind, OpenResult, RecentEntry, SavedPosition,
 };
-use lectern_core::library::{path_key, LibraryIndex};
+use lectern_core::library::{path_key, DocKind, LibraryIndex};
 use lectern_core::render::RENDER_VERSION;
 use lectern_core::store::State;
 
-use super::doc::{breadcrumbs, now_ms, read_text, readme_in, render_text, stat_doc, Rendered};
+use super::doc::{
+    breadcrumbs, check_size, framed, now_ms, opened_kind, read_text, readme_in, render_text,
+    stat_doc, Rendered,
+};
 use super::paths::{is_under, path_string, same_path};
 use super::sync::{lock, read, write};
 use super::{trust, Current, WindowState};
@@ -42,13 +45,24 @@ impl WindowState {
         self.finish_open(seq, &path, result)
     }
 
+    /// Reads and renders `path`, or takes its render from the cache. An HTML page or a PDF is
+    /// only stated: it shows in a frame.
     pub(super) fn load(&self, path: &Path) -> Result<Rendered, OpenError> {
         // The generation is read before the index, so a render against an index replaced
         // meanwhile is never cached.
         let gen = self.index_gen.load(Ordering::SeqCst);
         let index = self.index();
+        let kind = opened_kind(path);
         let stamp = stat_doc(path)?;
         let covered = index.root_for(path).is_some();
+        if kind.framed() {
+            return Ok(Rendered {
+                covered,
+                gen,
+                ..framed(path, kind, &stamp)
+            });
+        }
+        check_size(path, kind, stamp.size)?;
         let key = CacheKey {
             path: path_key(path),
             mtime_ms: stamp.mtime_ms,
@@ -57,6 +71,7 @@ impl WindowState {
         };
         if let Some(doc) = lock(&self.cache).get(&key) {
             return Ok(Rendered {
+                kind,
                 doc,
                 mtime_ms: stamp.mtime_ms,
                 lossy: false,
@@ -68,6 +83,7 @@ impl WindowState {
         let mapper = self.mapper();
         let hosts = read(&self.app.trust).hosts();
         let with_index = (!index.roots.is_empty()).then_some(&*index);
+        // A text file renders as a note does until it has a viewer of its own.
         let doc = Arc::new(render_text(path, &text.text, with_index, &mapper, &hosts));
         // Lossy renders aren't cached, so a cache hit is never lossy.
         if !text.lossy {
@@ -77,6 +93,7 @@ impl WindowState {
             }
         }
         Ok(Rendered {
+            kind,
             doc,
             mtime_ms: stamp.mtime_ms,
             lossy: text.lossy,
@@ -156,6 +173,8 @@ impl WindowState {
         DocPayload {
             position: lock(&self.app.state).reading.position(&path_text).cloned(),
             path: path_text,
+            kind: rendered.kind,
+            frame_url: None,
             title: doc.title.clone(),
             html: doc.html.clone(),
             outline: doc.outline.clone(),
@@ -183,7 +202,8 @@ impl WindowState {
         *current = Some(Current {
             path: path.to_path_buf(),
             seq,
-            stale: rendered.is_some_and(|r| !r.covered || r.doc.has_unresolved_wikilinks),
+            stale: follows_the_index(path)
+                && rendered.is_some_and(|r| !r.covered || r.doc.has_unresolved_wikilinks),
             rendered_gen: rendered.map_or(0, |r| r.gen),
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
@@ -204,8 +224,8 @@ impl WindowState {
     /// Asks the UI to reload the current document when an index newer than its render covers it
     /// (below `root`, when given) and either it is stale or, with `files_changed`, files below
     /// `root` were added, removed or moved, so the links it resolved may point at paths that
-    /// are gone. At most once per index generation, and only once the window has shown its
-    /// first document.
+    /// are gone. At most once per index generation, only once the window has shown its first
+    /// document, and only for a document that follows the index (`follows_the_index`).
     pub(super) fn refresh_current(&self, root: Option<&Path>, files_changed: bool) {
         if !self.ui_shown.is_open() {
             return;
@@ -217,6 +237,7 @@ impl WindowState {
             match current.as_mut() {
                 Some(c)
                     if (c.stale || files_changed)
+                        && follows_the_index(&c.path)
                         && c.rendered_gen < gen
                         && c.refreshed_at != Some(gen)
                         && root.is_none_or(|root| is_under(&c.path, root))
@@ -235,7 +256,8 @@ impl WindowState {
 
     /// Asks the UI to reload the current document, stale or not, once the window has shown it.
     /// After the path mappings change, any link or image it resolved may point elsewhere, even
-    /// in a document the index already covers. A document that failed to open is left alone.
+    /// in a document the index already covers. A document that failed to open is left alone, and
+    /// so is one that doesn't follow the index (`follows_the_index`).
     pub(super) fn refresh_current_now(&self) {
         if !self.ui_shown.is_open() {
             return;
@@ -243,7 +265,7 @@ impl WindowState {
         let gen = self.index_gen.load(Ordering::SeqCst);
         let path = lock(&self.current)
             .as_mut()
-            .filter(|c| c.doc.is_some())
+            .filter(|c| c.doc.is_some() && follows_the_index(&c.path))
             .map(|c| {
                 c.refreshed_at = Some(gen);
                 c.path.clone()
@@ -286,6 +308,13 @@ fn as_reading<R>(recent: &mut Vec<RecentEntry>, f: impl FnOnce(&mut State) -> R)
     let result = f(&mut reading);
     *recent = reading.recent;
     result
+}
+
+/// Whether the document at `path` shows anything the index or the path mappings decide: a note's
+/// links and images do. A page, a PDF or a text file shows the same whatever they hold, so it is
+/// never reloaded for them.
+fn follows_the_index(path: &Path) -> bool {
+    opened_kind(path) == DocKind::Markdown
 }
 
 /// The answer for a path on a network host the user hasn't chosen.
@@ -397,6 +426,57 @@ mod tests {
         assert_eq!(f.host.doc_changes(), 1);
         rescan(&f, &root);
         assert_eq!(f.host.doc_changes(), 1);
+    }
+
+    /// An HTML page or a PDF opens with its kind and nothing of Lectern's own to show; a note
+    /// opens as it always has.
+    #[test]
+    fn a_page_opens_with_its_kind_and_no_content() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let page = f.dir.file("one/report.html", "<h1>Report</h1><p>Rose.</p>");
+        let pdf = f.dir.file("one/brief.pdf", "%PDF-1.4\n");
+        let note = f.dir.file("one/plan.md", "# Plan\n");
+        for (path, kind) in [(&page, DocKind::Html), (&pdf, DocKind::Pdf)] {
+            let OpenResult::Ok { doc } = f.state.open_document(&path_string(path)) else {
+                panic!("{} didn't open", path.display());
+            };
+            assert_eq!(doc.kind, kind);
+            assert_eq!(doc.frame_url, None);
+            assert_eq!(doc.html, "");
+            assert!(doc.outline.is_empty());
+            assert!(doc.frontmatter.is_none());
+            assert_eq!(doc.title, path.file_name().unwrap().to_string_lossy());
+        }
+        let OpenResult::Ok { doc } = f.state.open_document(&path_string(&note)) else {
+            panic!("the note didn't open");
+        };
+        assert_eq!(doc.kind, DocKind::Markdown);
+        assert_eq!(doc.frame_url, None);
+        assert!(doc.html.contains("Plan"));
+        assert_eq!(last_doc(&f), Some(path_string(&note)));
+    }
+
+    /// Nothing in a page depends on the index, so it is never stale, and a rescan that moves
+    /// files never reloads it.
+    #[test]
+    fn a_page_is_never_refreshed_for_the_index() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let outside = dir.file("elsewhere/report.html", "<h1>Report</h1>");
+        let page = dir.file("vault/report.html", "<h1>Report</h1>");
+        let b = dir.file("vault/work/b.md", "# B");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        wait_until("the root is indexed", || settled(&f, &root));
+        f.state.window_shown();
+        f.state.open_document(&path_string(&outside));
+        assert_eq!(current(&f), (outside, false));
+        f.state.open_document(&path_string(&page));
+        assert_eq!(current(&f), (page, false));
+        fs::create_dir_all(root.join("archive")).unwrap();
+        fs::rename(&b, root.join("archive").join("b.md")).unwrap();
+        rescan(&f, &root);
+        f.state.refresh_current_now();
+        assert_eq!(f.host.doc_changes(), 0);
     }
 
     #[test]

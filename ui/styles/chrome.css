@@ -685,6 +685,17 @@ button.crumb:focus-visible {
   height: 5px;
 }
 
+/* The type of a document that isn't a note (TXT, HTML, PDF): small and muted after its name. */
+.tree-kind {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: 0.731em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
 .lib-root-head {
   height: 2.154em;
   font-weight: 600;

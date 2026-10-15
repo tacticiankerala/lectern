@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lectern_core::ipc::{EditorPref, FollowKind, FollowResult, FollowTarget, PathForms};
+use lectern_core::library::doc_kind;
 use lectern_core::library::pathmap::Mapped;
 use lectern_core::library::scan::probe_with;
 
@@ -43,8 +44,11 @@ pub enum FollowPlan {
 ///
 /// Docs, files and paths must come to an absolute local path, on a trusted host when it is a UNC
 /// path (checked before anything touches it: reaching an SMB host hands it the user's
-/// credentials). Markdown opens in the reader, code and text in the editor (line 1 without a
-/// cited line), viewable files with their default app, and anything else is only revealed.
+/// credentials). A link to any document (a note, a text file, an HTML page or a PDF) opens it in
+/// the reader. A file target, as "Open in default app" sends for the open document, opens only a
+/// note in the reader; otherwise code goes to the editor (line 1 without a cited line), viewable
+/// files (text, HTML and PDF among them) to their default app, and anything else is only
+/// revealed.
 pub fn plan_follow(
     target: &FollowTarget,
     map: impl FnOnce(&str) -> Mapped,
@@ -84,12 +88,14 @@ pub fn plan_follow(
     if unverified && !exists(Path::new(&path)) {
         return FollowPlan::NotFound(format!("Couldn't find {raw}"));
     }
+    let open_doc = |path| FollowPlan::OpenDoc {
+        path,
+        anchor: anchor.clone(),
+        line: *line,
+    };
     match (kind, shell::file_kind(&path)) {
-        (FollowKind::Doc, _) | (_, FileKind::Markdown) => FollowPlan::OpenDoc {
-            path,
-            anchor: anchor.clone(),
-            line: *line,
-        },
+        (FollowKind::Doc, _) | (_, FileKind::Markdown) => open_doc(path),
+        (FollowKind::Path, _) if doc_kind(&path).is_some() => open_doc(path),
         (_, FileKind::Code) => FollowPlan::Editor {
             path,
             line: line.unwrap_or(1),
@@ -343,6 +349,56 @@ mod tests {
             ),
             FollowPlan::Reveal(r"C:\tools\a.exe".to_owned())
         );
+    }
+
+    /// A link to a text file, an HTML page or a PDF opens it in Lectern, whatever form it took.
+    #[test]
+    fn a_link_to_any_document_opens_in_the_reader() {
+        for raw in [
+            r"C:\x\page.html",
+            r"C:\x\old.HTM",
+            r"C:\x\brief.pdf",
+            r"C:\x\readme.txt",
+            r"C:\x\plan.md",
+        ] {
+            let expected = FollowPlan::OpenDoc {
+                path: raw.to_owned(),
+                anchor: Some("Intro".to_owned()),
+                line: Some(2),
+            };
+            let mapped = |_: &str| Mapped::Verified(PathBuf::from(raw));
+            let path = target(FollowKind::Path, "/home/me/x", Some(2), Some("Intro"));
+            assert_eq!(
+                plan_follow(&path, mapped, trust_all, unchecked),
+                expected,
+                "{raw}"
+            );
+            let doc = target(FollowKind::Doc, raw, Some(2), Some("Intro"));
+            assert_eq!(
+                plan_follow(&doc, unmapped, trust_all, unchecked),
+                expected,
+                "{raw}"
+            );
+        }
+    }
+
+    /// A file target is what "Open in default app" sends for the open document: a text file, an
+    /// HTML page or a PDF goes to its default app, never back into Lectern.
+    #[test]
+    fn a_file_target_opens_a_document_with_its_default_app() {
+        for raw in [
+            r"C:\x\page.html",
+            r"C:\x\old.htm",
+            r"C:\x\brief.pdf",
+            r"C:\x\readme.txt",
+        ] {
+            let t = target(FollowKind::File, raw, None, None);
+            assert_eq!(
+                plan_follow(&t, unmapped, trust_all, unchecked),
+                FollowPlan::OpenFile(raw.to_owned()),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

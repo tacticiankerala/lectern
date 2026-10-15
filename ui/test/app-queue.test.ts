@@ -170,6 +170,24 @@ describe("App error state", () => {
     button?.click();
     expect(follow).toHaveBeenCalledWith({ kind: "file", target: path, line: null, anchor: null });
   });
+
+  it("offers the default app for a text file too large to show", async () => {
+    const { fake, app } = setup(null);
+    const path = "C:\\V\\huge.txt";
+    const message = "This file is too large to show (over 20 MB).";
+    fake.overrides[path] = { status: "err", error: { kind: "tooLarge", message, path } };
+    fake.startupGate.resolve();
+    await app.start();
+    await app.open(path);
+    const state = document.querySelector("#lx-doc .state-error");
+    expect(state?.querySelector(".state-title")?.textContent).toBe("This file is too large");
+    expect(state?.querySelector(".state-detail")?.textContent).toBe(message);
+    const buttons = [...document.querySelectorAll("#lx-doc button")].map((b) => b.textContent);
+    expect(buttons).toEqual(["Retry", "Remove from recent", "Open with default app"]);
+    const follow = vi.spyOn(fake, "follow");
+    buttonNamed("Open with default app")?.click();
+    expect(follow).toHaveBeenCalledWith({ kind: "file", target: path, line: null, anchor: null });
+  });
 });
 
 function recentEntry(path: string, title: string): RecentEntry {

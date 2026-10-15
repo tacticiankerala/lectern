@@ -890,8 +890,11 @@ export class App {
     }
   }
 
-  /** Hands a file Lectern can't show to Rust, which opens a viewable one with its app. */
-  private async openWithDefaultApp(path: string): Promise<void> {
+  /**
+   * Hands a file to Rust as a file target, which opens a viewable one (a text file, a page, a PDF,
+   * an image) with its default app: a file Lectern can't show, or the open document from ⋯.
+   */
+  async openWithDefaultApp(path: string): Promise<void> {
     try {
       const target = { kind: "file", target: path, line: null, anchor: null } as const;
       const result = await this.backend.follow(target);

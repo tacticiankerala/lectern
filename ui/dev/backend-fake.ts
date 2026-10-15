@@ -1,8 +1,8 @@
 // A Backend that serves the fixtures `export_fixtures` rendered (ui/dev/fixtures.json), so the
 // UI runs in a plain browser for Playwright. Tests drive it through `window.__fake`.
 //
-// Full-text search matches the fixtures' Markdown, which `build.mjs --fake` inlines, as Rust does:
-// smart case, line by line.
+// Full-text search matches the fixtures' notes and text files, which `build.mjs --fake` inlines, as
+// Rust does: smart case, line by line. Each document's kind comes from core, through the export.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -27,12 +27,13 @@ import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
 import { trimPath } from "../src/copy-path";
-import { MARKDOWN_PATH } from "../src/dom";
+import { DOCUMENT_PATH } from "../src/dom";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
 import type { ClaudeKind } from "../src/generated/ClaudeKind";
 import type { CommentStatus } from "../src/generated/CommentStatus";
 import type { Crumb } from "../src/generated/Crumb";
+import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
 import type { EntryAuthor } from "../src/generated/EntryAuthor";
 import type { EntryView } from "../src/generated/EntryView";
@@ -70,7 +71,9 @@ export interface Fixtures {
   candidates: Candidate[];
   /** By path. */
   docs: Record<string, RenderedDoc>;
-  /** Each document's Markdown, by path; `build.mjs --fake` adds it. */
+  /** The kind of each document that isn't Markdown, by path. */
+  kinds?: Record<string, DocKind>;
+  /** The text of each note and text file, by path; `build.mjs --fake` adds it. */
   sources?: Record<string, string>;
   /** Core's review text for each document, by path: `[startLine, endLine, text]` per block. */
   textBlocks?: Record<string, [number, number, string][]>;
@@ -568,9 +571,11 @@ export class FakeBackend implements Backend, FakeControl {
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
+  /** The kind of each document that isn't Markdown, by path key. */
+  private readonly kinds = new Map<string, DocKind>();
   /** Saved reading positions, by path key. */
   private readonly positions = new Map<string, SavedPosition>();
-  /** Each document's Markdown, by path key, for full-text search. */
+  /** The text of each note and text file, by path key, for full-text search. */
   private readonly sources = new Map<string, string>();
   /** Stands in for modification times: bumped by every change. */
   private clock = 0;
@@ -597,6 +602,9 @@ export class FakeBackend implements Backend, FakeControl {
     this.recent = options.recent ?? [];
     for (const [path, doc] of Object.entries(fixtures.docs)) {
       this.docs.set(key(path), { path, doc, mtimeMs: 0 });
+    }
+    for (const [path, kind] of Object.entries(fixtures.kinds ?? {})) {
+      this.kinds.set(key(path), kind);
     }
     for (const [path, source] of Object.entries(fixtures.sources ?? {})) {
       this.sources.set(key(path), source);
@@ -688,12 +696,12 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   /**
-   * As Rust decides: a file (a Markdown name, or a document the fake has) opens; a folder joins
+   * As Rust decides: a file (a document's name, or a document the fake has) opens; a folder joins
    * the library unless it nests with a root. In a blank window a folder opens and joins nothing,
    * and the answer says it is one.
    */
   openUserPath(path: string): Promise<UserOpen> {
-    if (MARKDOWN_PATH.test(path) || this.docs.has(key(path))) {
+    if (DOCUMENT_PATH.test(path) || this.docs.has(key(path))) {
       return Promise.resolve({
         doc: this.open(path),
         library: structuredClone(this.library),
@@ -797,7 +805,7 @@ export class FakeBackend implements Backend, FakeControl {
         }
       });
       if (total === 0) return null;
-      const nameMatch = name.test(baseName(path).replace(MARKDOWN_PATH, ""));
+      const nameMatch = name.test(baseName(path).replace(DOCUMENT_PATH, ""));
       const rel = path.slice(this.fixtures.root.length + 1).replaceAll("\\", "/");
       return { path, title: doc.title, rel, nameMatch, hits: lines, total };
     });
@@ -1426,7 +1434,7 @@ export class FakeBackend implements Backend, FakeControl {
           outline: [],
           frontmatter: null,
           tasks: { done: 0, total: 0 },
-          title: baseName(path).replace(MARKDOWN_PATH, ""),
+          title: baseName(path).replace(DOCUMENT_PATH, ""),
           wordCount: 0,
           hasUnresolvedWikilinks: false,
         };
@@ -1452,6 +1460,8 @@ export class FakeBackend implements Backend, FakeControl {
   private payload(path: string, doc: RenderedDoc, mtimeMs: number): DocPayload {
     return {
       path,
+      kind: this.kinds.get(key(path)) ?? "markdown",
+      frameUrl: null,
       title: doc.title,
       html: doc.html,
       outline: doc.outline,

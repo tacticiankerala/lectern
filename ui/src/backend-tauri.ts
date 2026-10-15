@@ -5,11 +5,11 @@ import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { Candidate } from "./generated/Candidate";
+import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { LibraryPayload } from "./generated/LibraryPayload";
-import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PathForms } from "./generated/PathForms";
@@ -173,7 +173,7 @@ export class TauriBackend implements Backend {
     return open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Markdown", extensions: [...MARKDOWN_EXTENSIONS] }],
+      filters: [{ name: "Documents", extensions: [...DOCUMENT_EXTENSIONS] }],
     });
   }
 

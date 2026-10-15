@@ -144,6 +144,7 @@ test("the breadcrumb chooser lists the folder of each kind of crumb", async ({ p
   await expect(cc.where).toHaveText("vault");
   await expect(cc.names).toHaveText([
     "archive",
+    "artifacts",
     "friends",
     "memory",
     "notes",

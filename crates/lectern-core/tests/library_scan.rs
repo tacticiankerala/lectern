@@ -10,7 +10,9 @@ use lectern_core::library::scan::{
     probe_root, probe_with, read_heads, scan_root, ScanOptions, ADHOC_MAX_FILES, ROOT_MAX_FILES,
 };
 use lectern_core::library::snapshot::{load_snapshot, save_snapshot, snapshot_path};
-use lectern_core::library::{FileEntry, LibraryIndex, RootIndex};
+use lectern_core::library::{
+    doc_kind, document_extensions, DocKind, FileEntry, LibraryIndex, RootIndex,
+};
 
 fn scan(root: &Path) -> RootIndex {
     scan_root(root, &ScanOptions::default()).unwrap()
@@ -417,6 +419,76 @@ fn root_lookups_are_case_insensitive() {
     assert_eq!(by_name, ["memory/feedback_incremental_prs.md"]);
     // Stems are indexed for Markdown files only.
     assert_eq!(r.with_stem("logo").count(), 0);
+}
+
+#[test]
+fn doc_kind_comes_from_the_extension_in_any_case() {
+    for (path, kind) in [
+        ("a.md", Some(DocKind::Markdown)),
+        ("A.MARKDOWN", Some(DocKind::Markdown)),
+        (r"S:\Notes\My Vault\old.mdown", Some(DocKind::Markdown)),
+        ("short.Mkd", Some(DocKind::Markdown)),
+        ("notes.txt.review.md", Some(DocKind::Markdown)),
+        (r"S:\Notes\My Vault\readme.TXT", Some(DocKind::Text)),
+        ("artifacts/report.html", Some(DocKind::Html)),
+        (r"\\nas\share\PAGE.HTM", Some(DocKind::Html)),
+        ("/home/me/brief.Pdf", Some(DocKind::Pdf)),
+        ("data.csv", None),
+        ("app.log", None),
+        ("a.mdx", None),
+        ("readme", None),
+        (r"C:\n.html\x.png", None),
+    ] {
+        assert_eq!(doc_kind(path), kind, "{path}");
+    }
+}
+
+#[test]
+fn every_document_extension_has_a_kind_and_markdown_comes_first() {
+    let all: Vec<&str> = document_extensions().collect();
+    assert_eq!(
+        all,
+        ["md", "markdown", "mdown", "mkd", "txt", "html", "htm", "pdf"]
+    );
+    for ext in &all {
+        assert!(doc_kind(&format!("x.{ext}")).is_some(), "{ext}");
+    }
+}
+
+#[test]
+fn markdown_text_and_html_take_comments_and_pdfs_do_not() {
+    assert!(DocKind::Markdown.takes_comments());
+    assert!(DocKind::Text.takes_comments());
+    assert!(DocKind::Html.takes_comments());
+    assert!(!DocKind::Pdf.takes_comments());
+}
+
+#[test]
+fn html_pages_and_pdfs_show_in_a_frame() {
+    assert!(!DocKind::Markdown.framed());
+    assert!(!DocKind::Text.framed());
+    assert!(DocKind::Html.framed());
+    assert!(DocKind::Pdf.framed());
+}
+
+#[test]
+fn documents_are_every_file_with_a_kind() {
+    let (_tmp, vault) = common::vault_copy();
+    let r = scan(&vault);
+    let docs: Vec<&str> = r.documents().map(|f| f.rel.as_str()).collect();
+    for rel in [
+        "README.md",
+        "notes/readme.txt",
+        "artifacts/report.html",
+        "artifacts/brief.pdf",
+    ] {
+        assert!(docs.contains(&rel), "{rel} missing from {docs:?}");
+    }
+    assert!(!docs.contains(&"friends/img/logo.png"), "{docs:?}");
+    assert_eq!(entry(&r, "notes/readme.txt").kind(), Some(DocKind::Text));
+    assert_eq!(entry(&r, "friends/img/logo.png").kind(), None);
+    // Notes are still Markdown only.
+    assert!(!r.md_files().any(|f| f.rel == "notes/readme.txt"));
 }
 
 #[test]

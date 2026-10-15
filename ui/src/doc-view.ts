@@ -6,7 +6,7 @@
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
-import { HEADINGS, findById, samePath } from "./dom";
+import { HEADINGS, findById, h, samePath } from "./dom";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
 import type { FollowResult } from "./generated/FollowResult";
@@ -64,6 +64,15 @@ export class DocView {
   }
 
   render(doc: DocPayload): void {
+    if (doc.frameUrl === null && (doc.kind === "html" || doc.kind === "pdf")) {
+      // A page or a PDF shows in a frame; until the frame viewer lands, a placeholder.
+      this.host.replaceChildren(
+        h("div", { class: "state" }, h("p", { class: "state-detail" }, "Coming in this branch")),
+      );
+      this.lastHeading = null;
+      this.fitRoom();
+      return;
+    }
     this.host.innerHTML = doc.html;
     // A blocked image has no src to fail: it shows its placeholder straight away.
     for (const img of this.host.querySelectorAll<HTMLImageElement>("img.img-blocked")) {

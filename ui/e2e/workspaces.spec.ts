@@ -217,12 +217,13 @@ test("a folder dropped on a blank window asks for a name, then becomes a workspa
   page,
 }) => {
   await start(page, "blank");
-  // A file not named as Markdown opens as a loose file, without asking.
+  // A file opens as a loose file, without asking. A text file without a heading is titled by its
+  // name without the extension, as a note is.
   await page.evaluate((path) => {
     window.__fake.setDoc(path, "<p>High water at noon</p>");
     window.__fake.drop([path]);
   }, `${VAULT}\\tide.txt`);
-  await expect(page).toHaveTitle("tide.txt — Lectern");
+  await expect(page).toHaveTitle("tide — Lectern");
   const ask = page.getByRole("dialog", { name: "New workspace" });
   await expect(ask).toHaveCount(0);
   await page.evaluate(() => {

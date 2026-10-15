@@ -1,6 +1,7 @@
-//! Renders every Markdown file in `fixtures/vault`, with an index of the vault, for the UI's fake
+//! Renders every document in `fixtures/vault`, with an index of the vault, for the UI's fake
 //! backend, and writes them to `ui/dev/fixtures.json` with the library tree, the quick-open
-//! candidates and each note's review text blocks.
+//! candidates, the kind of each document that isn't Markdown and each note's review text blocks.
+//! An HTML page or a PDF is never read: it opens as an empty, framed document.
 //!
 //! Paths are rewritten under a fake Windows root, `C:\Fixtures\vault`, so the UI sees the paths it
 //! sees on Windows. Images point at `/__asset/<encoded path>`, which `ui/dev/serve.mjs` maps back
@@ -16,7 +17,7 @@ use lectern_core::ipc::Candidate;
 use lectern_core::library::pathmap::{asset_url, PathMapper};
 use lectern_core::library::scan::{read_heads, scan_root, ScanOptions};
 use lectern_core::library::tree::{build_tree, TreeNode};
-use lectern_core::library::LibraryIndex;
+use lectern_core::library::{DocKind, LibraryIndex};
 use lectern_core::render::{render, RenderContext, RenderedDoc};
 use lectern_core::review::text::TextMap;
 use lectern_core::text::decode;
@@ -38,6 +39,8 @@ struct Fixtures {
     candidates: Vec<Candidate>,
     /// By path.
     docs: BTreeMap<String, RenderedDoc>,
+    /// By path: the kind of each document that isn't Markdown.
+    kinds: BTreeMap<String, DocKind>,
     /// By path: each leaf block of the review text map as `[startLine, endLine, text]`, for the
     /// fake backend and the check that the UI reads the same text from the rendered page.
     text_blocks: BTreeMap<String, Vec<(u32, u32, String)>>,
@@ -57,10 +60,26 @@ fn main() {
     let mapper = PathMapper::default();
 
     let mut docs = BTreeMap::new();
+    let mut kinds = BTreeMap::new();
     let mut text_blocks = BTreeMap::new();
     let mut candidates = Vec::new();
-    for file in root.md_files() {
+    for file in root.documents() {
         let path = root.abs(&file.rel);
+        let fake_path = remap.path(&path.to_string_lossy());
+        candidates.push(Candidate {
+            path: fake_path.clone(),
+            name: file.rel.rsplit('/').next().unwrap_or(&file.rel).to_owned(),
+            rel: file.rel.clone(),
+            root: FAKE_ROOT.to_owned(),
+        });
+        let kind = file.kind().expect("a document has a kind");
+        if kind != DocKind::Markdown {
+            kinds.insert(fake_path.clone(), kind);
+        }
+        if kind.framed() {
+            docs.insert(fake_path, RenderedDoc::framed(&path));
+            continue;
+        }
         let bytes = fs::read(&path).expect("a fixture is readable");
         let text = decode(&bytes).expect("a fixture is text").text;
         let ctx = RenderContext {
@@ -70,16 +89,12 @@ fn main() {
             asset_base: ASSET_BASE,
             trusted_unc_hosts: &[],
         };
+        // A text file renders as a note does until it has a viewer of its own, as in the app.
         let mut doc = render(&text, &ctx);
         doc.html = remap.html(&doc.html);
-        let fake_path = remap.path(&path.to_string_lossy());
-        candidates.push(Candidate {
-            path: fake_path.clone(),
-            name: file.rel.rsplit('/').next().unwrap_or(&file.rel).to_owned(),
-            rel: file.rel.clone(),
-            root: FAKE_ROOT.to_owned(),
-        });
-        text_blocks.insert(fake_path.clone(), text_blocks_of(&text));
+        if kind == DocKind::Markdown {
+            text_blocks.insert(fake_path.clone(), text_blocks_of(&text));
+        }
         docs.insert(fake_path, doc);
     }
 
@@ -90,6 +105,7 @@ fn main() {
         tree,
         candidates,
         docs,
+        kinds,
         text_blocks,
     };
     let json = serde_json::to_string(&fixtures).expect("fixtures serialise");
