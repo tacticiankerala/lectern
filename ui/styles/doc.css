@@ -134,6 +134,16 @@
   text-wrap: pretty;
 }
 
+/* A text file (core's `render_plain`): each paragraph line for line as written, in the code face
+   at the body size, within the measure. A long line wraps anywhere, so nothing scrolls sideways. */
+.doc p.lx-plain {
+  font-family: var(--code-font);
+  font-variant-ligatures: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
 .doc li + li {
   margin-top: 0.3em;
 }

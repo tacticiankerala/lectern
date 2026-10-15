@@ -56,3 +56,55 @@ test("search reads text files, not pages", async ({ page }) => {
   await page.keyboard.type("lanternfish");
   await expect(panel.locator(".sp-file .sp-rel")).toHaveText(["notes/readme.txt"]);
 });
+
+test("a text file reads as its paragraphs, as written, in the code face", async ({ page }) => {
+  await openFixture(page, "notes/readme.txt");
+  await expect(page).toHaveTitle("readme.txt — Lectern");
+  const blocks = page.locator("#lx-doc p.lx-plain");
+  await expect(blocks).toHaveCount(3);
+  expect(await blocks.evaluateAll((ps) => ps.map((p) => p.dataset.sourcepos))).toEqual([
+    "1:1-2:48",
+    "4:1-5:61",
+    "7:1-9:300",
+  ]);
+  // Markup is text: the script never runs, and the stars stay stars.
+  await expect(page.locator("#lx-doc script, #lx-doc em")).toHaveCount(0);
+  await expect(blocks.nth(2)).toContainText(
+    '*these stars stay stars*. <script>document.title = "Parsed";</script> stays text',
+  );
+  const look = await blocks.nth(2).evaluate((p) => {
+    const probe = document.createElement("span");
+    probe.style.fontFamily = "var(--code-font)";
+    document.body.append(probe);
+    const codeFont = getComputedStyle(probe).fontFamily;
+    probe.remove();
+    const doc = document.getElementById("lx-doc");
+    const pane = document.getElementById("lx-doc-pane");
+    const style = getComputedStyle(p);
+    return {
+      codeFont: style.fontFamily === codeFont,
+      bodySize: doc !== null && style.fontSize === getComputedStyle(doc).fontSize,
+      whiteSpace: style.whiteSpace,
+      overflowWrap: style.overflowWrap,
+      sideways: (pane?.scrollWidth ?? Infinity) - (pane?.clientWidth ?? 0),
+      lines: Math.round(p.getBoundingClientRect().height / parseFloat(style.lineHeight)),
+    };
+  });
+  expect(look).toMatchObject({
+    codeFont: true,
+    bodySize: true,
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    sideways: 0,
+  });
+  // Three lines as written, the 300-character one wrapped onto more.
+  expect(look.lines).toBeGreaterThan(3);
+  await expect(page).toHaveTitle("readme.txt — Lectern");
+
+  // Find reads it as it reads a note.
+  await page.keyboard.press("Control+f");
+  const bar = page.getByRole("search", { name: "Find in page" });
+  await expect(bar.getByRole("textbox", { name: "Find" })).toBeFocused();
+  await page.keyboard.type("survey");
+  await expect(bar.locator(".find-count")).toHaveText("1 / 2");
+});

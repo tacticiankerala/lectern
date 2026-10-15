@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lectern_core::ipc::{Crumb, OpenError, OpenErrorKind};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::library::{doc_kind, path_key, DocKind, LibraryIndex};
-use lectern_core::render::{render, RenderContext, RenderedDoc};
+use lectern_core::render::{render, render_plain, RenderContext, RenderedDoc};
 use lectern_core::text::{decode, DecodeError};
 
 use super::paths::{is_under, path_string, root_name};
@@ -69,8 +69,7 @@ pub fn render_file(
     }
     check_size(path, kind, stamp.size)?;
     let text = read_text(path)?;
-    // A text file renders as a note does until it has a viewer of its own.
-    let doc = render_text(path, &text.text, None, mapper, trusted_hosts);
+    let doc = render_doc(path, kind, &text.text, None, mapper, trusted_hosts);
     Ok(Rendered {
         kind,
         doc: Arc::new(doc),
@@ -99,6 +98,23 @@ pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Rendered {
     }
 }
 
+/// Renders `text`, read from `path`, as its kind shows: a text file as its paragraphs, as written,
+/// and anything else as a note.
+pub(super) fn render_doc(
+    path: &Path,
+    kind: DocKind,
+    text: &str,
+    index: Option<&LibraryIndex>,
+    mapper: &PathMapper,
+    trusted_hosts: &[String],
+) -> RenderedDoc {
+    match kind {
+        DocKind::Text => render_plain(text, path),
+        _ => render_text(path, text, index, mapper, trusted_hosts),
+    }
+}
+
+/// Renders `text` as Markdown, as a note at `path`: a note, or a comment on any document.
 pub(super) fn render_text(
     path: &Path,
     text: &str,
@@ -313,17 +329,23 @@ mod tests {
         }
     }
 
+    /// A note renders as Markdown; a text file as written, in paragraphs, as boot shows them.
     #[test]
     fn notes_and_text_files_are_read() {
         let dir = TempDir::new();
         let note = dir.file("plan.md", "# Plan\n");
-        let text = dir.file("readme.txt", "Plain words.\n");
+        let text = dir.file("readme.txt", "# Plain *words*.\n");
         let rendered = render_file(&note, &PathMapper::default(), &[]).unwrap();
         assert_eq!(rendered.kind, DocKind::Markdown);
         assert!(rendered.doc.html.contains("Plan"));
         let rendered = render_file(&text, &PathMapper::default(), &[]).unwrap();
         assert_eq!(rendered.kind, DocKind::Text);
-        assert!(rendered.doc.html.contains("Plain words."));
+        assert_eq!(
+            rendered.doc.html,
+            "<p class=\"lx-plain\" data-sourcepos=\"1:1-1:16\"># Plain *words*.</p>\n"
+        );
+        assert!(rendered.doc.outline.is_empty());
+        assert_eq!(rendered.doc.title, "readme.txt");
         // Any other file opens as a note, as it always has.
         let other = dir.file("notes.log", "# Log\n");
         let rendered = render_file(&other, &PathMapper::default(), &[]).unwrap();

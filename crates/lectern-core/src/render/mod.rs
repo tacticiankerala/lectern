@@ -6,6 +6,7 @@ mod html_policy;
 mod internal;
 mod links;
 mod options;
+pub(crate) mod plain;
 mod sanitize;
 pub mod slug;
 mod stats;
@@ -28,6 +29,7 @@ use crate::library::LibraryIndex;
 use code_blocks::CodeBlocks;
 
 pub use code_blocks::code_languages;
+pub use plain::render_plain;
 use slug::Slugger;
 
 /// Bumped whenever the rendered output changes, so cached renders are discarded.
@@ -87,14 +89,19 @@ impl RenderedDoc {
             outline: Vec::new(),
             frontmatter: None,
             tasks: TaskStats::default(),
-            title: doc_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            title: file_title(doc_path),
             word_count: 0,
             has_unresolved_wikilinks: false,
         }
     }
+}
+
+/// The title of a document that isn't a note (a text file, a page, a PDF): its file name.
+fn file_title(doc_path: &Path) -> String {
+    doc_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Heading ids by the heading's start position (line, column), for the formatter.

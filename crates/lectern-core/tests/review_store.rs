@@ -8,7 +8,7 @@ use std::sync::Barrier;
 use std::thread;
 
 use lectern_core::review::{
-    format,
+    fingerprint, format,
     ops::{NewAnchor, ReviewOp},
     sidecar_path,
     store::{self, StoreError},
@@ -545,4 +545,36 @@ fn instructions_block_is_refreshed_on_save() {
     let after = fs::read_to_string(&sidecar).unwrap();
     assert!(after.starts_with(plain), "{after}");
     assert!(!after.contains("<!-- lectern:"), "{after}");
+}
+
+/// A text file's comments anchor against its paragraphs, where a `#` line is text, not a heading.
+#[test]
+fn a_text_files_comment_anchors_against_its_paragraphs() {
+    let dir = tempfile::tempdir().unwrap();
+    let note = dir.path().join("tide.txt");
+    let source = "# Tide sync\n\nThe client uploads readings\nin batches of at most 50.\n";
+    fs::write(&note, source).unwrap();
+    let sidecar = sidecar_path(&note);
+    assert_eq!(sidecar.file_name().unwrap(), "tide.txt.review.md");
+    let op = ReviewOp::Add {
+        anchor: NewAnchor {
+            start_line: 1,
+            end_line: 1,
+            quote: "# Tide sync".into(),
+            prefix: String::new(),
+        },
+        text: "Rename it?".into(),
+    };
+
+    let (review, _) = store::apply_op(&sidecar, "tide.txt", source, &op, NOW).unwrap();
+
+    let comment = review.comments().next().unwrap();
+    assert_eq!((comment.start_line, comment.end_line), (1, 1));
+    assert!(comment.heading_path.is_empty());
+    let anchor = comment.anchor.as_ref().unwrap();
+    assert_eq!(anchor.fp, fingerprint(source), "the quote was found");
+    assert_eq!(anchor.suffix, " The client uploads readings in ");
+    let content = fs::read_to_string(&sidecar).unwrap();
+    assert!(content.contains("note: tide.txt\n"), "{content}");
+    assert!(content.contains("\n> # Tide sync\n"), "{content}");
 }

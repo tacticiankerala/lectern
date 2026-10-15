@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use lectern_core::library::is_markdown;
+use lectern_core::library::{doc_kind, DocKind};
 use lectern_core::review::anchor::resolve_all;
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::TextMap;
@@ -21,7 +21,7 @@ use super::{trust, WindowState};
 
 const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
-const NOT_A_NOTE: &str = "Comments can only be added to Markdown notes.";
+const NOT_A_NOTE: &str = "Comments can only be added to notes and text files.";
 
 /// The note a review command works on, and its sidecar.
 struct Target {
@@ -32,11 +32,14 @@ struct Target {
 }
 
 impl Target {
-    /// Whether the note can have comments: it's Markdown, and not a sidecar itself. Anything else
-    /// would get a sidecar the library never hides (`notes.txt.review.md`), or a sidecar's sidecar
-    /// (`plan.review.review.md`).
+    /// Whether the note can have comments: it's a Markdown note or a text file, and not a sidecar
+    /// itself (`plan.review.review.md` would be a sidecar's sidecar). A page takes none yet, and
+    /// a PDF never does.
     fn takes_comments(&self) -> bool {
-        is_markdown(&self.note_name) && !is_sidecar_name(&self.note_name)
+        matches!(
+            doc_kind(&self.note_name),
+            Some(DocKind::Markdown | DocKind::Text)
+        ) && !is_sidecar_name(&self.note_name)
     }
 }
 
@@ -85,7 +88,7 @@ impl WindowState {
     }
 
     /// `path` as a note a review command may change the sidecar of: the open note (see
-    /// `open_target`), and a Markdown note rather than a sidecar itself.
+    /// `open_target`), and one that takes comments (`Target::takes_comments`).
     fn review_target(&self, path: &str) -> Result<Target, String> {
         let target = self.open_target(path)?;
         if !target.takes_comments() {
@@ -123,7 +126,8 @@ impl WindowState {
     }
 
     /// The payload for `found`, a review and the note's text, with each comment found in the
-    /// text again. Comment bodies render as the note does, so their links follow its rules.
+    /// text again, read as the note's kind reads it (`TextMap::of_note`). Comment bodies render
+    /// as Markdown beside the note, so their links follow a note's rules.
     fn review_payload(
         &self,
         target: &Target,
@@ -132,7 +136,7 @@ impl WindowState {
     ) -> ReviewPayload {
         let (text, resolved) = match found {
             Some((review, source)) => {
-                let text = TextMap::build(source);
+                let text = TextMap::of_note(&target.note_name, source);
                 let resolved = resolve_all(review, &text, &fingerprint(source));
                 (Some(text), resolved)
             }
@@ -329,10 +333,16 @@ mod tests {
         );
     }
 
+    /// A page takes no comments yet, a PDF never does, and a sidecar takes none of its own.
     #[test]
-    fn refuses_a_note_that_is_not_markdown_or_is_a_sidecar() {
+    fn refuses_a_page_a_pdf_or_a_sidecar() {
         let f = fixture(profile(&[]), FakeHost::default());
-        for name in ["a/tide.txt", "b/plan.review.md", "c/PLAN.Review.MD"] {
+        for name in [
+            "a/tide.html",
+            "b/plan.review.md",
+            "c/PLAN.Review.MD",
+            "d/brief.pdf",
+        ] {
             let doc = f.dir.file(name, NOTE);
             let path = path_string(&doc);
             opened_path(&f.state.open_document(&path));
@@ -348,6 +358,73 @@ mod tests {
             assert!(loaded.comments.is_empty(), "{name}");
             assert_eq!(loaded.read_only.as_deref(), Some(NOT_A_NOTE), "{name}");
         }
+    }
+
+    const TEXT: &str = "Readme for the vault.\nEvery word is invented.\n\nThe lanternfish survey is plain text,\nso search reads it.\n";
+
+    /// A text file's sidecar, `<file name>.review.md`, loads and takes new comments, anchored to its
+    /// paragraphs, and they follow the text when it's edited.
+    #[test]
+    fn a_text_file_takes_comments() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let text = f.dir.file("notes/readme.txt", TEXT);
+        let sidecar = text.with_file_name("readme.txt.review.md");
+        fs::write(
+            &sidecar,
+            "---\nlectern-review: 1\nnote: readme.txt\n---\n\n## C1 · open · L1\n> Readme for the vault.\n\n**Claude (question):** Which vault?\n",
+        )
+        .unwrap();
+        let path = path_string(&text);
+        opened_path(&f.state.open_document(&path));
+
+        let loaded = f.state.load_review(&path).unwrap();
+        assert!(loaded.exists);
+        assert_eq!(loaded.read_only, None);
+        assert_eq!(loaded.sidecar_path, path_string(&sidecar));
+        let [agents] = loaded.comments.as_slice() else {
+            panic!("{:?}", loaded.comments);
+        };
+        assert_eq!(agents.state, AnchorState::Anchored);
+        assert_eq!((agents.start_line, agents.end_line), (1, 2));
+
+        let add = ReviewOp::Add {
+            anchor: NewAnchor {
+                start_line: 4,
+                end_line: 5,
+                quote: "lanternfish survey is plain text".to_owned(),
+                prefix: "Every word is invented. The ".to_owned(),
+            },
+            text: "Which survey?".to_owned(),
+        };
+        let payload = f.state.review_op(&path, add).unwrap();
+        let ours = &payload.comments[1];
+        assert_eq!(ours.state, AnchorState::Anchored);
+        assert_eq!((ours.start_line, ours.end_line), (4, 5));
+        assert!(ours.heading_path.is_empty());
+        let saved = fs::read_to_string(&sidecar).unwrap();
+        assert!(saved.contains("\n## C2 · open · L4–L5\n"), "{saved}");
+        assert!(
+            saved.contains("\n> lanternfish survey is plain text\n"),
+            "{saved}"
+        );
+        assert_eq!(
+            fs::read_to_string(&text).unwrap(),
+            TEXT,
+            "the text file changed"
+        );
+
+        // Edited elsewhere so the paragraph moves down: the comment follows it.
+        fs::write(&text, format!("A new first line.\n\n{TEXT}")).unwrap();
+        let loaded = f.state.load_review(&path).unwrap();
+        let moved = &loaded.comments[1];
+        assert_eq!(moved.state, AnchorState::Anchored);
+        assert_eq!((moved.start_line, moved.end_line), (6, 7));
+        // Reworded: found again by its words, as moved.
+        fs::write(&text, TEXT.replace("is plain text", "is now plain text")).unwrap();
+        let loaded = f.state.load_review(&path).unwrap();
+        let reworded = &loaded.comments[1];
+        assert_eq!(reworded.state, AnchorState::Moved);
+        assert_eq!((reworded.start_line, reworded.end_line), (4, 5));
     }
 
     #[test]

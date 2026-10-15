@@ -15,7 +15,7 @@ use lectern_core::render::RENDER_VERSION;
 use lectern_core::store::State;
 
 use super::doc::{
-    breadcrumbs, check_size, framed, now_ms, opened_kind, read_text, readme_in, render_text,
+    breadcrumbs, check_size, framed, now_ms, opened_kind, read_text, readme_in, render_doc,
     stat_doc, Rendered,
 };
 use super::paths::{is_under, path_string, same_path};
@@ -83,8 +83,9 @@ impl WindowState {
         let mapper = self.mapper();
         let hosts = read(&self.app.trust).hosts();
         let with_index = (!index.roots.is_empty()).then_some(&*index);
-        // A text file renders as a note does until it has a viewer of its own.
-        let doc = Arc::new(render_text(path, &text.text, with_index, &mapper, &hosts));
+        let doc = Arc::new(render_doc(
+            path, kind, &text.text, with_index, &mapper, &hosts,
+        ));
         // Lossy renders aren't cached, so a cache hit is never lossy.
         if !text.lossy {
             let mut cache = lock(&self.cache);
@@ -454,6 +455,31 @@ mod tests {
         assert_eq!(doc.frame_url, None);
         assert!(doc.html.contains("Plan"));
         assert_eq!(last_doc(&f), Some(path_string(&note)));
+    }
+
+    /// A text file opens as written, in paragraphs, never as a note: read fresh and from the
+    /// cache alike.
+    #[test]
+    fn a_text_file_opens_as_its_paragraphs() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let text = f
+            .dir
+            .file("one/readme.txt", "# Not a heading\n\n<b>bold</b>\n");
+        for _ in 0..2 {
+            let OpenResult::Ok { doc } = f.state.open_document(&path_string(&text)) else {
+                panic!("the text file didn't open");
+            };
+            assert_eq!(doc.kind, DocKind::Text);
+            assert_eq!(
+                doc.html,
+                concat!(
+                    "<p class=\"lx-plain\" data-sourcepos=\"1:1-1:15\"># Not a heading</p>\n",
+                    "<p class=\"lx-plain\" data-sourcepos=\"3:1-3:11\">&lt;b&gt;bold&lt;/b&gt;</p>\n",
+                )
+            );
+            assert!(doc.outline.is_empty());
+            assert_eq!(doc.title, "readme.txt");
+        }
     }
 
     /// Nothing in a page depends on the index, so it is never stale, and a rescan that moves

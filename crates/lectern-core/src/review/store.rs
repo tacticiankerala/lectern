@@ -99,7 +99,8 @@ impl std::error::Error for StoreError {}
 
 /// Applies `op` to the sidecar at `sidecar` and saves it, creating the sidecar if there's none: a
 /// file that is already there is changed only when [`load`] would show it writable.
-/// `source` is the note's text and `now` the time to record on a new comment.
+/// `source` is the note's text, read as its kind's (see [`TextMap::of_note`]), and `now` the time
+/// to record on a new comment.
 ///
 /// The sidecar is read, `op` applied, anchor lines it gained dated `now`, the instructions block
 /// brought up to date (see [`refresh_instructions`]), and the result written to a temporary file
@@ -140,7 +141,7 @@ pub(crate) fn apply_op_with_hooks(
 ) -> Result<(Review, u32), StoreError> {
     // The lock guards no data, so a save that panicked holding it left nothing this one needs.
     let _turn = SAVE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let text = TextMap::build(source);
+    let text = TextMap::of_note(note_name, source);
     let fp = fingerprint(source);
     let ctx = OpContext {
         text: &text,

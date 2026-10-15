@@ -8,12 +8,16 @@
 //! raw HTML and footnote references are left out. Raw HTML the HTML policy shows as text (a tag
 //! not on its allowlist) is text like any other. Every block's text is [`normalize`]d, and empty
 //! blocks are dropped.
+//!
+//! A text file's blocks are its paragraphs, as `render_plain` shows them, with no headings.
 
 use comrak::arena_tree::NodeEdge;
 use comrak::nodes::{AstNode, NodeValue, Sourcepos};
 use comrak::Arena;
 
+use crate::library::{doc_kind, DocKind};
 use crate::render::parse_for_text;
+use crate::render::plain::paragraphs;
 
 /// `s` with every run of Unicode whitespace turned into one space, and trimmed.
 pub fn normalize(s: &str) -> String {
@@ -102,6 +106,28 @@ impl TextMap {
         map
     }
 
+    /// The text of a text file: its paragraphs, as `render_plain` renders them, with no headings.
+    pub fn from_plain(source: &str) -> TextMap {
+        let mut map = TextMap {
+            text: String::with_capacity(source.len()),
+            ..TextMap::default()
+        };
+        for p in paragraphs(source) {
+            map.push_lines(&p.text, p.start_line, p.end_line);
+        }
+        map
+    }
+
+    /// The text of the note named `note` (its file name or path), read as `source`, by its kind:
+    /// a text file's paragraphs ([`TextMap::from_plain`]), else a note's blocks
+    /// ([`TextMap::build`]).
+    pub fn of_note(note: &str, source: &str) -> TextMap {
+        match doc_kind(note) {
+            Some(DocKind::Text) => Self::from_plain(source),
+            _ => Self::build(source),
+        }
+    }
+
     /// Puts the headings in source order and points each block at the last heading above it.
     ///
     /// The blocks and the text stay in document order, which is the page's: comrak moves footnote
@@ -117,8 +143,21 @@ impl TextMap {
         }
     }
 
-    /// Appends a block with the text `raw`, normalised, unless that's empty.
+    /// Appends a block with the text `raw`, normalised, from the source at `pos`, unless that's
+    /// empty.
     fn push_block(&mut self, raw: &str, pos: Sourcepos) {
+        let start_line = line_number(pos.start.line);
+        // An end at column 0 is the end of the line before.
+        let end_line = match pos.end.column {
+            0 => line_number(pos.end.line.saturating_sub(1)),
+            _ => line_number(pos.end.line),
+        };
+        self.push_lines(raw, start_line, end_line);
+    }
+
+    /// Appends a block with the text `raw`, normalised, on source lines `start_line` to
+    /// `end_line`, unless that's empty.
+    fn push_lines(&mut self, raw: &str, start_line: u32, end_line: u32) {
         let before = self.text.len();
         if before > 0 {
             self.text.push(' ');
@@ -129,12 +168,6 @@ impl TextMap {
             self.text.truncate(before);
             return;
         }
-        let start_line = line_number(pos.start.line);
-        // An end at column 0 is the end of the line before.
-        let end_line = match pos.end.column {
-            0 => line_number(pos.end.line.saturating_sub(1)),
-            _ => line_number(pos.end.line),
-        };
         self.blocks.push(Block {
             start,
             end: self.text.len(),
