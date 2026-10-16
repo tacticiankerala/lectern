@@ -8,7 +8,8 @@
 //! - Lectern answers each request within [`ANSWER_WITHIN`]. What needs a window's view goes to
 //!   that window's UI as an [`AgentCall`], which answers with an [`AgentReply`] ([`status`]).
 //! - Paths from an agent may be Windows or WSL paths ([`paths`]); every path in an answer comes
-//!   in both forms.
+//!   in both forms. An agent's Linux paths go into the WSL distribution it runs in, when its
+//!   `lectern.exe mcp --distro` names one ([`Agent`]), else the one Lectern's settings name.
 //! - `show` and `workspace` go to the window [`show::route_show`] picks; a window already showing
 //!   another file may ask the reader first, and the agent is named to them as [`agent_name`] has it.
 //! - A target (a heading, a line, a quote or a PDF's page) is found by core in a note or a text
@@ -36,6 +37,7 @@ use sha2::{Digest, Sha256};
 pub use self::request::AgentRequest;
 use self::request::ClientInfo;
 pub use self::status::{AgentCall, AgentReply};
+use crate::library::pathmap::PathMapper;
 
 /// The longest line either end of the pipe sends, and the longest MCP message read from stdin, in
 /// bytes.
@@ -88,6 +90,104 @@ pub fn agent_name(client: Option<&ClientInfo>) -> String {
     }
     name.to_owned()
 }
+
+/// The longest name of a WSL distribution `lectern.exe mcp --distro` takes, in characters.
+pub const DISTRO_MAX: usize = 64;
+
+/// An agent, as one connection serves it: the name the reader sees it by ([`agent_name`]), and
+/// the WSL distribution it runs in, when its `lectern.exe mcp` was started for one
+/// ([`mcp_distro`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Agent {
+    pub name: String,
+    pub distro: Option<String>,
+}
+
+impl Default for Agent {
+    /// An agent that hasn't said who it is yet: [`UNNAMED_AGENT`], in no distribution of its own.
+    fn default() -> Self {
+        Self::named(UNNAMED_AGENT)
+    }
+}
+
+impl Agent {
+    /// The agent the reader sees as `name`, in no distribution of its own.
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            distro: None,
+        }
+    }
+
+    /// The agent a `hello` names: its client, and the WSL distribution it runs in, which must be
+    /// a name [`check_distro`] takes. The error is a sentence for the agent.
+    pub fn hello(client: Option<&ClientInfo>, distro: Option<&str>) -> Result<Self, String> {
+        if let Some(distro) = distro {
+            check_distro(distro)?;
+        }
+        Ok(Self {
+            name: agent_name(client),
+            distro: distro.map(str::to_owned),
+        })
+    }
+
+    /// What maps the agent's paths: `mapper`, Lectern's, with the agent's own distribution in
+    /// place of the one Lectern's settings name, when it runs in one. So a Linux path from an agent
+    /// in Debian opens from Debian, whichever distribution Lectern opens notes' Linux paths from.
+    pub fn mapper(&self, mapper: &PathMapper) -> PathMapper {
+        let mut mapper = mapper.clone();
+        if let Some(distro) = &self.distro {
+            mapper.wsl_distro = Some(distro.clone());
+        }
+        mapper
+    }
+}
+
+/// Whether `name` can be the WSL distribution an agent's Linux paths go into: 1 to [`DISTRO_MAX`]
+/// ASCII letters, digits, `.`, `_` and `-`, and not `.` or `..`. It goes into a path,
+/// `\\wsl.localhost\<name>\…`, so nothing else is taken. The error is a sentence for the agent.
+pub fn check_distro(name: &str) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    if name.len() <= DISTRO_MAX && name.chars().all(allowed) && !matches!(name, "" | "." | "..") {
+        return Ok(());
+    }
+    // Enough of it to recognise, on one line.
+    let shown: String = printable(name).chars().take(DISTRO_MAX + 1).collect();
+    Err(format!(
+        "“{shown}” isn't the name of a WSL distribution: lectern.exe mcp --distro takes 1 to \
+         {DISTRO_MAX} letters, digits, dots, underscores and hyphens. Copy the WSL command from \
+         Lectern's Preferences › Agents and register Lectern again."
+    ))
+}
+
+/// The WSL distribution `lectern.exe mcp` was started for, from its arguments after `mcp`:
+/// `--distro <name>` or `--distro=<name>`, which registering it from WSL fills in with the shell's
+/// own (`--distro "$WSL_DISTRO_NAME"`). None without the flag: the agent's Linux paths then go into
+/// the distribution Lectern's settings name. Other arguments are ignored. The error, a sentence
+/// for the agent, which every tool call answers with, is for a flag without a name, or a name
+/// [`check_distro`] refuses.
+pub fn mcp_distro(args: impl IntoIterator<Item = String>) -> Result<Option<String>, String> {
+    let mut args = args.into_iter();
+    let mut distro = None;
+    while let Some(arg) = args.next() {
+        if arg == "--distro" {
+            distro = Some(args.next().unwrap_or_default());
+        } else if let Some(name) = arg.strip_prefix("--distro=") {
+            distro = Some(name.to_owned());
+        }
+    }
+    match distro {
+        Some(name) if name.is_empty() => Err(NO_DISTRO.to_owned()),
+        Some(name) => check_distro(&name).map(|()| Some(name)),
+        None => Ok(None),
+    }
+}
+
+/// The answer to every tool call when `lectern.exe mcp` was given `--distro` and no name: it was
+/// registered outside WSL, where `$WSL_DISTRO_NAME` is empty.
+const NO_DISTRO: &str = "lectern.exe mcp was given --distro without a WSL distribution's name. \
+    Register it from a WSL shell, where $WSL_DISTRO_NAME names one: copy the WSL command from \
+    Lectern's Preferences › Agents.";
 
 /// The named pipe Lectern serves agents on, for the app `identifier` and the user whose SID (as a
 /// string, `S-1-5-21-…`) is `user_sid`: `\\.\pipe\lectern-<identifier>-<16 hex digits>`, the

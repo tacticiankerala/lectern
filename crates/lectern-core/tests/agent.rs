@@ -17,7 +17,8 @@ use lectern_core::agent::status::{
 };
 use lectern_core::agent::tools::{definitions, parse_call, CallError};
 use lectern_core::agent::{
-    pipe_name, printable, same_user, AgentRequest, Answer, PipeReply, PipeRequest, FOREIGN_PIPE,
+    check_distro, mcp_distro, pipe_name, printable, same_user, Agent, AgentRequest, Answer,
+    PipeReply, PipeRequest, DISTRO_MAX, FOREIGN_PIPE,
 };
 use lectern_core::ipc::PathForms;
 use lectern_core::library::pathmap::PathMapper;
@@ -124,18 +125,47 @@ fn pipe_messages_are_id_and_request_then_id_and_ok_or_err() {
     assert_eq!(serde_json::from_str::<PipeReply>(&line).unwrap(), err);
 }
 
+fn claude_code() -> ClientInfo {
+    ClientInfo {
+        name: "claude-code".to_owned(),
+        version: "2.1.0".to_owned(),
+    }
+}
+
+/// `hello` names the client, and the WSL distribution it runs in when `mcp` was given one; either
+/// may be missing, and is then left out.
 #[test]
-fn hello_names_the_client() {
-    let hello = AgentRequest::Hello {
-        client: ClientInfo {
-            name: "claude-code".to_owned(),
-            version: "2.1.0".to_owned(),
-        },
-    };
-    assert_eq!(
-        serde_json::to_value(&hello).unwrap(),
-        json!({"tool": "hello", "client": {"name": "claude-code", "version": "2.1.0"}})
-    );
+fn hello_names_the_client_and_the_distro_it_runs_in() {
+    let cases = [
+        (
+            Some(claude_code()),
+            None,
+            json!({"tool": "hello", "client": {"name": "claude-code", "version": "2.1.0"}}),
+        ),
+        (
+            Some(claude_code()),
+            Some("Debian"),
+            json!({
+                "tool": "hello",
+                "client": {"name": "claude-code", "version": "2.1.0"},
+                "distro": "Debian",
+            }),
+        ),
+        (
+            None,
+            Some("Debian"),
+            json!({"tool": "hello", "distro": "Debian"}),
+        ),
+        (None, None, json!({"tool": "hello"})),
+    ];
+    for (client, distro, wire) in cases {
+        let hello = AgentRequest::Hello {
+            client,
+            distro: distro.map(str::to_owned),
+        };
+        assert_eq!(serde_json::to_value(&hello).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<AgentRequest>(wire).unwrap(), hello);
+    }
 }
 
 #[test]
@@ -454,6 +484,156 @@ fn an_agent_reaches_a_share_only_on_a_host_already_trusted() {
         agent_path(&wsl_mapper(), PLAN_WSL, &[]).unwrap().windows,
         PLAN
     );
+}
+
+// The WSL distribution an agent runs in.
+
+#[test]
+fn a_distro_is_1_to_64_letters_digits_dots_underscores_and_hyphens() {
+    let longest = "d".repeat(DISTRO_MAX);
+    for name in [
+        "Ubuntu",
+        "Ubuntu-24.04",
+        "my_distro",
+        "openSUSE-Tumbleweed",
+        "3",
+        longest.as_str(),
+    ] {
+        assert_eq!(check_distro(name), Ok(()), "{name}");
+    }
+    let too_long = "d".repeat(DISTRO_MAX + 1);
+    for name in [
+        "",
+        " ",
+        "Ubuntu 24.04",
+        " Ubuntu",
+        r"Ubuntu\..\x",
+        "Ubuntu/x",
+        "Ubuntu\n",
+        "Übuntu",
+        "$WSL_DISTRO_NAME",
+        "\"Ubuntu\"",
+        too_long.as_str(),
+        // Names a path walks with, not a distribution's.
+        ".",
+        "..",
+    ] {
+        let refused = check_distro(name).unwrap_err();
+        assert!(refused.contains("WSL distribution"), "{name:?}: {refused}");
+        assert!(!refused.contains('\n'), "{name:?}: {refused}");
+    }
+    // The name refused is quoted, as far as it can be shown.
+    assert!(check_distro("Ubuntu 24.04")
+        .unwrap_err()
+        .contains("“Ubuntu 24.04”"));
+}
+
+fn mcp_args(args: &[&str]) -> Result<Option<String>, String> {
+    mcp_distro(args.iter().map(|arg| (*arg).to_owned()))
+}
+
+/// `lectern.exe mcp --distro <name>`: registered from WSL, the shell fills in its own distribution.
+#[test]
+fn mcp_is_told_the_distro_it_runs_in() {
+    assert_eq!(mcp_args(&[]), Ok(None));
+    assert_eq!(
+        mcp_args(&["--distro", "Ubuntu-24.04"]),
+        Ok(Some("Ubuntu-24.04".to_owned()))
+    );
+    assert_eq!(
+        mcp_args(&["--distro=Debian"]),
+        Ok(Some("Debian".to_owned()))
+    );
+    // Other arguments are left alone, as before.
+    assert_eq!(
+        mcp_args(&["--verbose", "--distro", "Debian", "extra"]),
+        Ok(Some("Debian".to_owned()))
+    );
+    assert_eq!(mcp_args(&["--verbose"]), Ok(None));
+    // No name, or an empty one, as `$WSL_DISTRO_NAME` gives outside WSL: refused, saying so.
+    for args in [&["--distro"][..], &["--distro", ""], &["--distro="]] {
+        let refused = mcp_args(args).unwrap_err();
+        assert!(refused.contains("--distro"), "{args:?}: {refused}");
+        assert!(refused.contains("WSL"), "{args:?}: {refused}");
+    }
+    assert_eq!(
+        mcp_args(&["--distro", "Ubuntu 24.04"]),
+        Err(check_distro("Ubuntu 24.04").unwrap_err())
+    );
+}
+
+/// The agent a `hello` names: as the reader sees it, and in the distribution it runs in, whose
+/// name must be one.
+#[test]
+fn hello_gives_the_agents_name_and_distro() {
+    assert_eq!(
+        Agent::hello(Some(&claude_code()), Some("Debian")),
+        Ok(Agent {
+            name: "Claude".to_owned(),
+            distro: Some("Debian".to_owned()),
+        })
+    );
+    assert_eq!(
+        Agent::hello(Some(&claude_code()), None),
+        Ok(Agent::named("Claude"))
+    );
+    assert_eq!(Agent::hello(None, None), Ok(Agent::default()));
+    assert_eq!(Agent::default().name, "An agent");
+    assert_eq!(
+        Agent::hello(Some(&claude_code()), Some(r"..\..\nas2")),
+        Err(check_distro(r"..\..\nas2").unwrap_err())
+    );
+}
+
+/// An agent's Linux paths go into the distribution it runs in, not the one Lectern's settings
+/// name; the user's mappings and `/mnt/<drive>` still come first. An agent in no distribution of
+/// its own goes by the settings.
+#[test]
+fn an_agents_linux_paths_go_into_its_own_distro() {
+    let settings = PathMapper {
+        mappings: vec![("/home/me/shared".to_owned(), PathBuf::from(r"S:\Shared"))],
+        wsl_distro: Some("Ubuntu".to_owned()),
+    };
+    let debian = Agent::hello(Some(&claude_code()), Some("Debian")).unwrap();
+    let opened = |agent: &Agent, mapper: &PathMapper, raw: &str| {
+        agent_path(&agent.mapper(mapper), raw, &reachable())
+            .unwrap()
+            .windows
+    };
+    assert_eq!(
+        opened(&debian, &settings, "/home/me/notes/plan.md"),
+        r"\\wsl.localhost\Debian\home\me\notes\plan.md"
+    );
+    assert_eq!(
+        opened(&debian, &settings, "/home/me/shared/plan.md"),
+        r"S:\Shared\plan.md"
+    );
+    assert_eq!(opened(&debian, &settings, PLAN_WSL), PLAN);
+    // Without WSL in the settings too.
+    assert_eq!(
+        opened(&debian, &PathMapper::default(), "/home/me/notes/plan.md"),
+        r"\\wsl.localhost\Debian\home\me\notes\plan.md"
+    );
+    let unplaced = Agent::named("Claude");
+    assert_eq!(
+        opened(&unplaced, &settings, "/home/me/notes/plan.md"),
+        r"\\wsl.localhost\Ubuntu\home\me\notes\plan.md"
+    );
+    // The answer's WSL form is the agent's path back.
+    let path = agent_path(
+        &debian.mapper(&settings),
+        "/home/me/notes/plan.md",
+        &reachable(),
+    )
+    .unwrap();
+    assert_eq!(path.wsl.as_deref(), Some("/home/me/notes/plan.md"));
+    // Another distribution's file opens as named, with no WSL form in the agent's own; read in
+    // Ubuntu, it has one.
+    let ubuntus = r"\\wsl.localhost\Ubuntu\home\me\notes\plan.md";
+    let path = agent_path(&debian.mapper(&settings), ubuntus, &reachable()).unwrap();
+    assert_eq!((path.windows.as_str(), path.wsl), (ubuntus, None));
+    let path = agent_path(&unplaced.mapper(&settings), ubuntus, &reachable()).unwrap();
+    assert_eq!(path.wsl.as_deref(), Some("/home/me/notes/plan.md"));
 }
 
 // Status.

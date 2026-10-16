@@ -68,8 +68,8 @@ use lectern_core::agent::target::{
     check_target, resolve_target, HighlightAnswer, ShowAt, TextPlace,
 };
 use lectern_core::agent::tools::TARGETS_MAX;
-use lectern_core::agent::{AgentRequest, ANSWER_WITHIN};
-use lectern_core::ipc::{AgentFocus, OpenRequest};
+use lectern_core::agent::{Agent, AgentRequest, ANSWER_WITHIN};
+use lectern_core::ipc::{AgentFocus, OpenRequest, PathForms};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::library::DocKind;
 use lectern_core::review::text::{page_text_len, TextMap, MAX_PAGE_TEXT};
@@ -217,17 +217,20 @@ enum Placed {
 }
 
 impl App {
-    /// The answer to the request of the agent `agent` (its name as the reader sees it) for one of
-    /// the nine tools; a tool error is a sentence for the agent.
+    /// The answer to the request of `agent` (its name as the reader sees it, and the WSL
+    /// distribution it runs in, whose terms its paths are read and answered in) for one of the nine
+    /// tools; a tool error is a sentence for the agent.
     pub fn agent_answer(
         self: &Arc<Self>,
         request: AgentRequest,
-        agent: &str,
+        agent: &Agent,
     ) -> Result<Value, String> {
         match request {
             AgentRequest::Status => to_value(&self.agent_status(agent)),
             AgentRequest::Show(args) => to_value(&self.agent_show(args, agent, Budget::new())?),
-            AgentRequest::Workspace(args) => to_value(&self.agent_workspace(args, Budget::new())?),
+            AgentRequest::Workspace(args) => {
+                to_value(&self.agent_workspace(args, agent, Budget::new())?)
+            }
             AgentRequest::Highlight(args) => {
                 to_value(&self.agent_highlight(args, agent, Budget::new())?)
             }
@@ -256,8 +259,8 @@ impl App {
     }
 
     /// Every window, the most recently focused first, as its UI reports it (else as Rust knows
-    /// it), with the closed workspaces and the agent settings.
-    pub fn agent_status(&self, agent: &str) -> Status {
+    /// it), with the closed workspaces and the agent settings; its paths in `agent`'s terms.
+    pub fn agent_status(&self, agent: &Agent) -> Status {
         let windows = self.windows_by_focus();
         // Every window is asked at once, then each answer awaited until the one deadline.
         let asked: Vec<(Arc<WindowState>, u64, Receiver<AgentReply>)> = windows
@@ -267,7 +270,7 @@ impl App {
                 window.emit(UiEvent::AgentRequest(AgentCall {
                     id,
                     request: AgentRequest::Status,
-                    agent: agent.to_owned(),
+                    agent: agent.name.clone(),
                     places: Vec::new(),
                     within_ms: None,
                 }));
@@ -275,7 +278,7 @@ impl App {
             })
             .collect();
         let deadline = Instant::now() + VIEW_WAIT;
-        let mapper = self.mapper();
+        let mapper = self.agent_mapper(agent);
         let windows = asked
             .into_iter()
             .map(|(window, id, answer)| {
@@ -325,10 +328,10 @@ impl App {
     fn agent_show(
         self: &Arc<Self>,
         args: ShowArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<ShowAnswer, String> {
-        let path = self.agent_location(&args.path)?;
+        let path = self.agent_location(agent, &args.path)?;
         let file = PathBuf::from(&path.windows);
         check_file(&file, budget.at_most(self.timings.exists))?;
         let at = match args.target.or(path.line.map(|line| Target::Line { line })) {
@@ -403,7 +406,8 @@ impl App {
                     wait: args.wait,
                 };
                 let label = window.label().to_owned();
-                let (state, target, focus) = self.show_in(&window, shown, places, agent, budget)?;
+                let (state, target, focus) =
+                    self.show_in(&window, shown, places, &agent.name, budget)?;
                 (label, state, target, focus)
             }
         };
@@ -563,10 +567,10 @@ impl App {
     fn agent_highlight(
         &self,
         args: HighlightArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<HighlightAnswer, String> {
-        let (window, file) = self.shown_window(args.path.as_deref())?;
+        let (window, file) = self.shown_window(agent, args.path.as_deref())?;
         let kind = opened_kind(&file);
         if kind == DocKind::Pdf {
             return Err(NO_PDF_HIGHLIGHT.to_owned());
@@ -589,9 +593,9 @@ impl App {
             path: Some(path_string(&file)),
             ..args
         });
-        match self.ask_window(&window, request, places, agent, budget)? {
+        match self.ask_window(&window, request, places, &agent.name, budget)? {
             AgentReply::Highlighted { count } => Ok(HighlightAnswer {
-                file: self.mapper().literal_forms(&path_string(&file)),
+                file: self.agent_mapper(agent).literal_forms(&path_string(&file)),
                 window: window.label().to_owned(),
                 highlights: count,
             }),
@@ -606,10 +610,10 @@ impl App {
     fn agent_read(
         &self,
         args: ReadArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<ReadAnswer, String> {
-        let (window, file) = self.shown_window(args.path.as_deref())?;
+        let (window, file) = self.shown_window(agent, args.path.as_deref())?;
         let (from, max) = (args.from, args.max);
         // The text, whether its blocks have lines, and why it is less than the file's.
         let (text, lines, incomplete) = match opened_kind(&file) {
@@ -619,7 +623,7 @@ impl App {
                     path: Some(path_string(&file)),
                     ..args
                 });
-                match self.ask_window(&window, request, Vec::new(), agent, budget)? {
+                match self.ask_window(&window, request, Vec::new(), &agent.name, budget)? {
                     AgentReply::PageText { blocks, .. }
                         if page_text_len(&blocks) > MAX_PAGE_TEXT =>
                     {
@@ -639,16 +643,23 @@ impl App {
                 (text, true, None)
             }
         };
-        let file = self.mapper().literal_forms(&path_string(&file));
+        let file = self.agent_mapper(agent).literal_forms(&path_string(&file));
         Ok(read_page(file, &text, lines, incomplete, from, max))
     }
 
-    /// The window showing the file `raw` names (a Windows or WSL path), else the file shown, and
-    /// that file: of the windows showing it, or any, the most recently focused. An error, a
-    /// sentence for the agent, when no window shows it, or none shows a file.
-    fn shown_window(&self, raw: Option<&str>) -> Result<(Arc<WindowState>, PathBuf), String> {
+    /// The window showing the file `raw` names (a Windows or WSL path, from `agent`), else the
+    /// file shown, and that file: of the windows showing it, or any, the most recently focused. An
+    /// error, a sentence for the agent, when no window shows it, or none shows a file.
+    fn shown_window(
+        &self,
+        agent: &Agent,
+        raw: Option<&str>,
+    ) -> Result<(Arc<WindowState>, PathBuf), String> {
         let wanted = raw
-            .map(|raw| self.agent_location(raw).map(|p| PathBuf::from(p.windows)))
+            .map(|raw| {
+                self.agent_location(agent, raw)
+                    .map(|p| PathBuf::from(p.windows))
+            })
             .transpose()?;
         self.windows_by_focus()
             .into_iter()
@@ -711,16 +722,17 @@ impl App {
         })
     }
 
-    /// `workspace`: switches to the workspace named `args.name`, or creates it with `args.folders`,
-    /// within `budget`.
+    /// `workspace`: switches to the workspace named `args.name`, or creates it with `args.folders`
+    /// (`agent`'s paths), within `budget`.
     fn agent_workspace(
         self: &Arc<Self>,
         args: WorkspaceArgs,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<WorkspaceAnswer, String> {
         match args.action {
             WorkspaceAction::Switch => self.agent_switch(&args.name, budget),
-            WorkspaceAction::Create => self.agent_create(&args.name, &args.folders, budget),
+            WorkspaceAction::Create => self.agent_create(&args.name, &args.folders, agent, budget),
         }
     }
 
@@ -759,16 +771,17 @@ impl App {
     }
 
     /// A new workspace named `name`, which no workspace is called, holding `folders` (Windows or
-    /// WSL paths of folders), opened in a new window.
+    /// WSL paths of folders, from `agent`), opened in a new window.
     fn agent_create(
         self: &Arc<Self>,
         name: &str,
         folders: &[String],
+        agent: &Agent,
         budget: Budget,
     ) -> Result<WorkspaceAnswer, String> {
         let mut roots: Vec<PathBuf> = Vec::new();
         for folder in folders {
-            let root = normalize_root(&self.agent_location(folder)?.windows)?;
+            let root = normalize_root(&self.agent_location(agent, folder)?.windows)?;
             if !is_folder(&root, self.timings.exists) {
                 return Err(format!(
                     "{} isn't a folder Lectern can reach.",
@@ -831,9 +844,27 @@ impl App {
         self.host.agent_focus(label, mode, budget.left())
     }
 
-    /// The path an agent wrote, `raw`, as `agent_location` takes it.
-    fn agent_location(&self, raw: &str) -> Result<AgentPath, String> {
-        agent_location(&self.mapper(), &read(&self.trust), raw)
+    /// The path `agent` wrote, `raw`, as `agent_location` takes it: a Linux path goes into the
+    /// agent's own WSL distribution, when it runs in one (`agent_mapper`).
+    fn agent_location(&self, agent: &Agent, raw: &str) -> Result<AgentPath, String> {
+        agent_location(&self.agent_mapper(agent), &read(&self.trust), raw)
+    }
+
+    /// What maps `agent`'s paths, both ways: Lectern's mapper, in the agent's own WSL distribution
+    /// when it runs in one (`Agent::mapper`). Every path an agent gives is read with it, and every
+    /// path in an answer to it is given with it, so a file in another distribution has no WSL form.
+    fn agent_mapper(&self, agent: &Agent) -> PathMapper {
+        agent.mapper(&self.mapper())
+    }
+
+    /// `exe`, this Lectern's, in both forms, for the commands that connect an agent to it
+    /// (Preferences › Agents): the WSL form, `PathMapper::to_wsl`'s, is none when WSL can't reach
+    /// it, as on a share no mapping reaches.
+    pub fn exe_forms(&self, exe: &Path) -> PathForms {
+        PathForms {
+            windows: Some(path_string(exe)),
+            wsl: self.mapper().to_wsl(exe),
+        }
     }
 
     /// The name of the workspace `window` shows; none for a blank window.
@@ -1024,7 +1055,7 @@ mod tests {
             };
             assert!(app.agent_reply("main", call.id, AgentReply::View(view)));
         });
-        let status = f.app.agent_status("Claude");
+        let status = f.app.agent_status(&claude());
         answering.join().unwrap();
         assert_eq!(status.windows.len(), 1);
         let main = &status.windows[0];
@@ -1049,7 +1080,7 @@ mod tests {
         let plan = dir.file("vault/plan.md", "# Plan\n");
         let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
         let _ = f.state.open_document(&path_string(&plan));
-        let status = f.app.agent_status("Claude");
+        let status = f.app.agent_status(&claude());
         let main = &status.windows[0];
         assert_eq!(
             main.file.as_ref().and_then(|f| f.windows.clone()),
@@ -1125,7 +1156,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         let answer = f
             .app
-            .agent_answer(show(&path_string(&notes), 0), "Claude")
+            .agent_answer(show(&path_string(&notes), 0), &claude())
             .unwrap();
         let (target, call) = answering.join().unwrap();
         assert_eq!(target, Target::Window("main".to_owned()));
@@ -1161,7 +1192,7 @@ mod tests {
         let wsl = f.app.mapper().to_wsl(&plan).expect("a WSL form");
         assert!(wsl.starts_with("/mnt/"), "{wsl}");
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
-        let answer = f.app.agent_answer(show(&wsl, 0), "Claude").unwrap();
+        let answer = f.app.agent_answer(show(&wsl, 0), &claude()).unwrap();
         let (_, call) = answering.join().unwrap();
         let AgentRequest::Show(args) = call.request else {
             panic!("not a show");
@@ -1196,13 +1227,13 @@ mod tests {
                     },
                 ],
             );
-            let shown = f.app.agent_answer(show(&notes, 30), "Claude").unwrap();
+            let shown = f.app.agent_answer(show(&notes, 30), &claude()).unwrap();
             answering.join().unwrap();
             assert_eq!(shown["state"], state);
         }
         let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         let started = Instant::now();
-        let shown = f.app.agent_answer(show(&notes, 1), "Claude").unwrap();
+        let shown = f.app.agent_answer(show(&notes, 1), &claude()).unwrap();
         answering.join().unwrap();
         assert_eq!(shown["state"], "waiting");
         assert!(started.elapsed() >= Duration::from_secs(1));
@@ -1219,7 +1250,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            f.app.agent_answer(show(&path_string(&plan), 5), "Claude"),
+            f.app.agent_answer(show(&path_string(&plan), 5), &claude()),
             Err("It's too big to show.".to_owned())
         );
         answering.join().unwrap();
@@ -1242,7 +1273,8 @@ mod tests {
             ],
         );
         assert_eq!(
-            f.app.agent_answer(show(&path_string(&notes), 30), "Claude"),
+            f.app
+                .agent_answer(show(&path_string(&notes), 30), &claude()),
             Err(why.to_owned())
         );
         answering.join().unwrap();
@@ -1251,7 +1283,7 @@ mod tests {
     /// The `show` `request` on a thread of its own, from Claude.
     fn showing(f: &Fixture, request: AgentRequest) -> thread::JoinHandle<Result<Value, String>> {
         let app = Arc::clone(&f.app);
-        thread::spawn(move || app.agent_answer(request, "Claude"))
+        thread::spawn(move || app.agent_answer(request, &claude()))
     }
 
     /// Two `show`s that wait, to one window: the newer takes the older's place at the bar, which
@@ -1281,7 +1313,7 @@ mod tests {
         });
         let second = f
             .app
-            .agent_answer(show(&path_string(&plan), 30), "Claude")
+            .agent_answer(show(&path_string(&plan), 30), &claude())
             .unwrap();
         ui.join().unwrap();
         assert_eq!(first.join().unwrap().unwrap()["state"], "replaced");
@@ -1374,7 +1406,7 @@ mod tests {
         let started = Instant::now();
         assert_eq!(
             f.app
-                .agent_show(args(), "Claude", within(Duration::from_millis(300)))
+                .agent_show(args(), &claude(), within(Duration::from_millis(300)))
                 .unwrap_err(),
             "The window didn't answer in time."
         );
@@ -1382,7 +1414,7 @@ mod tests {
         // Answered at once, the focus is given what is left of a second, not the host's 2 s.
         let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         f.app
-            .agent_show(args(), "Claude", within(Duration::from_secs(1)))
+            .agent_show(args(), &claude(), within(Duration::from_secs(1)))
             .unwrap();
         answering.join().unwrap();
         let given = *lock(&f.host.focus_within).last().unwrap();
@@ -1400,7 +1432,7 @@ mod tests {
         let (f, plan, _) = vault(|root| profile(&[root]));
         let folder = plan.parent().unwrap().to_path_buf();
         let missing = folder.join("gone.md");
-        let error = |path: &str| f.app.agent_answer(show(path, 0), "Claude").unwrap_err();
+        let error = |path: &str| f.app.agent_answer(show(path, 0), &claude()).unwrap_err();
         assert!(error(&path_string(&folder)).contains("is a folder"));
         assert_eq!(
             error(&path_string(&missing)),
@@ -1420,7 +1452,7 @@ mod tests {
         let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
         let answer = f
             .app
-            .agent_answer(show(&path_string(&plan), 0), "Claude")
+            .agent_answer(show(&path_string(&plan), 0), &claude())
             .unwrap();
         assert_eq!(answer["state"], "shown");
         assert_eq!(answer["window"], "main");
@@ -1445,7 +1477,7 @@ mod tests {
         };
         assert!(f.state.opens.offer(launch).is_none());
         assert_eq!(
-            f.app.agent_answer(show(&path_string(&notes), 0), "Claude"),
+            f.app.agent_answer(show(&path_string(&notes), 0), &claude()),
             Err(OPENING_FOR_USER.to_owned())
         );
         let payload = f.state.startup();
@@ -1467,7 +1499,7 @@ mod tests {
                 wait: 0,
             })
         };
-        let answer = f.app.agent_answer(in_new(&loose), "Claude").unwrap();
+        let answer = f.app.agent_answer(in_new(&loose), &claude()).unwrap();
         assert_eq!(answer["state"], "shown");
         assert_eq!(answer["workspace"], Value::Null);
         let label = answer["window"].as_str().unwrap().to_owned();
@@ -1480,7 +1512,7 @@ mod tests {
         assert_eq!(opened_path(payload.initial.as_ref().unwrap()), loose);
         // Main's file goes to Main's window.
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
-        let answer = f.app.agent_answer(in_new(&plan), "Claude").unwrap();
+        let answer = f.app.agent_answer(in_new(&plan), &claude()).unwrap();
         answering.join().unwrap();
         assert_eq!(
             (answer["window"].as_str(), answer["workspace"].as_str()),
@@ -1518,7 +1550,7 @@ mod tests {
             let (f, seeds, garden) = main_and_garden(focus);
             let answer = f
                 .app
-                .agent_answer(show(&path_string(&seeds), 0), "Claude")
+                .agent_answer(show(&path_string(&seeds), 0), &claude())
                 .unwrap();
             assert_eq!(answer["state"], "shown");
             assert_eq!(answer["workspace"], "Garden");
@@ -1549,14 +1581,14 @@ mod tests {
             })
         };
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
-        let answer = f.app.agent_answer(in_main("main"), "Claude").unwrap();
+        let answer = f.app.agent_answer(in_main("main"), &claude()).unwrap();
         answering.join().unwrap();
         assert_eq!(
             (answer["window"].as_str(), answer["workspace"].as_str()),
             (Some("main"), Some("Main"))
         );
         assert_eq!(
-            f.app.agent_answer(in_main("Attic"), "Claude"),
+            f.app.agent_answer(in_main("Attic"), &claude()),
             Err(
                 "There's no workspace named “Attic”. The workspaces are Main and Garden."
                     .to_owned()
@@ -1593,6 +1625,140 @@ mod tests {
         assert_eq!(
             reach(&trust, r"\\nas3\x\b.md").unwrap().windows,
             r"\\nas3\x\b.md"
+        );
+    }
+
+    /// An agent's Linux paths go into the WSL distribution it runs in, when its `mcp` named one,
+    /// whichever Lectern's settings name; an agent in none of its own goes by the settings.
+    #[test]
+    fn an_agents_linux_paths_go_into_the_distro_it_runs_in() {
+        let mut profile = profile(&[]);
+        profile.settings.wsl_distro = Some("Ubuntu".to_owned());
+        let f = fixture(profile, FakeHost::default());
+        let debian = Agent {
+            distro: Some("Debian".to_owned()),
+            ..claude()
+        };
+        let located = |agent: &Agent| {
+            f.app
+                .agent_location(agent, "/home/me/notes/plan.md:12")
+                .unwrap()
+        };
+        let path = located(&debian);
+        assert_eq!(
+            path.windows,
+            r"\\wsl.localhost\Debian\home\me\notes\plan.md"
+        );
+        assert_eq!(path.wsl.as_deref(), Some("/home/me/notes/plan.md"));
+        assert_eq!(path.line, Some(12));
+        assert_eq!(
+            located(&claude()).windows,
+            r"\\wsl.localhost\Ubuntu\home\me\notes\plan.md"
+        );
+        // A drive's path is the same from any distribution.
+        assert_eq!(
+            f.app
+                .agent_location(&debian, "/mnt/s/Notes/My Vault/plan.md")
+                .unwrap()
+                .windows,
+            r"S:\Notes\My Vault\plan.md"
+        );
+        // What `show` answers with: another distribution's file has no WSL form in the agent's.
+        for (shown, wsl) in [(UBUNTUS, None), (DEBIANS, Some("/home/me/notes/plan.md"))] {
+            let path = f.app.agent_location(&debian, shown).unwrap();
+            assert_eq!(path.windows, shown);
+            assert_eq!(path.wsl.as_deref(), wsl, "{shown}");
+        }
+    }
+
+    /// A note in Lectern's own WSL distribution, and one in another.
+    const UBUNTUS: &str = r"\\wsl.localhost\Ubuntu\home\me\notes\plan.md";
+    const DEBIANS: &str = r"\\wsl.localhost\Debian\home\me\notes\plan.md";
+
+    /// Every path in an answer is in the terms of the agent's own distribution: an agent in Debian
+    /// gets `/home/me/…` for Debian's file and no WSL form for Ubuntu's, Lectern's own, in
+    /// `status` as in `highlight`. An agent in none of its own reads them as Lectern does.
+    #[test]
+    fn an_agent_gets_wsl_forms_only_for_its_own_distros_files() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let mut profile = profile(&[&root]);
+        profile.settings.wsl_distro = Some("Ubuntu".to_owned());
+        let f = fixture_in(dir, profile, FakeHost::default());
+        let _ = f.state.open_document(&path_string(&plan));
+        let debian = Agent {
+            distro: Some("Debian".to_owned()),
+            ..claude()
+        };
+        let form = |wsl: Option<&str>, shown: &str| json!({"windows": shown, "wsl": wsl});
+        // `status`: the window says what it shows.
+        let status_file = |agent: &Agent, shown: &str| {
+            let view = WindowView {
+                path: Some(shown.to_owned()),
+                ..WindowView::default()
+            };
+            let answering = ui_answers(&f, "main", vec![AgentReply::View(view)]);
+            let status = f.app.agent_answer(AgentRequest::Status, agent).unwrap();
+            answering.join().unwrap();
+            status["windows"][0]["file"].clone()
+        };
+        let home = Some("/home/me/notes/plan.md");
+        assert_eq!(status_file(&debian, UBUNTUS), form(None, UBUNTUS));
+        assert_eq!(status_file(&debian, DEBIANS), form(home, DEBIANS));
+        assert_eq!(status_file(&claude(), UBUNTUS), form(home, UBUNTUS));
+        assert_eq!(status_file(&claude(), DEBIANS), form(None, DEBIANS));
+        // `highlight`, of the file the window shows: here one in WSL, which the test can't open
+        // without a distribution, so the window is made to show it.
+        let highlighted_file = |agent: &Agent, shown: &str| {
+            if let Some(current) = lock(&f.state.current).as_mut() {
+                current.path = PathBuf::from(shown);
+            }
+            let answering = ui_answers(&f, "main", vec![AgentReply::Highlighted { count: 0 }]);
+            let request = AgentRequest::Highlight(HighlightArgs {
+                path: None,
+                targets: Vec::new(),
+                clear: true,
+            });
+            let answer = f.app.agent_answer(request, agent).unwrap();
+            answering.join().unwrap();
+            answer["file"].clone()
+        };
+        assert_eq!(highlighted_file(&debian, UBUNTUS), form(None, UBUNTUS));
+        assert_eq!(highlighted_file(&debian, DEBIANS), form(home, DEBIANS));
+        assert_eq!(highlighted_file(&claude(), UBUNTUS), form(home, UBUNTUS));
+    }
+
+    /// The exe the connect commands name, in both forms: WSL reaches it on a drive (through
+    /// `/mnt`) or through a path mapping, and not on a share no mapping reaches.
+    #[test]
+    fn the_exe_comes_in_both_forms_when_wsl_reaches_it() {
+        let mut profile = profile(&[]);
+        profile.settings.path_mappings = vec![PathMapping {
+            from: "/home/me/apps".to_owned(),
+            to: r"\\nas\share\apps".to_owned(),
+        }];
+        let f = fixture(profile, FakeHost::default());
+        let forms = |exe: &str| f.app.exe_forms(Path::new(exe));
+        let installed = r"C:\Users\me\AppData\Local\Lectern\lectern.exe";
+        assert_eq!(
+            forms(installed),
+            PathForms {
+                windows: Some(installed.to_owned()),
+                wsl: Some("/mnt/c/Users/me/AppData/Local/Lectern/lectern.exe".to_owned()),
+            }
+        );
+        assert_eq!(
+            forms(r"\\nas\share\apps\lectern.exe").wsl.as_deref(),
+            Some("/home/me/apps/lectern.exe")
+        );
+        let unreached = r"\\nas2\tools\lectern.exe";
+        assert_eq!(
+            forms(unreached),
+            PathForms {
+                windows: Some(unreached.to_owned()),
+                wsl: None,
+            }
         );
     }
 
@@ -1641,7 +1807,7 @@ mod tests {
         let f = fixture(profile(&[]), FakeHost::default());
         let shared = r"\\nas2\share\x.md";
         assert_eq!(
-            f.app.agent_answer(show(shared, 0), "Claude"),
+            f.app.agent_answer(show(shared, 0), &claude()),
             Err(UNTRUSTED.to_owned())
         );
         assert!(!f.app.trusts(shared));
@@ -1651,7 +1817,7 @@ mod tests {
             &[r"\\nas2\share".to_owned()],
         );
         assert_eq!(
-            f.app.agent_answer(over_share, "Claude"),
+            f.app.agent_answer(over_share, &claude()),
             Err(UNTRUSTED.to_owned())
         );
         assert!(read(&f.app.workspaces).find_by_name("Shared").is_none());
@@ -1674,7 +1840,7 @@ mod tests {
         let (f, _, _) = main_and_garden(AgentFocus::Raise);
         let answer = f
             .app
-            .agent_answer(workspace(WorkspaceAction::Switch, " MAIN ", &[]), "Claude")
+            .agent_answer(workspace(WorkspaceAction::Switch, " MAIN ", &[]), &claude())
             .unwrap();
         assert_eq!(
             answer,
@@ -1692,7 +1858,7 @@ mod tests {
         let (f, _, garden) = main_and_garden(AgentFocus::Front);
         let answer = f
             .app
-            .agent_answer(workspace(WorkspaceAction::Switch, "garden", &[]), "Claude")
+            .agent_answer(workspace(WorkspaceAction::Switch, "garden", &[]), &claude())
             .unwrap();
         let label = answer["window"].as_str().unwrap().to_owned();
         assert_ne!(label, "main");
@@ -1708,7 +1874,7 @@ mod tests {
         // Switching again finds it open.
         let again = f
             .app
-            .agent_answer(workspace(WorkspaceAction::Switch, "Garden", &[]), "Claude")
+            .agent_answer(workspace(WorkspaceAction::Switch, "Garden", &[]), &claude())
             .unwrap();
         assert_eq!(
             (again["window"].as_str(), again["opened"].as_bool()),
@@ -1716,7 +1882,7 @@ mod tests {
         );
         assert_eq!(
             f.app
-                .agent_answer(workspace(WorkspaceAction::Switch, "Attic", &[]), "Claude"),
+                .agent_answer(workspace(WorkspaceAction::Switch, "Attic", &[]), &claude()),
             Err(
                 "There's no workspace named “Attic”. The workspaces are Main and Garden."
                     .to_owned()
@@ -1738,7 +1904,7 @@ mod tests {
                     "Reading",
                     &[wsl.clone(), format!("{wsl}/")],
                 ),
-                "Claude",
+                &claude(),
             )
             .unwrap();
         assert_eq!(answer["workspace"], "Reading");
@@ -1760,7 +1926,7 @@ mod tests {
         let (f, _, _) = main_and_garden(AgentFocus::Front);
         assert_eq!(
             f.app
-                .agent_answer(workspace(WorkspaceAction::Create, "garden", &[]), "Claude"),
+                .agent_answer(workspace(WorkspaceAction::Create, "garden", &[]), &claude()),
             Err(
                 "There's a workspace named “Garden” already. Switch to it, or choose another name."
                     .to_owned()
@@ -1771,7 +1937,7 @@ mod tests {
             .app
             .agent_answer(
                 workspace(WorkspaceAction::Create, "Attic", &[path_string(&missing)]),
-                "Claude",
+                &claude(),
             )
             .unwrap_err();
         assert_eq!(
@@ -1799,7 +1965,7 @@ mod tests {
             let creating = thread::spawn(move || {
                 app.agent_answer(
                     workspace(WorkspaceAction::Create, "Reading", &[folder]),
-                    "Claude",
+                    &claude(),
                 )
             });
             let started = Instant::now();
@@ -1910,7 +2076,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let answer = f
             .app
-            .agent_answer(show_at(&plan, quote("Roll back")), "Claude")
+            .agent_answer(show_at(&plan, quote("Roll back")), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(answer["state"], "shown");
@@ -1921,7 +2087,7 @@ mod tests {
         // The path's own line (`plan.md:3`) is a line target, found as any is.
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let at_line = format!("{}:3", path_string(&plan));
-        f.app.agent_answer(show(&at_line, 0), "Claude").unwrap();
+        f.app.agent_answer(show(&at_line, 0), &claude()).unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(
             shown_target(call),
@@ -1939,7 +2105,7 @@ mod tests {
         let (f, plan) = shown_plan();
         let notes = f.dir.file("vault/notes.md", "# Notes\n");
         let brief = f.dir.file("vault/brief.pdf", "%PDF-1.4\n");
-        let error = |path: &Path, target| f.app.agent_answer(show_at(path, target), "Claude");
+        let error = |path: &Path, target| f.app.agent_answer(show_at(path, target), &claude());
         assert_eq!(
             error(&notes, quote("Roll back")),
             Err("That passage isn't in notes.md.".to_owned())
@@ -1977,7 +2143,7 @@ mod tests {
             .file("vault/report.html", "<h1>Report</h1><p>Rose.</p>");
         let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         f.app
-            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .agent_answer(show_at(&report, quote("Rose")), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(shown_target(call), (Some(quote("Rose")), vec![]));
@@ -1993,7 +2159,7 @@ mod tests {
         let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
         let answer = f
             .app
-            .agent_answer(show_at(&plan, heading("rollout")), "Claude")
+            .agent_answer(show_at(&plan, heading("rollout")), &claude())
             .unwrap();
         assert_eq!(answer["state"], "shown");
         // Core found it: nothing pending.
@@ -2020,7 +2186,7 @@ mod tests {
                     new_window: true,
                     wait: 0,
                 }),
-                "Claude",
+                &claude(),
             )
             .unwrap();
         let window = f.app.window(answer["window"].as_str().unwrap()).unwrap();
@@ -2047,7 +2213,7 @@ mod tests {
                     new_window: true,
                     wait: 0,
                 }),
-                "Claude",
+                &claude(),
             )
             .unwrap();
         assert_eq!(answer["state"], "shown");
@@ -2066,7 +2232,7 @@ mod tests {
                 .app
                 .agent_answer(
                     highlight(path, vec![heading("Rollout"), quote("migration")], false),
-                    "Claude",
+                    &claude(),
                 )
                 .unwrap();
             let (target, call) = answering.join().unwrap();
@@ -2090,7 +2256,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![AgentReply::Highlighted { count: 0 }]);
         let answer = f
             .app
-            .agent_answer(highlight(None, vec![], true), "Claude")
+            .agent_answer(highlight(None, vec![], true), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert!(call.places.is_empty());
@@ -2108,19 +2274,19 @@ mod tests {
         assert_eq!(
             f.app.agent_answer(
                 highlight(Some(&notes), vec![quote("Notes")], false),
-                "Claude"
+                &claude()
             ),
             not_shown
         );
         assert_eq!(
             f.app
-                .agent_answer(read_from(Some(&notes), None, None), "Claude"),
+                .agent_answer(read_from(Some(&notes), None, None), &claude()),
             not_shown
         );
         assert_eq!(
             f.app.agent_answer(
                 highlight(Some(&plan), vec![quote("roll forward")], false),
-                "Claude"
+                &claude()
             ),
             Err("That passage isn't in plan.md.".to_owned())
         );
@@ -2130,11 +2296,11 @@ mod tests {
         let nothing = Err("Lectern isn't showing a file. Show one first.".to_owned());
         assert_eq!(
             f.app
-                .agent_answer(highlight(None, vec![quote("x")], false), "Claude"),
+                .agent_answer(highlight(None, vec![quote("x")], false), &claude()),
             nothing
         );
         assert_eq!(
-            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            f.app.agent_answer(read_from(None, None, None), &claude()),
             nothing
         );
     }
@@ -2145,7 +2311,7 @@ mod tests {
         let (f, plan) = shown_plan();
         let answer = f
             .app
-            .agent_answer(read_from(None, Some(5), Some(7)), "Claude")
+            .agent_answer(read_from(None, Some(5), Some(7)), &claude())
             .unwrap();
         assert_eq!(answer["text"], "Rollout");
         assert_eq!(answer["truncated"], true);
@@ -2190,7 +2356,7 @@ mod tests {
         );
         let answer = f
             .app
-            .agent_answer(read_from(None, None, None), "Claude")
+            .agent_answer(read_from(None, None, None), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert!(matches!(call.request, AgentRequest::Read(_)));
@@ -2214,7 +2380,7 @@ mod tests {
         );
         let answer = f
             .app
-            .agent_answer(read_from(None, None, None), "Claude")
+            .agent_answer(read_from(None, None, None), &claude())
             .unwrap();
         answering.join().unwrap();
         assert_eq!(answer["text"], "Rows.");
@@ -2231,7 +2397,7 @@ mod tests {
         );
         assert_eq!(
             f.app
-                .agent_answer(highlight(None, vec![quote("Rose")], false), "Claude"),
+                .agent_answer(highlight(None, vec![quote("Rose")], false), &claude()),
             Err(missing.to_owned())
         );
         let (_, call) = answering.join().unwrap();
@@ -2240,14 +2406,14 @@ mod tests {
         let _ = f.state.open_document(&path_string(&brief));
         let sent = agent_requests(&f.host).len();
         assert_eq!(
-            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            f.app.agent_answer(read_from(None, None, None), &claude()),
             Err("PDF text isn't available.".to_owned())
         );
         // A PDF can't be painted: highlighting one, or clearing it, is the tool's error.
         for (targets, clear) in [(vec![quote("Brief")], false), (vec![], true)] {
             assert_eq!(
                 f.app
-                    .agent_answer(highlight(None, targets, clear), "Claude"),
+                    .agent_answer(highlight(None, targets, clear), &claude()),
                 Err("PDFs can't be highlighted; use show with a page target.".to_owned())
             );
         }
@@ -2269,7 +2435,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![pending]);
         let answer = f
             .app
-            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .agent_answer(show_at(&report, quote("Rose")), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         let within = call.within_ms.expect("how long the window has");
@@ -2289,7 +2455,7 @@ mod tests {
         );
         assert_eq!(
             f.app
-                .agent_answer(show_at(&report, quote("Tulip")), "Claude"),
+                .agent_answer(show_at(&report, quote("Tulip")), &claude()),
             Err(missing.to_owned())
         );
         answering.join().unwrap();
@@ -2297,7 +2463,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![AgentReply::Replaced]);
         let answer = f
             .app
-            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .agent_answer(show_at(&report, quote("Rose")), &claude())
             .unwrap();
         answering.join().unwrap();
         assert_eq!(answer["state"], "replaced");
@@ -2305,7 +2471,7 @@ mod tests {
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let answer = f
             .app
-            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .agent_answer(show_at(&report, quote("Rose")), &claude())
             .unwrap();
         answering.join().unwrap();
         assert_eq!(answer.get("target"), None);
@@ -2324,7 +2490,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             f.app
-                .agent_answer(show_at(&huge, AgentTarget::Line { line: 1 }), "Claude"),
+                .agent_answer(show_at(&huge, AgentTarget::Line { line: 1 }), &claude()),
             Err("This file is too large to show (over 20 MB).".to_owned())
         );
         assert!(agent_requests(&f.host).is_empty());
@@ -2383,13 +2549,13 @@ mod tests {
         f.state.leave_document();
         assert_eq!(f.state.known_view().path, None);
         assert_eq!(
-            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            f.app.agent_answer(read_from(None, None, None), &claude()),
             Err("Lectern isn't showing a file. Show one first.".to_owned())
         );
         assert_eq!(
             f.app.agent_answer(
                 highlight(Some(&plan), vec![quote("Roll back")], false),
-                "Claude"
+                &claude()
             ),
             Err("plan.md isn't shown in Lectern. Show it first.".to_owned())
         );

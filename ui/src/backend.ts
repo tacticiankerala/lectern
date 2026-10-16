@@ -12,6 +12,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -77,6 +78,11 @@ export interface Backend {
    * setting stands for, and every installed one. Both empty without WSL.
    */
   listWslDistros(): Promise<WslDistros>;
+  /**
+   * This lectern.exe's path, for the commands that connect Claude Code (Preferences › Agents):
+   * the Windows form, and the WSL one, null when WSL can't reach it (a share no mapping reaches).
+   */
+  lecternExe(): Promise<PathForms>;
   /**
    * Asks GitHub Releases for a newer Lectern. `automatic`: the check after startup, which then
    * runs no more this session (`StartupPayload.primary`).

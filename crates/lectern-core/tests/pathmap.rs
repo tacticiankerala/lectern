@@ -334,6 +334,52 @@ fn to_wsl_handles_wsl_unc_and_drives() {
     );
 }
 
+/// A WSL share path has a WSL form only in its own distribution, the mapper's, named in any letter
+/// case: read in another, `/home/me/a.md` would be another file. A mapper with no distribution
+/// named (Windows' default, whose name isn't known) takes any.
+#[test]
+fn to_wsl_gives_a_wsl_share_path_only_in_its_own_distro() {
+    let debian = PathMapper {
+        wsl_distro: Some("Debian".into()),
+        ..PathMapper::default()
+    };
+    for own in [
+        r"\\wsl.localhost\Debian\home\me\a.md",
+        r"\\wsl$\Debian\home\me\a.md",
+        r"\\wsl.localhost\debian\home\me\a.md",
+        "//wsl.localhost/Debian/home/me/a.md",
+    ] {
+        assert_eq!(
+            debian.to_wsl(Path::new(own)).as_deref(),
+            Some("/home/me/a.md"),
+            "{own}"
+        );
+    }
+    for other in [
+        r"\\wsl.localhost\Ubuntu\home\me\a.md",
+        r"\\wsl$\Ubuntu\home\me\a.md",
+    ] {
+        assert_eq!(debian.to_wsl(Path::new(other)), None, "{other}");
+    }
+    // A drive is the same from any distribution.
+    assert_eq!(
+        debian.to_wsl(Path::new(r"C:\Users\me\a.md")).as_deref(),
+        Some("/mnt/c/Users/me/a.md")
+    );
+    let unnamed = mapper(&[]);
+    for any in [
+        r"\\wsl.localhost\Debian\home\me\a.md",
+        r"\\wsl.localhost\Ubuntu\home\me\a.md",
+        r"\\wsl$\Ubuntu\home\me\a.md",
+    ] {
+        assert_eq!(
+            unnamed.to_wsl(Path::new(any)).as_deref(),
+            Some("/home/me/a.md"),
+            "{any}"
+        );
+    }
+}
+
 #[test]
 fn to_wsl_gives_none_for_other_unc() {
     assert_eq!(mapper(&[]).to_wsl(Path::new(r"\\nas\share\a.md")), None);
@@ -391,7 +437,8 @@ fn literal_forms_of_a_linux_path_go_through_the_distro() {
     );
 }
 
-/// The distribution is whichever the mapper is given; a path that names its own keeps it.
+/// The distribution is whichever the mapper is given; a path that names another keeps it, and has
+/// no WSL form in this one.
 #[test]
 fn literal_forms_go_through_the_chosen_distro() {
     let debian = PathMapper {
@@ -408,7 +455,7 @@ fn literal_forms_go_through_the_chosen_distro() {
     let ubuntus = r"\\wsl.localhost\Ubuntu\home\me\x.rb";
     assert_eq!(
         debian.literal_forms(ubuntus),
-        path_forms(Some(ubuntus), Some("/home/me/x.rb"))
+        path_forms(Some(ubuntus), None)
     );
 }
 

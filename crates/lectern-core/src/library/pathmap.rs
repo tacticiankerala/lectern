@@ -103,17 +103,21 @@ impl PathMapper {
         Some(windows_join(&format!(r"\\wsl.localhost\{distro}"), raw))
     }
 
-    /// The path a WSL shell knows a local file by, the reverse of [`PathMapper::map`]:
+    /// The path a WSL shell in the mapper's distribution knows a local file by, the reverse of
+    /// [`PathMapper::map`]:
     /// 1. the longest user mapping from a Linux folder whose Windows side covers whole folders of
     ///    `path` (any letter case, either separator) gives that Linux folder;
-    /// 2. `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` give `/…`;
+    /// 2. `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` give `/…` when `<distro>` is
+    ///    [`PathMapper::wsl_distro`], in any letter case, or any distribution when that isn't
+    ///    named: in another, `/…` is another file;
     /// 3. `X:\…` gives `/mnt/x/…`.
     ///
-    /// Any other path, such as a share on another machine, has none.
+    /// Any other path, such as a share on another machine or another distribution's file, has
+    /// none.
     pub fn to_wsl(&self, path: &Path) -> Option<String> {
         let raw = path.to_string_lossy();
         self.user_unmapped(&raw)
-            .or_else(|| wsl_share_path(&raw))
+            .or_else(|| wsl_share_path(&raw, self.wsl_distro.as_deref()))
             .or_else(|| mnt_path(&raw))
     }
 
@@ -205,8 +209,9 @@ fn has_extension(path: &str) -> bool {
     })
 }
 
-/// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`.
-fn wsl_share_path(raw: &str) -> Option<String> {
+/// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`, when
+/// the distribution named is `distro` (in any letter case), or any when `distro` is none.
+fn wsl_share_path(raw: &str, distro: Option<&str>) -> Option<String> {
     let mut parts = raw
         .strip_prefix(r"\\")
         .or_else(|| raw.strip_prefix("//"))?
@@ -215,7 +220,10 @@ fn wsl_share_path(raw: &str) -> Option<String> {
     if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
         return None;
     }
-    parts.next().filter(|distro| !distro.is_empty())?;
+    parts
+        .next()
+        .filter(|named| !named.is_empty())
+        .filter(|named| distro.is_none_or(|own| named.eq_ignore_ascii_case(own)))?;
     let rest: Vec<&str> = parts.filter(|part| !part.is_empty()).collect();
     Some(format!("/{}", rest.join("/")))
 }

@@ -17,6 +17,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -156,6 +157,10 @@ export class TauriBackend implements Backend {
 
   listWslDistros(): Promise<WslDistros> {
     return invoke("list_wsl_distros");
+  }
+
+  lecternExe(): Promise<PathForms> {
+    return invoke("lectern_exe");
   }
 
   /** Asks GitHub Releases for a newer Lectern (Rust's updater). */

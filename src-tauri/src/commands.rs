@@ -10,8 +10,8 @@ use lectern_core::agent::target::TextPlace;
 use lectern_core::agent::AgentReply;
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
-    RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload, UpdateInfo,
-    UserOpen, WorkspaceOutcome, WorkspaceSummary, WslDistros,
+    PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload,
+    UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary, WslDistros,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::PageBlock;
@@ -262,6 +262,14 @@ pub async fn list_wsl_distros(state: Shared<'_>) -> Result<WslDistros, String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(WslDistros { default, installed })
+}
+
+/// This lectern.exe's path in both forms, for the commands Preferences › Agents gives to connect
+/// Claude Code (`App::exe_forms`).
+#[tauri::command]
+pub async fn lectern_exe(state: Shared<'_>) -> Result<PathForms, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(state.exe_forms(&exe))
 }
 
 /// `first-paint` also quits when Lectern was started with `--exit-after-paint`. The perf log is

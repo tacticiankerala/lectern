@@ -5,9 +5,10 @@
 // 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the WSL
 // distribution Linux paths go into (listed each time Preferences opens, and hidden without WSL),
 // the editor command, automatic update checks, what an agent's open of a file does and how its
-// window comes forward, and the workspaces, to rename or delete (not one open in a window). Then
-// the version. Settings changed elsewhere show at once in the switches, the theme, the WSL
-// distribution and the path mappings, unless the mappings were edited here: those are what
+// window comes forward, with the commands that connect Claude Code (built from this exe's path,
+// asked for each time Preferences opens), and the workspaces, to rename or delete (not one open in
+// a window). Then the version. Settings changed elsewhere show at once in the switches, the theme,
+// the WSL distribution and the path mappings, unless the mappings were edited here: those are what
 // closing saves. Loaded on first use.
 import { h } from "./dom";
 import type { AgentFocus } from "./generated/AgentFocus";
@@ -15,6 +16,7 @@ import type { AgentOpens } from "./generated/AgentOpens";
 import type { EditorPref } from "./generated/EditorPref";
 import type { HtmlPages } from "./generated/HtmlPages";
 import type { LibraryPayload } from "./generated/LibraryPayload";
+import type { PathForms } from "./generated/PathForms";
 import type { PathMapping } from "./generated/PathMapping";
 import type { Settings } from "./generated/Settings";
 import type { SettingsPatch } from "./generated/SettingsPatch";
@@ -45,6 +47,10 @@ export interface PreferencesHost {
   setOwnTheme(own: boolean): void;
   /** Windows' default WSL distribution and the installed ones; both empty without WSL. */
   wslDistros(): Promise<WslDistros>;
+  /** This lectern.exe's path: its WSL form is null when WSL can't reach it. */
+  lecternExe(): Promise<PathForms>;
+  /** Says `message` briefly, at the bottom of the window. */
+  toast(message: string): void;
 }
 
 const MODES: [ThemeMode, string][] = [
@@ -77,6 +83,46 @@ interface MappingRow {
   el: HTMLElement;
   from: HTMLInputElement;
   to: HTMLInputElement;
+}
+
+/** A command that connects Claude Code, in its row: the shell it is for, and a Copy button. */
+interface CommandRow {
+  el: HTMLElement;
+  shell: HTMLElement;
+  code: HTMLElement;
+  copy: HTMLButtonElement;
+}
+
+/** A command, and the shell it is for, as its row names it. */
+interface ShellCommand {
+  shell: string;
+  command: string;
+}
+
+/**
+ * The command that registers `exe` with Claude Code from a WSL shell, quoted for it. The shell
+ * fills in the distribution it runs in, so Lectern maps the agent's Linux paths through that one.
+ */
+function wslCommand(exe: string): ShellCommand {
+  const quoted = `'${exe.replaceAll("'", "'\\''")}'`;
+  return {
+    shell: "WSL",
+    command: `claude mcp add --scope user lectern -- ${quoted} mcp --distro "$WSL_DISTRO_NAME"`,
+  };
+}
+
+/**
+ * The command that registers `exe` with Claude Code from Windows. In double quotes it works in
+ * PowerShell and Command Prompt alike, unless the path holds a character one of them changes there:
+ * PowerShell's `$` and backtick, or Command Prompt's `%`. Such a path is quoted for PowerShell
+ * alone, in single quotes, which keep everything as it is once each `'` is doubled.
+ */
+function windowsCommand(exe: string): ShellCommand {
+  if (!/[$`%]/.test(exe)) {
+    return { shell: "Windows", command: `claude mcp add --scope user lectern -- "${exe}" mcp` };
+  }
+  const quoted = `'${exe.replaceAll("'", "''")}'`;
+  return { shell: "PowerShell", command: `claude mcp add --scope user lectern -- ${quoted} mcp` };
 }
 
 export class Preferences {
@@ -112,6 +158,14 @@ export class Preferences {
   private readonly htmlPages: HTMLInputElement[];
   private readonly agentOpens: HTMLInputElement[];
   private readonly agentFocus: HTMLInputElement[];
+  /** The commands that connect Claude Code, each hidden until this exe's path fills it in. */
+  private readonly wslConnect: CommandRow;
+  private readonly windowsConnect: CommandRow;
+  /** Why there's no WSL command, when WSL can't reach this exe. */
+  private readonly noWslConnect: HTMLElement;
+  /** Why the Windows command is PowerShell's alone, when it is. */
+  private readonly powerShellHint: HTMLElement;
+  private readonly portableNote: HTMLElement;
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
 
@@ -256,6 +310,26 @@ export class Preferences {
       });
       return input;
     });
+    this.wslConnect = this.commandRow("wsl");
+    this.windowsConnect = this.commandRow("windows");
+    this.noWslConnect = h(
+      "p",
+      { class: "prefs-hint prefs-connect-no-wsl" },
+      "There's no WSL command: this copy of Lectern isn't on a drive WSL mounts.",
+    );
+    this.noWslConnect.hidden = true;
+    this.powerShellHint = h(
+      "p",
+      { class: "prefs-hint prefs-connect-powershell" },
+      "Run this one in PowerShell: the path holds a character Command Prompt would change.",
+    );
+    this.powerShellHint.hidden = true;
+    this.portableNote = h(
+      "p",
+      { class: "prefs-hint prefs-connect-portable" },
+      "This is a portable copy: keep it where it is, or register again after moving it.",
+    );
+    this.portableNote.hidden = true;
     this.autoUpdate = h("input", { type: "checkbox", name: "lx-auto-update" });
     this.autoUpdate.addEventListener("change", () => {
       this.host.update({ autoUpdate: this.autoUpdate.checked });
@@ -350,6 +424,21 @@ export class Preferences {
         ),
         choices("When an agent shows something", this.agentFocus, AGENT_FOCUS),
         h("p", { class: "prefs-hint" }, "Leave windows alone only flashes the taskbar."),
+        h(
+          "div",
+          { class: "prefs-connect", role: "group", "aria-label": "Connect Claude Code" },
+          h("p", { class: "prefs-choices-label", "aria-hidden": "true" }, "Connect Claude Code"),
+          h(
+            "p",
+            { class: "prefs-hint" },
+            "Run one of these once, in the shell you run Claude Code from.",
+          ),
+          this.wslConnect.el,
+          this.noWslConnect,
+          this.windowsConnect.el,
+          this.powerShellHint,
+          this.portableNote,
+        ),
       ),
       section(
         "Workspaces",
@@ -393,6 +482,7 @@ export class Preferences {
     this.syncWorkspaces();
     this.refresh();
     void this.listDistros();
+    void this.fillCommands();
     this.backdrop.hidden = false;
     this.dialog.querySelector<HTMLElement>(".prefs-close")?.focus();
   }
@@ -638,6 +728,51 @@ export class Preferences {
     this.wslSection.hidden = installed.length === 0;
   }
 
+  /**
+   * The row of the command for `side` (WSL or Windows), with its Copy button; hidden until filled,
+   * which names the shell.
+   */
+  private commandRow(side: "wsl" | "windows"): CommandRow {
+    const shell = h("span", { class: "prefs-connect-shell" });
+    const code = h("code", { class: "prefs-connect-command" });
+    const copy = h("button", { type: "button", class: "btn" }, "Copy");
+    copy.addEventListener("click", () => void this.copyCommand(code.textContent));
+    const el = h("div", { class: "prefs-connect-row", "data-shell": side }, shell, code, copy);
+    el.hidden = true;
+    return { el, shell, code, copy };
+  }
+
+  /**
+   * The commands that connect Claude Code, from this exe's path as Rust gives it now (a path
+   * mapping may have changed its WSL form): the WSL one, or why there's none, then the Windows one,
+   * or PowerShell's, saying why (`windowsCommand`), and a portable copy is told to stay where it
+   * is. Without the path, none shows.
+   */
+  private async fillCommands(): Promise<void> {
+    let exe: PathForms;
+    try {
+      exe = await this.host.lecternExe();
+    } catch {
+      exe = { windows: null, wsl: null };
+    }
+    fillCommand(this.wslConnect, exe.wsl === null ? null : wslCommand(exe.wsl));
+    const windows = exe.windows === null ? null : windowsCommand(exe.windows);
+    fillCommand(this.windowsConnect, windows);
+    this.powerShellHint.hidden = windows?.shell !== "PowerShell";
+    this.noWslConnect.hidden = exe.windows === null || exe.wsl !== null;
+    this.portableNote.hidden = exe.windows === null || !this.host.portable();
+  }
+
+  /** Puts `command` on the clipboard and says so, or that it couldn't. */
+  private async copyCommand(command: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(command);
+      this.host.toast("Copied the command");
+    } catch {
+      this.host.toast("Couldn't copy to the clipboard");
+    }
+  }
+
   /** The mapping rows for `mappings`, none of them edited. */
   private renderMappings(mappings: PathMapping[]): void {
     this.mappingList.replaceChildren();
@@ -759,6 +894,17 @@ function themeSelect(mode: "light" | "dark", label: string): HTMLSelectElement {
     ...THEMES.filter((t) => t.mode === mode).map((t) => h("option", { value: t.id }, t.name)),
   );
   return el;
+}
+
+/** Shows `command` in its row, named for its shell, or hides the row without one. */
+function fillCommand(row: CommandRow, command: ShellCommand | null): void {
+  row.el.hidden = command === null;
+  if (command === null) {
+    return;
+  }
+  row.shell.textContent = command.shell;
+  row.code.textContent = command.command;
+  row.copy.setAttribute("aria-label", `Copy the ${command.shell} command`);
 }
 
 /** A select in its frame, which draws the arrow. */

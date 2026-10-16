@@ -13,6 +13,10 @@
 //! - **The pipe's owner:** before anything is written, the pipe's server must run as this user.
 //!   Another logged-on user could make the pipe first, as its name comes from a SID, which isn't
 //!   secret. Such a pipe is let go and every call refused, each with a single try.
+//! - **`--distro <name>`:** the WSL distribution the agent runs in, which registering from WSL
+//!   fills in (`--distro "$WSL_DISTRO_NAME"`). It goes to Lectern with `hello`, and the agent's
+//!   Linux paths then go into it, not the one Lectern's settings name. A name that can't be one is
+//!   every tool call's error, so the agent learns why at its first call.
 //! - **It ends** when stdin closes.
 
 use std::collections::HashMap;
@@ -28,7 +32,7 @@ use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::mcp::{code, Handled, Mcp};
 use lectern_core::agent::request::ClientInfo;
 use lectern_core::agent::{
-    answer_within, pipe_name, same_user, AgentRequest, Answer, PipeReply, PipeRequest,
+    answer_within, mcp_distro, pipe_name, same_user, AgentRequest, Answer, PipeReply, PipeRequest,
     FOREIGN_PIPE, MAX_LINE,
 };
 use serde_json::{json, Value};
@@ -53,18 +57,28 @@ const GRACE: Duration = Duration::from_secs(5);
 pub type Relay =
     Arc<dyn Fn(AgentRequest, Option<ClientInfo>) -> Result<Value, String> + Send + Sync>;
 
-/// Runs the MCP server for the app `identifier` until stdin closes; the process's exit code.
+/// Runs the MCP server for the app `identifier` until stdin closes, for the WSL distribution the
+/// arguments after `mcp` name (`mcp_distro`); the process's exit code.
 pub fn run(identifier: &str) -> i32 {
     logging::init_stderr_logging();
-    let sid = match pipe::user_sid() {
-        Ok(sid) => sid,
-        Err(e) => {
-            log::error!("can't name Lectern's pipe without the user's SID: {e}");
-            return 1;
+    let relay = match mcp_distro(std::env::args().skip(2)) {
+        Ok(distro) => {
+            let sid = match pipe::user_sid() {
+                Ok(sid) => sid,
+                Err(e) => {
+                    log::error!("can't name Lectern's pipe without the user's SID: {e}");
+                    return 1;
+                }
+            };
+            let name = pipe_name(identifier, &sid);
+            let lectern = Lectern::new(name, sid, distro, Box::new(launch_lectern));
+            Arc::new(move |request, client| lectern.call(request, client))
+        }
+        Err(refusal) => {
+            log::error!("{refusal}");
+            refusing(refusal)
         }
     };
-    let lectern = Lectern::new(pipe_name(identifier, &sid), sid, Box::new(launch_lectern));
-    let relay: Relay = Arc::new(move |request, client| lectern.call(request, client));
     match serve(io::stdin().lock(), io::stdout(), relay) {
         Ok(()) => 0,
         Err(e) => {
@@ -121,6 +135,12 @@ pub fn serve(
     }
 }
 
+/// A relay that answers every tool call with `refusal`, reaching no Lectern: for an `mcp` started
+/// with arguments it can't use. The protocol's own messages are still answered.
+fn refusing(refusal: String) -> Relay {
+    Arc::new(move |_, _| Err(refusal.clone()))
+}
+
 /// Writes `line` and a `\n`, whole, and flushes it.
 fn write_line(output: &Mutex<dyn Write + Send>, line: &str) {
     let mut output = output.lock().unwrap_or_else(PoisonError::into_inner);
@@ -134,10 +154,12 @@ fn write_line(output: &Mutex<dyn Write + Send>, line: &str) {
 }
 
 /// The running Lectern, reached over its pipe `name`, served as the user `user` (a SID), and
-/// started with `launch` when it isn't running.
+/// started with `launch` when it isn't running; told the agent runs in the WSL distribution
+/// `distro`, when `mcp` was given one.
 pub struct Lectern {
     name: String,
     user: String,
+    distro: Option<String>,
     launch: Box<dyn Fn() -> io::Result<()> + Send + Sync>,
     connection: Mutex<Option<Arc<Connection>>>,
 }
@@ -146,11 +168,13 @@ impl Lectern {
     pub fn new(
         name: String,
         user: String,
+        distro: Option<String>,
         launch: Box<dyn Fn() -> io::Result<()> + Send + Sync>,
     ) -> Self {
         Self {
             name,
             user,
+            distro,
             launch,
             connection: Mutex::new(None),
         }
@@ -168,7 +192,7 @@ impl Lectern {
     }
 
     /// The connection, made when there is none or the last one is lost, starting Lectern when it
-    /// isn't running. A new connection says hello for `client`.
+    /// isn't running. A new connection says hello for `client`, in the agent's distribution.
     fn connection(&self, client: Option<ClientInfo>) -> Result<Arc<Connection>, String> {
         let mut slot = self
             .connection
@@ -179,8 +203,11 @@ impl Lectern {
         }
         let connection = Connection::start(self.open()?)
             .map_err(|e| format!("Couldn't talk to Lectern: {e}"))?;
-        if let Some(client) = client {
-            connection.say(AgentRequest::Hello { client });
+        if client.is_some() || self.distro.is_some() {
+            connection.say(AgentRequest::Hello {
+                client,
+                distro: self.distro.clone(),
+            });
         }
         *slot = Some(Arc::clone(&connection));
         Ok(connection)
@@ -540,6 +567,7 @@ mod tests {
             Lectern::new(
                 name.clone(),
                 pipe::user_sid().unwrap(),
+                None,
                 Box::new(move || {
                     let exe = std::env::current_exe()?;
                     let pid = launch_detached(
@@ -577,6 +605,7 @@ mod tests {
             Lectern::new(
                 name,
                 "S-1-5-21-1000-2000-3000-1001".to_owned(),
+                None,
                 Box::new(move || {
                     launched.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -596,6 +625,51 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         assert_eq!(asked.load(Ordering::SeqCst), 0);
         assert_eq!(launched.load(Ordering::SeqCst), 0);
+    }
+
+    /// The WSL distribution `mcp` was given goes to Lectern with `hello`, even from a client that
+    /// gave no name, so each request is answered in it.
+    #[test]
+    fn the_distro_mcp_was_given_goes_to_lectern_with_hello() {
+        let name = format!(r"\\.\pipe\lectern-test-distro-{}", std::process::id());
+        let handler: agent::Handler = Arc::new(|_, agent| Ok(json!(agent.distro)));
+        let _server = agent::serve(&name, handler).unwrap();
+        let lectern = Lectern::new(
+            name,
+            pipe::user_sid().unwrap(),
+            Some("Debian".to_owned()),
+            Box::new(|| panic!("Lectern is running")),
+        );
+        assert_eq!(
+            lectern.call(AgentRequest::Status, None),
+            Ok(json!("Debian"))
+        );
+    }
+
+    /// An `mcp` given a distribution that can't be one answers the protocol as ever, and refuses
+    /// every tool call with why, as a tool error.
+    #[test]
+    fn an_mcp_given_a_distro_that_cant_be_one_refuses_each_tool_call() {
+        let refusal = mcp_distro(["--distro".to_owned(), "Ubuntu 24.04".to_owned()]).unwrap_err();
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.0"}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"status","arguments":{}}}"#,
+            "\n",
+        );
+        let output = Output::default();
+        serve(
+            Cursor::new(input),
+            output.clone(),
+            refusing(refusal.clone()),
+        )
+        .unwrap();
+        wait_for("the tool call's answer", || output.lines().len() == 2);
+        let lines = output.lines();
+        assert_eq!(lines[0]["result"]["serverInfo"]["name"], "lectern");
+        assert_eq!(lines[1]["id"], 2);
+        assert_eq!(lines[1]["result"]["isError"], true);
+        assert_eq!(lines[1]["result"]["content"][0]["text"], refusal.as_str());
     }
 
     /// A line on stdin over the limit is refused with no id, and the next line is answered.

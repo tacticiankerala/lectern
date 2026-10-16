@@ -374,6 +374,10 @@ export class Actions {
       deleteWorkspace: (id) => void workspaces.remove(id),
       setOwnTheme: (own) => void workspaces.setOwnTheme(own),
       wslDistros: () => this.app.backend.listWslDistros(),
+      lecternExe: () => this.app.backend.lecternExe(),
+      toast: (message) => {
+        this.app.toast(message);
+      },
     });
     this.closeOverlays(this.preferences);
     this.preferences.open();

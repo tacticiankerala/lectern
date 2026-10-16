@@ -23,7 +23,7 @@ use lectern_core::agent::review::{
 };
 use lectern_core::agent::status::AgentReply;
 use lectern_core::agent::target::check_target;
-use lectern_core::agent::AgentRequest;
+use lectern_core::agent::{Agent, AgentRequest};
 use lectern_core::ipc::PathForms;
 use lectern_core::library::{doc_kind, DocKind};
 use lectern_core::review::ops::{OpError, ReviewOp};
@@ -52,10 +52,10 @@ impl App {
     pub(super) fn agent_comment(
         &self,
         args: CommentArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<CommentAnswer, String> {
-        let (file, kind) = self.review_file(&args.path)?;
+        let (file, kind) = self.review_file(agent, &args.path)?;
         let name = file_name(&file);
         check_target(kind, &args.target, &name)?;
         let id = if kind == DocKind::Html {
@@ -64,16 +64,16 @@ impl App {
                 path: path_string(&file),
                 ..args
             });
-            self.in_page(&window, request, agent, budget)?.0
+            self.in_page(&window, request, &agent.name, budget)?.0
         } else {
             let (text, source) = self.note_text(&file, &name, budget)?;
             let anchor = comment_anchor(&text, &source, &name, &args.target)?;
-            let op = comment_op(anchor, args.text, agent, args.kind);
+            let op = comment_op(anchor, args.text, &agent.name, args.kind);
             self.save_thread(&file, &name, &source, &op)?.1
         };
         Ok(CommentAnswer {
             id: thread_id(id),
-            sidecar: self.sidecar_forms(&file),
+            sidecar: self.sidecar_forms(agent, &file),
         })
     }
 
@@ -84,10 +84,10 @@ impl App {
     pub(super) fn agent_comments(
         &self,
         args: CommentsArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<CommentsAnswer, String> {
-        let (file, kind) = self.review_file(&args.path)?;
+        let (file, kind) = self.review_file(agent, &args.path)?;
         let name = file_name(&file);
         let loaded = store::load(&sidecar_path(&file), &name)
             .map_err(|e| format!("Couldn't read the comments: {e}"))?;
@@ -95,7 +95,7 @@ impl App {
             return Ok(threads_page(Vec::new(), args.from, loaded.read_only));
         };
         let note = if kind == DocKind::Html {
-            self.page_text(&file, agent, budget)
+            self.page_text(&file, &agent.name, budget)
         } else {
             let source = read_source(&file, budget.at_most(self.timings.exists))?;
             NoteText::of_note(&name, &source)
@@ -108,7 +108,7 @@ impl App {
     pub(super) fn agent_reply_to(
         &self,
         args: ReplyArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<ThreadAnswer, String> {
         let (path, id, text, kind) = (
@@ -122,7 +122,7 @@ impl App {
             &id,
             (agent, budget),
             SHOW_PAGE_TO_REPLY,
-            |n| reply_op(n, text, agent, kind),
+            |n| reply_op(n, text, &agent.name, kind),
             |path| AgentRequest::Reply(ReplyArgs { path, ..args }),
         )
     }
@@ -131,7 +131,7 @@ impl App {
     pub(super) fn agent_resolve(
         &self,
         args: ResolveArgs,
-        agent: &str,
+        agent: &Agent,
         budget: Budget,
     ) -> Result<ThreadAnswer, String> {
         let (path, id, text) = (args.path.clone(), args.id.clone(), args.text.clone());
@@ -140,7 +140,7 @@ impl App {
             &id,
             (agent, budget),
             SHOW_PAGE_TO_RESOLVE,
-            |n| resolve_op(n, text, agent),
+            |n| resolve_op(n, text, &agent.name),
             |path| AgentRequest::Resolve(ResolveArgs { path, ..args }),
         )
     }
@@ -152,18 +152,18 @@ impl App {
         &self,
         raw: &str,
         id: &str,
-        (agent, budget): (&str, Budget),
+        (agent, budget): (&Agent, Budget),
         page_first: &str,
         op: impl FnOnce(u32) -> ReviewOp,
         relayed: impl FnOnce(String) -> AgentRequest,
     ) -> Result<ThreadAnswer, String> {
-        let (file, kind) = self.review_file(raw)?;
+        let (file, kind) = self.review_file(agent, raw)?;
         let name = file_name(&file);
         let n = thread_number(id).ok_or("`id` must be a thread's id, like C3.")?;
         let status = if kind == DocKind::Html {
             let window = self.window_showing(&file).ok_or(page_first)?;
             self.check_thread(&file, &name, n)?;
-            self.in_page(&window, relayed(path_string(&file)), agent, budget)?
+            self.in_page(&window, relayed(path_string(&file)), &agent.name, budget)?
                 .1
         } else {
             let source = read_source(&file, budget.at_most(self.timings.exists))?;
@@ -177,7 +177,7 @@ impl App {
         Ok(ThreadAnswer {
             id: thread_id(n),
             status,
-            sidecar: self.sidecar_forms(&file),
+            sidecar: self.sidecar_forms(agent, &file),
         })
     }
 
@@ -190,11 +190,11 @@ impl App {
         self.check_thread(file, &file_name(file), n)
     }
 
-    /// The file an agent's review tool names (`raw`, a Windows or WSL path), and its kind: a note,
-    /// a text file or an HTML page, while review comments are on.
-    fn review_file(&self, raw: &str) -> Result<(PathBuf, DocKind), String> {
+    /// The file an agent's review tool names (`raw`, a Windows or WSL path, from `agent`), and its
+    /// kind: a note, a text file or an HTML page, while review comments are on.
+    fn review_file(&self, agent: &Agent, raw: &str) -> Result<(PathBuf, DocKind), String> {
         self.reviews_on()?;
-        let file = PathBuf::from(self.agent_location(raw)?.windows);
+        let file = PathBuf::from(self.agent_location(agent, raw)?.windows);
         let kind = review_kind(&file)?;
         Ok((file, kind))
     }
@@ -301,9 +301,9 @@ impl App {
         }
     }
 
-    /// The sidecar of `file`, in both forms.
-    fn sidecar_forms(&self, file: &Path) -> PathForms {
-        self.mapper()
+    /// The sidecar of `file`, in both forms, in `agent`'s terms.
+    fn sidecar_forms(&self, agent: &Agent, file: &Path) -> PathForms {
+        self.agent_mapper(agent)
             .literal_forms(&path_string(&sidecar_path(file)))
     }
 }
@@ -338,7 +338,7 @@ mod tests {
         CommentArgs, CommentsArgs, EntryKind, ReplyArgs, ResolveArgs, Target, ThreadFilter,
     };
     use lectern_core::agent::status::{AgentCall, AgentReply};
-    use lectern_core::agent::AgentRequest;
+    use lectern_core::agent::{Agent, AgentRequest};
     use lectern_core::ipc::SettingsPatch;
     use lectern_core::review::ops::{NewAnchor, ReviewOp};
     use lectern_core::review::text::PageBlock;
@@ -420,7 +420,7 @@ mod tests {
             .app
             .agent_answer(
                 comment(&readme, quote("lanternfish survey"), "Which survey?"),
-                "Claude",
+                &claude(),
             )
             .unwrap();
         assert_eq!(first["id"], "C1");
@@ -446,7 +446,7 @@ mod tests {
             .app
             .agent_answer(
                 comment(&readme, Target::Line { line: 1 }, "Which vault?"),
-                "Codex",
+                &Agent::named("Codex"),
             )
             .unwrap();
         assert_eq!(second["id"], "C2");
@@ -463,7 +463,7 @@ mod tests {
         let (f, plan) = shown_plan();
         let answer = f
             .app
-            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), "Claude")
+            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), &claude())
             .unwrap();
         assert_eq!(answer["id"], "C1");
         assert_eq!(f.host.review_changes(), std::slice::from_ref(&plan));
@@ -497,14 +497,14 @@ mod tests {
         let sidecar = f.dir.file("notes/x.review.md", own);
         assert_eq!(
             f.app
-                .agent_answer(comment(&note, quote("Some text"), "Why?"), "Claude"),
+                .agent_answer(comment(&note, quote("Some text"), "Why?"), &claude()),
             Err("This file isn't a Lectern comments file, so Lectern won't change it.".to_owned())
         );
         assert_eq!(fs::read_to_string(&sidecar).unwrap(), own);
         let other = f.dir.file("notes/y.md", "# Y\n");
         assert_eq!(
             f.app
-                .agent_answer(comment(&other, quote("Some text"), "Why?"), "Claude"),
+                .agent_answer(comment(&other, quote("Some text"), "Why?"), &claude()),
             Err("That passage isn't in y.md.".to_owned())
         );
         assert!(!sidecar_of(&other).exists());
@@ -516,7 +516,7 @@ mod tests {
     fn comments_lists_a_notes_threads_by_status() {
         let (f, plan) = shown_plan();
         assert_eq!(
-            f.app.agent_answer(comments(&plan, None), "Claude"),
+            f.app.agent_answer(comments(&plan, None), &claude()),
             Ok(json!({"threads": [], "total": 0}))
         );
         fs::write(
@@ -527,7 +527,10 @@ mod tests {
              ## C3 · resolved · L3\n> Rollout\n\n**You:** Rename?\n",
         )
         .unwrap();
-        let open = f.app.agent_answer(comments(&plan, None), "Claude").unwrap();
+        let open = f
+            .app
+            .agent_answer(comments(&plan, None), &claude())
+            .unwrap();
         assert_eq!(ids(&open), ["C1", "C2"]);
         assert_eq!(open["threads"][1]["state"], "anchored");
         assert_eq!(open["threads"][1]["status"], "question");
@@ -537,12 +540,12 @@ mod tests {
         );
         let question = f
             .app
-            .agent_answer(comments(&plan, Some(ThreadFilter::Question)), "Claude")
+            .agent_answer(comments(&plan, Some(ThreadFilter::Question)), &claude())
             .unwrap();
         assert_eq!(ids(&question), ["C2"]);
         let all = f
             .app
-            .agent_answer(comments(&plan, Some(ThreadFilter::All)), "Claude")
+            .agent_answer(comments(&plan, Some(ThreadFilter::All)), &claude())
             .unwrap();
         assert_eq!(ids(&all), ["C1", "C2", "C3"]);
         assert!(agent_requests(&f.host).is_empty());
@@ -561,7 +564,10 @@ mod tests {
             ));
         }
         fs::write(sidecar_of(&plan), sidecar).unwrap();
-        let first = f.app.agent_answer(comments(&plan, None), "Claude").unwrap();
+        let first = f
+            .app
+            .agent_answer(comments(&plan, None), &claude())
+            .unwrap();
         assert_eq!(first["total"], 40);
         let next = first["next"].as_u64().expect("more to come");
         assert_eq!(ids(&first).len() as u64, next);
@@ -569,7 +575,7 @@ mod tests {
         let next = u32::try_from(next).unwrap();
         let second = f
             .app
-            .agent_answer(comments_from(&plan, None, Some(next)), "Claude")
+            .agent_answer(comments_from(&plan, None, Some(next)), &claude())
             .unwrap();
         assert_eq!(second.get("next"), None);
         let all: Vec<String> = ids(&first).into_iter().chain(ids(&second)).collect();
@@ -583,11 +589,11 @@ mod tests {
     fn reply_and_resolve_append_the_agents_entries() {
         let (f, plan) = shown_plan();
         f.app
-            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), "Claude")
+            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), &claude())
             .unwrap();
         let replied = f
             .app
-            .agent_answer(reply(&plan, "C1", "Because.", None), "Claude")
+            .agent_answer(reply(&plan, "C1", "Because.", None), &claude())
             .unwrap();
         assert_eq!(replied["id"], "C1");
         assert_eq!(replied["status"], "replied");
@@ -599,11 +605,11 @@ mod tests {
             .app
             .agent_answer(
                 reply(&plan, "C1", "Not quite.", Some(EntryKind::Pushback)),
-                "Codex",
+                &Agent::named("Codex"),
             )
             .unwrap();
         assert_eq!(pushed["status"], "pushback");
-        let resolved = f.app.agent_answer(resolve(&plan, "C1"), "Claude").unwrap();
+        let resolved = f.app.agent_answer(resolve(&plan, "C1"), &claude()).unwrap();
         assert_eq!(resolved["status"], "resolved");
         let saved = sidecar_text(&plan);
         assert!(
@@ -623,16 +629,16 @@ mod tests {
         let before = sidecar_text(&plan);
         assert_eq!(
             f.app
-                .agent_answer(reply(&plan, "C9", "Hello?", None), "Claude"),
+                .agent_answer(reply(&plan, "C9", "Hello?", None), &claude()),
             Err("There's no thread C9 in plan.md. Its only thread is C1.".to_owned())
         );
         assert_eq!(
-            f.app.agent_answer(resolve(&plan, "C9"), "Claude"),
+            f.app.agent_answer(resolve(&plan, "C9"), &claude()),
             Err("There's no thread C9 in plan.md. Its only thread is C1.".to_owned())
         );
         let notes = f.dir.file("vault/notes.md", "# Notes\n");
         assert_eq!(
-            f.app.agent_answer(resolve(&notes, "C1"), "Claude"),
+            f.app.agent_answer(resolve(&notes, "C1"), &claude()),
             Err("There's no thread C1 in notes.md: it has no comments yet.".to_owned())
         );
         assert_eq!(sidecar_text(&plan), before);
@@ -663,14 +669,14 @@ mod tests {
         let report = f.dir.file("vault/report.html", REPORT);
         let not_shown = comment(&report, quote("rose steadily"), "Weekly?");
         assert_eq!(
-            f.app.agent_answer(not_shown.clone(), "Claude"),
+            f.app.agent_answer(not_shown.clone(), &claude()),
             Err("Show the page first, then comment.".to_owned())
         );
         let _ = f.state.open_document(&path_string(&report));
         assert_eq!(
             f.app.agent_answer(
                 comment(&report, Target::Line { line: 3 }, "Weekly?"),
-                "Claude"
+                &claude()
             ),
             Err("report.html is an HTML page: give a heading or a quote.".to_owned())
         );
@@ -682,7 +688,7 @@ mod tests {
                 status: CommentStatus::Question,
             }],
         );
-        let answer = f.app.agent_answer(not_shown, "Claude").unwrap();
+        let answer = f.app.agent_answer(not_shown, &claude()).unwrap();
         let (target, call): (EventTarget, AgentCall) = answering.join().unwrap();
         assert_eq!(target, EventTarget::Window("main".to_owned()));
         assert_eq!(call.agent, "Claude");
@@ -713,7 +719,7 @@ mod tests {
         .unwrap();
         let stored = f
             .app
-            .agent_answer(comments(&report, None), "Claude")
+            .agent_answer(comments(&report, None), &claude())
             .unwrap();
         assert_eq!(stored["threads"][0]["state"], "unknown");
         assert_eq!(stored["threads"][0]["startLine"], 3);
@@ -730,7 +736,7 @@ mod tests {
         );
         let live = f
             .app
-            .agent_answer(comments(&report, None), "Claude")
+            .agent_answer(comments(&report, None), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert!(matches!(call.request, AgentRequest::Read(_)), "{call:?}");
@@ -739,7 +745,7 @@ mod tests {
         let sent = agent_requests(&f.host).len();
         assert_eq!(
             f.app
-                .agent_answer(reply(&report, "C4", "Hello?", None), "Claude"),
+                .agent_answer(reply(&report, "C4", "Hello?", None), &claude()),
             Err("There's no thread C4 in report.html. Its only thread is C1.".to_owned())
         );
         assert_eq!(
@@ -757,7 +763,7 @@ mod tests {
         );
         let replied = f
             .app
-            .agent_answer(reply(&report, "C1", "Weekly.", None), "Claude")
+            .agent_answer(reply(&report, "C1", "Weekly.", None), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
         let AgentRequest::Reply(args) = call.request else {
@@ -774,7 +780,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            f.app.agent_answer(resolve(&report, "C1"), "Claude"),
+            f.app.agent_answer(resolve(&report, "C1"), &claude()),
             Err("The page hasn't loaded yet; try again in a moment.".to_owned())
         );
         let (_, call) = answering.join().unwrap();
@@ -793,7 +799,7 @@ mod tests {
             reply(&brief, "C1", "Why?", None),
             resolve(&brief, "C1"),
         ] {
-            assert_eq!(f.app.agent_answer(request, "Claude"), no_pdf);
+            assert_eq!(f.app.agent_answer(request, &claude()), no_pdf);
         }
         f.state.set_settings(SettingsPatch {
             review_comments: Some(false),
@@ -806,7 +812,7 @@ mod tests {
             reply(&plan, "C1", "Why?", None),
             resolve(&plan, "C1"),
         ] {
-            assert_eq!(f.app.agent_answer(request, "Claude"), off);
+            assert_eq!(f.app.agent_answer(request, &claude()), off);
         }
         assert!(!sidecar_of(&plan).exists());
         assert!(agent_requests(&f.host).is_empty());
@@ -822,7 +828,7 @@ mod tests {
         };
         let show = |id: &str| super::super::tests::show_at(&plan, thread(id));
         assert_eq!(
-            f.app.agent_answer(show("C1"), "Claude"),
+            f.app.agent_answer(show("C1"), &claude()),
             Err("There's no thread C1 in plan.md: it has no comments yet.".to_owned())
         );
         assert!(agent_requests(&f.host).is_empty());
@@ -844,7 +850,7 @@ mod tests {
             )
             .unwrap();
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
-        let answer = f.app.agent_answer(show("C1"), "Claude").unwrap();
+        let answer = f.app.agent_answer(show("C1"), &claude()).unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(answer["state"], "shown");
         assert_eq!((answer.get("comments"), answer.get("note")), (None, None));
@@ -854,7 +860,7 @@ mod tests {
         assert_eq!(args.target, Some(thread("C1")));
         assert!(call.places.is_empty());
         assert_eq!(
-            f.app.agent_answer(show("C2"), "Claude"),
+            f.app.agent_answer(show("C2"), &claude()),
             Err("There's no thread C2 in plan.md. Its only thread is C1.".to_owned())
         );
     }
@@ -865,7 +871,7 @@ mod tests {
     fn a_thread_shown_where_comments_are_hidden_says_so() {
         let (f, plan) = shown_plan();
         f.app
-            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), "Claude")
+            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), &claude())
             .unwrap();
         f.state.set_settings(SettingsPatch {
             comments_visible: Some(false),
@@ -878,7 +884,7 @@ mod tests {
             },
         );
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
-        let answer = f.app.agent_answer(show, "Claude").unwrap();
+        let answer = f.app.agent_answer(show, &claude()).unwrap();
         answering.join().unwrap();
         assert_eq!(answer["state"], "shown");
         assert_eq!(answer["comments"], "hidden");
@@ -892,7 +898,7 @@ mod tests {
             .app
             .agent_answer(
                 super::super::tests::show_at(&plan, quote("Roll back")),
-                "Claude",
+                &claude(),
             )
             .unwrap();
         answering.join().unwrap();

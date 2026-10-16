@@ -1641,6 +1641,34 @@ body.resizing {
   font: 11px / 1 var(--code-font);
 }
 
+.prefs-connect {
+  margin-top: 14px;
+}
+
+.prefs-connect-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
+  margin-top: 10px;
+}
+
+.prefs-connect-shell {
+  grid-column: 1 / -1;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.prefs-connect-command {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font: 11.5px / 1.45 var(--code-font);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .prefs-version {
   margin: 0;
   padding-top: 12px;

@@ -1,8 +1,9 @@
 //! The agent pipe's server, in the Lectern window process: `lectern.exe mcp` connects and sends
 //! one request per line, each answered in time (`answer_within`: `ANSWER_WITHIN`, and a `show`'s
 //! wait for the reader), on a thread of its own, by the app (`App::agent_answer`), for the agent
-//! its `hello` named; connections are served side by side. Past `MAX_CONNECTIONS` connections, or
-//! `MAX_IN_FLIGHT` requests on one, the answer is that Lectern is busy.
+//! its `hello` named: who it is, and the WSL distribution it runs in. Connections are served side
+//! by side. Past `MAX_CONNECTIONS` connections, or `MAX_IN_FLIGHT` requests on one, the answer is
+//! that Lectern is busy.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -11,7 +12,7 @@ use std::thread;
 
 use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::{
-    agent_name, answer_within, pipe_name, printable, AgentRequest, Answer, PipeReply, PipeRequest,
+    answer_within, pipe_name, printable, Agent, AgentRequest, Answer, PipeReply, PipeRequest,
     MAX_LINE,
 };
 use serde_json::{json, Value};
@@ -21,8 +22,9 @@ use crate::pipe::Stopper;
 use crate::pipe::{self, Listener, Pipe};
 use crate::state::App;
 
-/// What answers a request, from the agent named (as the reader sees it, `agent_name`).
-pub type Handler = Arc<dyn Fn(AgentRequest, &str) -> Result<Value, String> + Send + Sync>;
+/// What answers a request, from the agent (`Agent`: as the reader sees it, and the WSL
+/// distribution it runs in).
+pub type Handler = Arc<dyn Fn(AgentRequest, &Agent) -> Result<Value, String> + Send + Sync>;
 
 /// The answer when the app takes too long.
 const TOO_SLOW: &str = "Lectern didn't answer in time.";
@@ -180,11 +182,12 @@ fn refuse_connection(pipe: &Pipe) {
 /// Reads the client's requests one line at a time, answering each on a thread of its own, until
 /// it closes or sends something that isn't a request. At most [`MAX_IN_FLIGHT`] are worked on at
 /// once; one past that is answered [`BUSY`] at once. Each is answered for the agent the last
-/// `hello` named.
+/// `hello` named; a `hello` naming a WSL distribution that can't be one is refused, and closes the
+/// connection.
 fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
     let writing = Arc::new(Mutex::new(()));
     let in_flight = Arc::new(AtomicUsize::new(0));
-    let mut agent = agent_name(None);
+    let mut agent = Agent::default();
     let mut lines = LineReader::new(&*pipe, MAX_LINE);
     loop {
         let line = match lines.next_line() {
@@ -206,13 +209,26 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
                 return;
             }
         };
-        if let AgentRequest::Hello { client } = &request {
+        if let AgentRequest::Hello { client, distro } = &request {
+            agent = match Agent::hello(client.as_ref(), distro.as_deref()) {
+                Ok(named) => named,
+                Err(refusal) => {
+                    log::warn!("an agent named a WSL distribution that can't be one; closing it");
+                    reply(&pipe, &writing, id, Err(refusal));
+                    return;
+                }
+            };
             log::info!(
-                "an agent connected: {} {}",
-                printable(&client.name),
-                printable(&client.version)
+                "an agent connected: {}{}",
+                client.as_ref().map_or_else(
+                    || "no name given".to_owned(),
+                    |c| format!("{} {}", printable(&c.name), printable(&c.version))
+                ),
+                agent
+                    .distro
+                    .as_ref()
+                    .map_or_else(String::new, |d| format!(", in WSL's {d}"))
             );
-            agent = agent_name(Some(client));
             reply(
                 &pipe,
                 &writing,
@@ -245,7 +261,7 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
 fn answer_in_time(
     handle: &Handler,
     request: AgentRequest,
-    agent: String,
+    agent: Agent,
     place: Taken,
 ) -> Result<Value, String> {
     let (done, answered) = mpsc::channel();
@@ -330,12 +346,7 @@ mod tests {
         let second = connect(&name).unwrap();
         let mut first_lines = LineReader::new(&first, MAX_LINE);
         let mut second_lines = LineReader::new(&second, MAX_LINE);
-        let hello = AgentRequest::Hello {
-            client: ClientInfo {
-                name: "claude-code".to_owned(),
-                version: "2.1.0".to_owned(),
-            },
-        };
+        let hello = hello_from(None);
         assert!(matches!(
             ask(&first, &mut first_lines, 1, hello),
             Answer::Ok(_)
@@ -362,24 +373,84 @@ mod tests {
     #[test]
     fn requests_are_answered_for_the_agent_hello_named() {
         let name = test_name("named");
-        let _server = serve(&name, Arc::new(|_, agent| Ok(json!(agent)))).unwrap();
+        let _server = serve(&name, Arc::new(|_, agent| Ok(json!(agent.name)))).unwrap();
         let pipe = connect(&name).unwrap();
         let mut lines = LineReader::new(&pipe, MAX_LINE);
         assert_eq!(
             ask(&pipe, &mut lines, 1, AgentRequest::Status),
             Answer::Ok(json!("An agent"))
         );
-        let hello = AgentRequest::Hello {
-            client: ClientInfo {
-                name: "claude-code".to_owned(),
-                version: "2.1.0".to_owned(),
-            },
-        };
+        let hello = hello_from(None);
         assert!(matches!(ask(&pipe, &mut lines, 2, hello), Answer::Ok(_)));
         assert_eq!(
             ask(&pipe, &mut lines, 3, AgentRequest::Status),
             Answer::Ok(json!("Claude"))
         );
+    }
+
+    /// Claude Code's `hello`, from the WSL distribution `distro` when one is given
+    /// (`lectern.exe mcp --distro`).
+    fn hello_from(distro: Option<&str>) -> AgentRequest {
+        AgentRequest::Hello {
+            client: Some(ClientInfo {
+                name: "claude-code".to_owned(),
+                version: "2.1.0".to_owned(),
+            }),
+            distro: distro.map(str::to_owned),
+        }
+    }
+
+    /// The WSL distribution a connection's `hello` named is the agent's, for each request after
+    /// it, on that connection alone; a `hello` without one leaves the agent in none of its own.
+    #[test]
+    fn requests_are_answered_in_the_distro_hello_named() {
+        let name = test_name("distro");
+        let _server = serve(&name, Arc::new(|_, agent| Ok(json!(agent.distro)))).unwrap();
+        let debian = connect(&name).unwrap();
+        let mut debian_lines = LineReader::new(&debian, MAX_LINE);
+        let windows = connect(&name).unwrap();
+        let mut windows_lines = LineReader::new(&windows, MAX_LINE);
+        assert!(matches!(
+            ask(&debian, &mut debian_lines, 1, hello_from(Some("Debian"))),
+            Answer::Ok(_)
+        ));
+        assert!(matches!(
+            ask(&windows, &mut windows_lines, 1, hello_from(None)),
+            Answer::Ok(_)
+        ));
+        assert_eq!(
+            ask(&debian, &mut debian_lines, 2, AgentRequest::Status),
+            Answer::Ok(json!("Debian"))
+        );
+        assert_eq!(
+            ask(&windows, &mut windows_lines, 2, AgentRequest::Status),
+            Answer::Ok(Value::Null)
+        );
+    }
+
+    /// A `hello` naming a distribution that can't be one (it would go into a path) is refused,
+    /// saying why, and its connection closed; nothing it sent is answered by the app.
+    #[test]
+    fn a_hello_with_a_distro_that_cant_be_one_is_refused_and_closed() {
+        let name = test_name("bad-distro");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let handler: Handler = {
+            let asked = Arc::clone(&asked);
+            Arc::new(move |_, _| {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            })
+        };
+        let _server = serve(&name, handler).unwrap();
+        let pipe = connect(&name).unwrap();
+        let mut lines = LineReader::new(&pipe, MAX_LINE);
+        let bad = r"..\..\nas2";
+        assert_eq!(
+            ask(&pipe, &mut lines, 1, hello_from(Some(bad))),
+            Answer::Err(lectern_core::agent::check_distro(bad).unwrap_err())
+        );
+        assert_eq!(lines.next_line().unwrap(), Line::End);
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -536,12 +607,7 @@ mod tests {
         }
         let extra = connect(&name).unwrap();
         let mut lines = LineReader::new(&extra, MAX_LINE);
-        let hello = AgentRequest::Hello {
-            client: ClientInfo {
-                name: "claude-code".to_owned(),
-                version: "2.1.0".to_owned(),
-            },
-        };
+        let hello = hello_from(None);
         assert_eq!(
             ask(&extra, &mut lines, 1, hello),
             Answer::Err(BUSY.to_owned())

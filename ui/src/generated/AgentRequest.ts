@@ -11,6 +11,6 @@ import type { WorkspaceArgs } from "./WorkspaceArgs";
 
 /**
  * A request from an agent, tagged by `tool`: the nine tools, and `hello`, which names the client
- * once a connection opens.
+ * and the WSL distribution it runs in (`lectern.exe mcp --distro`) once a connection opens.
  */
-export type AgentRequest = { "tool": "hello", client: ClientInfo, } | { "tool": "status" } | { "tool": "show" } & ShowArgs | { "tool": "workspace" } & WorkspaceArgs | { "tool": "highlight" } & HighlightArgs | { "tool": "read" } & ReadArgs | { "tool": "comment" } & CommentArgs | { "tool": "comments" } & CommentsArgs | { "tool": "reply" } & ReplyArgs | { "tool": "resolve" } & ResolveArgs;
+export type AgentRequest = { "tool": "hello", client?: ClientInfo, distro?: string, } | { "tool": "status" } | { "tool": "show" } & ShowArgs | { "tool": "workspace" } & WorkspaceArgs | { "tool": "highlight" } & HighlightArgs | { "tool": "read" } & ReadArgs | { "tool": "comment" } & CommentArgs | { "tool": "comments" } & CommentsArgs | { "tool": "reply" } & ReplyArgs | { "tool": "resolve" } & ResolveArgs;

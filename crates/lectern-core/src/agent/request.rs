@@ -6,12 +6,19 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// A request from an agent, tagged by `tool`: the nine tools, and `hello`, which names the client
-/// once a connection opens.
+/// and the WSL distribution it runs in (`lectern.exe mcp --distro`) once a connection opens.
 #[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
 #[serde(tag = "tool", rename_all = "camelCase")]
 #[ts(export)]
 pub enum AgentRequest {
-    Hello { client: ClientInfo },
+    Hello {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        client: Option<ClientInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        distro: Option<String>,
+    },
     Status,
     Show(ShowArgs),
     Workspace(WorkspaceArgs),

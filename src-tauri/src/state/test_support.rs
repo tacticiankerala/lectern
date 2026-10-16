@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lectern_core::agent::show::FocusStep;
+use lectern_core::agent::Agent;
 use lectern_core::ipc::{AgentFocus, FrameKey, OpenResult, PageLoads, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
@@ -408,6 +409,11 @@ fn fixture_full(
 
 pub(super) fn fixture(profile: Profile, host: FakeHost) -> Fixture {
     fixture_in(TempDir::new(), profile, host)
+}
+
+/// Claude Code's agent, as the reader sees it, in no WSL distribution of its own.
+pub(super) fn claude() -> Agent {
+    Agent::named("Claude")
 }
 
 pub(super) fn wait_until(what: &str, f: impl Fn() -> bool) {

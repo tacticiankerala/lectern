@@ -2,11 +2,12 @@
 // for a note or text file (the heading path and line at the top of the view, and the selection), an
 // HTML page (from its session), a PDF and nothing; the round trip through the app; and `show`,
 // which asks first with the bar when the window shows another file, settled once the reader's
-// answer has landed, or as the window leaves; and the agent settings in Preferences. Then targets:
+// answer has landed, or as the window leaves; and the agent settings in Preferences, with the
+// commands that connect Claude Code. Then targets:
 // where core found them in a note, an HTML page's found by the window, a PDF's page, with Back
 // after a move within the file on screen, and a window that started for an agent; the agent's
 // highlights; and an HTML page's text for `read`.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeBackend, type FakeOptions, type FakeWorkspace } from "../dev/backend-fake";
 import {
   Agent,
@@ -607,6 +608,186 @@ describe("Preferences › Agents", () => {
     fake.settingsElsewhere({ agentOpens: "ask", agentFocus: "raise" });
     expect(opens.map((c) => c.checked)).toEqual([true, false]);
     expect(focus.map((c) => c.checked)).toEqual([false, true, false]);
+  });
+
+  describe("Connect Claude Code", () => {
+    let writeText: ReturnType<typeof vi.fn<(text: string) => Promise<void>>>;
+
+    beforeEach(() => {
+      writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(navigator, "clipboard");
+    });
+
+    /** The Agents section of Preferences, opened. */
+    async function agentsSection(app: App): Promise<HTMLElement> {
+      expect(app.actions.run("preferences")).toBe(true);
+      return vi.waitFor(() => {
+        const found = [...document.querySelectorAll<HTMLElement>(".prefs-section")].find(
+          (s) => s.querySelector("h4")?.textContent === "Agents",
+        );
+        if (!found) throw new Error("no Agents section");
+        return found;
+      });
+    }
+
+    /** The row of the command for `shell`. */
+    function row(section: HTMLElement, shell: "wsl" | "windows"): HTMLElement {
+      const found = section.querySelector<HTMLElement>(`.prefs-connect-row[data-shell="${shell}"]`);
+      if (!found) throw new Error(`no ${shell} row`);
+      return found;
+    }
+
+    /** The command shown for `shell`, once it shows. */
+    function command(section: HTMLElement, shell: "wsl" | "windows"): string {
+      const shown = row(section, shell);
+      if (shown.hidden) throw new Error(`the ${shell} command is hidden`);
+      return shown.querySelector("code")?.textContent ?? "";
+    }
+
+    function copy(section: HTMLElement, shell: "wsl" | "windows"): void {
+      row(section, shell).querySelector<HTMLButtonElement>("button")?.click();
+    }
+
+    function lastToast(): string {
+      return document.querySelector("#lx-toasts .toast:last-child")?.textContent ?? "";
+    }
+
+    const WSL_COMMAND = `claude mcp add --scope user lectern -- '/mnt/c/Users/me/AppData/Local/Lectern/lectern.exe' mcp --distro "$WSL_DISTRO_NAME"`;
+    const WINDOWS_COMMAND = `claude mcp add --scope user lectern -- "C:\\Users\\me\\AppData\\Local\\Lectern\\lectern.exe" mcp`;
+
+    it("gives the WSL and Windows commands for this exe, each with a Copy button", async () => {
+      const { app } = await launched();
+      const section = await agentsSection(app);
+      const connect = section.querySelector<HTMLElement>(".prefs-connect");
+      expect(connect?.getAttribute("aria-label")).toBe("Connect Claude Code");
+      expect(await vi.waitFor(() => command(section, "wsl"))).toBe(WSL_COMMAND);
+      expect(command(section, "windows")).toBe(WINDOWS_COMMAND);
+      expect(row(section, "wsl").querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Copy the WSL command",
+      );
+      expect(row(section, "windows").querySelector("button")?.getAttribute("aria-label")).toBe(
+        "Copy the Windows command",
+      );
+      expect(section.querySelector<HTMLElement>(".prefs-connect-no-wsl")?.hidden).toBe(true);
+      expect(section.querySelector<HTMLElement>(".prefs-connect-portable")?.hidden).toBe(true);
+
+      copy(section, "wsl");
+      await vi.waitFor(() => {
+        expect(lastToast()).toBe("Copied the command");
+      });
+      expect(writeText).toHaveBeenLastCalledWith(WSL_COMMAND);
+      copy(section, "windows");
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenLastCalledWith(WINDOWS_COMMAND);
+      });
+      // A clipboard that refuses says so.
+      writeText.mockRejectedValueOnce(new Error("denied"));
+      copy(section, "wsl");
+      await vi.waitFor(() => {
+        expect(lastToast()).toBe("Couldn't copy to the clipboard");
+      });
+    });
+
+    it("leaves out the WSL command, saying why, when WSL can't reach this exe", async () => {
+      const { fake, app } = await launched();
+      fake.exe = { windows: "\\\\nas\\share\\apps\\lectern.exe", wsl: null };
+      const section = await agentsSection(app);
+      expect(await vi.waitFor(() => command(section, "windows"))).toBe(
+        `claude mcp add --scope user lectern -- "\\\\nas\\share\\apps\\lectern.exe" mcp`,
+      );
+      expect(row(section, "wsl").hidden).toBe(true);
+      const why = section.querySelector<HTMLElement>(".prefs-connect-no-wsl");
+      expect(why?.hidden).toBe(false);
+      expect(why?.textContent).toBe(
+        "There's no WSL command: this copy of Lectern isn't on a drive WSL mounts.",
+      );
+    });
+
+    it("quotes a WSL path with an apostrophe for the shell", async () => {
+      const { fake, app } = await launched();
+      fake.exe = {
+        windows: "C:\\Users\\me\\O'Brien's apps\\lectern.exe",
+        wsl: "/mnt/c/Users/me/O'Brien's apps/lectern.exe",
+      };
+      const section = await agentsSection(app);
+      expect(await vi.waitFor(() => command(section, "wsl"))).toBe(
+        `claude mcp add --scope user lectern -- '/mnt/c/Users/me/O'\\''Brien'\\''s apps/lectern.exe' mcp --distro "$WSL_DISTRO_NAME"`,
+      );
+      expect(command(section, "windows")).toBe(
+        `claude mcp add --scope user lectern -- "C:\\Users\\me\\O'Brien's apps\\lectern.exe" mcp`,
+      );
+    });
+
+    const POWERSHELL_HINT =
+      "Run this one in PowerShell: the path holds a character Command Prompt would change.";
+
+    // Inside double quotes PowerShell expands `$name` and backticks, and Command Prompt `%NAME%`,
+    // so a path holding one is quoted for PowerShell alone, where single quotes keep it as it is.
+    it.each([
+      {
+        holding: "nothing either shell changes",
+        exe: "C:\\Tools\\Lectern 2\\lectern.exe",
+        shell: "Windows",
+        command: `claude mcp add --scope user lectern -- "C:\\Tools\\Lectern 2\\lectern.exe" mcp`,
+      },
+      {
+        holding: "a $",
+        exe: "C:\\Tools\\$draft\\lectern.exe",
+        shell: "PowerShell",
+        command: `claude mcp add --scope user lectern -- 'C:\\Tools\\$draft\\lectern.exe' mcp`,
+      },
+      {
+        holding: "a backtick",
+        exe: "C:\\Tools\\`n\\lectern.exe",
+        shell: "PowerShell",
+        command: "claude mcp add --scope user lectern -- 'C:\\Tools\\`n\\lectern.exe' mcp",
+      },
+      {
+        holding: "a %",
+        exe: "C:\\Tools\\%TEMP%\\lectern.exe",
+        shell: "PowerShell",
+        command: `claude mcp add --scope user lectern -- 'C:\\Tools\\%TEMP%\\lectern.exe' mcp`,
+      },
+      {
+        holding: "a ' and a $",
+        exe: "C:\\Tools\\O'Brien's $apps\\lectern.exe",
+        shell: "PowerShell",
+        command: `claude mcp add --scope user lectern -- 'C:\\Tools\\O''Brien''s $apps\\lectern.exe' mcp`,
+      },
+    ])(
+      "names the Windows command's shell for a path holding $holding",
+      async ({ exe, shell, command: expected }) => {
+        const { fake, app } = await launched();
+        fake.exe = { windows: exe, wsl: null };
+        const section = await agentsSection(app);
+        expect(await vi.waitFor(() => command(section, "windows"))).toBe(expected);
+        const windows = row(section, "windows");
+        expect(windows.querySelector(".prefs-connect-shell")?.textContent).toBe(shell);
+        expect(windows.querySelector("button")?.getAttribute("aria-label")).toBe(
+          `Copy the ${shell} command`,
+        );
+        const hint = section.querySelector<HTMLElement>(".prefs-connect-powershell");
+        expect(hint?.hidden).toBe(shell !== "PowerShell");
+        expect(hint?.textContent).toBe(POWERSHELL_HINT);
+        // The hint sits under the row it is about.
+        expect(windows.nextElementSibling).toBe(hint);
+      },
+    );
+
+    it("tells a portable copy to stay where it is", async () => {
+      const { app } = await launched(A, { portable: true });
+      const section = await agentsSection(app);
+      await vi.waitFor(() => command(section, "windows"));
+      const note = section.querySelector<HTMLElement>(".prefs-connect-portable");
+      expect(note?.hidden).toBe(false);
+      expect(note?.textContent).toBe(
+        "This is a portable copy: keep it where it is, or register again after moving it.",
+      );
+    });
   });
 });
 

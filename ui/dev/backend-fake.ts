@@ -26,7 +26,8 @@
 // follows.
 //
 // Two WSL distributions are installed, Ubuntu (Windows' default) and Debian (`wslDistros`), for
-// the *WSL distribution* setting in Preferences.
+// the *WSL distribution* setting in Preferences. Lectern is installed on a drive WSL mounts
+// (`exe`, unless `FakeOptions.portable`), for the commands Preferences gives to connect Claude Code.
 //
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
@@ -63,6 +64,7 @@ import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
 import type { PageBlock } from "../src/generated/PageBlock";
+import type { PathForms } from "../src/generated/PathForms";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
 import type { ReviewOp } from "../src/generated/ReviewOp";
@@ -125,6 +127,8 @@ export interface FakeOptions {
   primary?: boolean;
   /** Where an agent's `show` takes the reader in `initial`, opened for it as the window started. */
   agentTarget?: ShowAt;
+  /** Whether this copy of Lectern is portable; false when not given. */
+  portable?: boolean;
 }
 
 /** A workspace in the fake's model. */
@@ -608,6 +612,11 @@ export class FakeBackend implements Backend, FakeControl {
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   /** What `listWslDistros` answers: Windows' default and the installed distributions. */
   wslDistros: WslDistros = { default: "Ubuntu", installed: ["Debian", "Ubuntu"] };
+  /** What `lecternExe` answers: an installed copy's path, on a drive WSL mounts. */
+  exe: PathForms = {
+    windows: "C:\\Users\\me\\AppData\\Local\\Lectern\\lectern.exe",
+    wsl: "/mnt/c/Users/me/AppData/Local/Lectern/lectern.exe",
+  };
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
   /** The kind of each document that isn't Markdown, by path key. */
   private readonly kinds = new Map<string, DocKind>();
@@ -699,7 +708,7 @@ export class FakeBackend implements Backend, FakeControl {
       recent: this.recent,
       initial: initial === undefined ? null : this.open(initial),
       version: "0.0.0-fake",
-      portable: false,
+      portable: this.options.portable ?? false,
       startupNotice: null,
       workspace: current ? this.summary(current) : null,
       workspaces: this.summaries(),
@@ -1564,6 +1573,10 @@ export class FakeBackend implements Backend, FakeControl {
 
   listWslDistros(): Promise<WslDistros> {
     return Promise.resolve(structuredClone(this.wslDistros));
+  }
+
+  lecternExe(): Promise<PathForms> {
+    return Promise.resolve(structuredClone(this.exe));
   }
 
   checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
