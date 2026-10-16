@@ -140,11 +140,12 @@ impl PathMapper {
             .map(|(_, linux, rest)| linux_join(linux, rest))
     }
 
-    /// Both forms of `path`, an exact path on this machine (the open file, a tree row, a resolved
-    /// link's target), for pasting into a terminal. Nothing is trimmed or dropped, since a `#` or
-    /// `:12` there is part of a name, and no index is consulted, so the file is never swapped for
-    /// another. The Windows form is `path` itself when it is a Windows path, else where
-    /// [`PathMapper::map`] puts it without an index; the WSL form is [`PathMapper::to_wsl`] of that.
+    /// Both forms of `path`, an exact path on this machine, such as a file agent control reports
+    /// in its status: Windows for Windows tools, WSL for an agent in a WSL shell. Nothing is
+    /// trimmed or dropped, since a `#` or `:12` there is part of a name, and no index is consulted,
+    /// so the file is never swapped for another. The Windows form is `path` itself when it is a
+    /// Windows path, else where [`PathMapper::map`] puts it without an index; the WSL form is
+    /// [`PathMapper::to_wsl`] of that.
     pub fn literal_forms(&self, path: &str) -> PathForms {
         let windows = if is_windows_absolute(path) {
             Some(PathBuf::from(path))

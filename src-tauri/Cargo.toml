@@ -15,6 +15,9 @@ dirs = "7"
 lectern-core = { path = "../crates/lectern-core" }
 log = { version = "0.4.34", features = ["std"] }
 percent-encoding = "2.3.2"
+# The updater's own HTTP client, so `updater.rs` can name the `ClientBuilder` it configures (and its
+# tests get a real timeout error): no new crates. Keep it on the updater's version.
+reqwest = { version = "0.13", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 # `generate_context!` embeds the `plugins` config as `serde_json` values.
 serde_json = "1.0.151"
@@ -27,10 +30,6 @@ tauri-plugin-updater = { version = "2.13.1", default-features = false, features 
   "native-tls",
   "system-proxy",
 ] }
-
-[dev-dependencies]
-# The updater's own HTTP client, for a real timeout error in `updater.rs`'s tests: no new crates.
-reqwest = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # WebView2's own API, for the keys pressed inside a frame (`accelerators.rs`): the version Tauri's

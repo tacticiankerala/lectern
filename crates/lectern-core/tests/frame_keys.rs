@@ -153,8 +153,9 @@ fn in_a_page_lecterns_shortcuts_are_handled_and_esc_goes_through_too() {
         (vk('C'), CTRL),
         (vk('V'), CTRL),
         (vk('0'), CTRL_SHIFT),
-        // Copied a path in Windows or WSL form in v0.3.1 to v0.4.2; free since.
+        // Copied the Windows path in v0.4.1 to v0.4.2; free since.
         (vk('W'), CTRL_SHIFT),
+        // Copied the WSL path in v0.3.1 to v0.4.0; free since.
         (vk('L'), CTRL_SHIFT),
         (VK_LEFT, NONE),
         (VK_F5, CTRL),

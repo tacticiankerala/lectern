@@ -92,10 +92,11 @@ describe("actionFor", () => {
     expect(actionFor(key({ key: "ArrowLeft", altKey: true, ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "ArrowLeft", altKey: true, shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "F5", ctrlKey: true }))).toBeNull();
-    // Ctrl+C is the browser's own copy; Ctrl+Shift+W and Ctrl+Shift+L copied a path in Windows or
-    // WSL form in v0.3.1 to v0.4.2.
+    // Ctrl+C is the browser's own copy.
     expect(actionFor(key({ key: "c", ctrlKey: true }))).toBeNull();
+    // Copied the Windows path in v0.4.1 to v0.4.2.
     expect(actionFor(key({ key: "W", ctrlKey: true, shiftKey: true }))).toBeNull();
+    // Copied the WSL path in v0.3.1 to v0.4.0.
     expect(actionFor(key({ key: "L", ctrlKey: true, shiftKey: true }))).toBeNull();
     expect(actionFor(key({ key: "w", ctrlKey: true }))).toBeNull();
     expect(actionFor(key({ key: "b", ctrlKey: true, shiftKey: true }))).toBeNull();
