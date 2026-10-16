@@ -66,6 +66,30 @@ pub enum HtmlPages {
     Static,
 }
 
+/// What happens when an agent opens a file in a window already showing another: the window asks
+/// the reader first (`ask`), or switches at once (`switch`).
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum AgentOpens {
+    #[default]
+    Ask,
+    Switch,
+}
+
+/// What happens to a window an agent shows something in: it comes to the front with the focus
+/// (`front`), comes forward without taking the focus (`raise`), or only flashes on the taskbar
+/// (`none`).
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum AgentFocus {
+    #[default]
+    Front,
+    Raise,
+    None,
+}
+
 /// A user prefix mapping for absolute paths in notes, such as `/home/me/shared` → `S:\Shared`.
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +142,10 @@ pub struct Settings {
     /// The WSL distribution a link to a Linux path opens in (`\\wsl.localhost\<name>\…`); `None`
     /// for Windows' default.
     pub wsl_distro: Option<String>,
+    /// Whether an agent's open asks the reader first (by default) or switches at once.
+    pub agent_opens: AgentOpens,
+    /// How a window an agent shows something in comes forward (to the front, by default).
+    pub agent_focus: AgentFocus,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -150,6 +178,8 @@ pub struct SettingsPatch {
     pub recent_in_menu: Option<u8>,
     /// A distribution's name, or `""` for Windows' default: `null` here leaves it as it is.
     pub wsl_distro: Option<String>,
+    pub agent_opens: Option<AgentOpens>,
+    pub agent_focus: Option<AgentFocus>,
 }
 
 /// The WSL distributions Preferences offers for the *WSL distribution* setting.

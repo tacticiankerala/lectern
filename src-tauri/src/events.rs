@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use lectern_core::agent::AgentCall;
 use lectern_core::ipc::{
     DocChanged, FrameKey, LibraryPayload, OpenRequest, PageLoads, SettingsSnapshot,
 };
@@ -35,6 +36,9 @@ pub const CLOSE_REQUESTED: &str = "close-requested";
 pub const PAGE_LOADS: &str = "page-loads";
 /// One of Lectern's shortcuts was pressed while the focus was inside a frame (`FrameKey`).
 pub const FRAME_KEY: &str = "frame-key";
+/// An agent asks the window's UI for something only it knows, such as what it shows
+/// (`AgentCall`); the UI answers with the command `agent_reply`.
+pub const AGENT_REQUEST: &str = "agent-request";
 
 /// Which windows an event is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +65,7 @@ pub enum UiEvent {
     CloseRequested,
     PageLoads(PageLoads),
     FrameKey(FrameKey),
+    AgentRequest(AgentCall),
 }
 
 /// What the app state needs from Tauri.
@@ -98,6 +103,7 @@ impl Host for TauriHost {
             UiEvent::CloseRequested => emit(app, target, CLOSE_REQUESTED, ()),
             UiEvent::PageLoads(loads) => emit(app, target, PAGE_LOADS, loads),
             UiEvent::FrameKey(key) => emit(app, target, FRAME_KEY, key),
+            UiEvent::AgentRequest(call) => emit(app, target, AGENT_REQUEST, call),
         }
     }
 

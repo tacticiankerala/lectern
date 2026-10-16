@@ -12,9 +12,9 @@
 //!
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
 //! `lifecycle`, `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`,
-//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus`, `update_check` and
-//! `page_opens`, and a window's `workspace`, `layout`, `placement`, `watch` and `frame_focus`,
-//! are leaves: nothing else is locked while one is held.
+//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus`, `update_check`,
+//! `page_opens` and `agent_calls`, and a window's `workspace`, `layout`, `placement`, `watch`
+//! and `frame_focus`, are leaves: nothing else is locked while one is held.
 //! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
 //! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
 //! with nothing else held, and stays held while the grammars' release is told, which then may
@@ -23,6 +23,7 @@
 //! settings holds, and read under its read lock with the settings it stamps, so a snapshot's
 //! settings and revision agree.
 
+mod agent;
 mod assets;
 mod doc;
 mod follow;
@@ -81,6 +82,7 @@ pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
 pub use self::windows::is_folder;
 
+use self::agent::AgentCalls;
 use self::assets::AssetScope;
 use self::grammars::AppGrammars;
 use self::library::Library;
@@ -239,6 +241,8 @@ pub struct App {
     quitting: AtomicBool,
     /// Second launches, routed one at a time on a thread of their own.
     launches: Sender<Option<OpenRequest>>,
+    /// Agents' requests sent to windows' UIs, waiting for their answers.
+    agent_calls: AgentCalls,
 }
 
 impl App {
@@ -311,6 +315,7 @@ impl App {
             update_check: Mutex::new(UpdateCheck::Unclaimed),
             quitting: AtomicBool::new(false),
             launches: spawn_launcher(weak.clone()),
+            agent_calls: AgentCalls::default(),
         });
         if migrated || opened {
             app.saver.workspaces(&read(&app.workspaces));

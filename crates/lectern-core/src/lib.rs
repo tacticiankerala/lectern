@@ -1,5 +1,6 @@
 //! Lectern's core logic. Pure Rust with no Tauri dependency, so it builds and tests on Linux.
 
+pub mod agent;
 pub mod cache;
 pub mod cli;
 pub mod frame_keys;

@@ -1,0 +1,527 @@
+---
+source: crates/lectern-core/tests/agent.rs
+expression: tools
+---
+[
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Tells what each Lectern window shows: its workspace, the file and its kind, the heading and line at the top of the view, the user's selection and any request waiting on their answer, with the closed workspaces and the agent settings. Call it first to see what the user is reading, before showing or highlighting anything.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "status",
+    "title": "Lectern status"
+  },
+  {
+    "description": "Opens a file in Lectern, in the window of the workspace that holds it or of the one named, scrolled to a heading, line, quote, PDF page or comment thread when given. When that window already shows another file, Lectern may ask the user first and answer `asked`, and `wait` waits that many seconds for their answer.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "newWindow": {
+          "description": "Show it in a new window, unless its workspace's window is open already.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The file to show. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "heading": {
+                  "description": "A heading's text, or its path: Plan › Rollout.",
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "heading"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "line": {
+                  "description": "A line of the file's source, from 1.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "line"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "prefix": {
+                  "description": "Text just before the passage, to tell apart two places it appears.",
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                "quote": {
+                  "description": "The passage, word for word, at most 2,000 characters.",
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "suffix": {
+                  "description": "Text just after the passage.",
+                  "maxLength": 2000,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "quote"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "page": {
+                  "description": "A PDF's page, from 1.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "page"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "comment": {
+                  "description": "The thread's id: C3.",
+                  "pattern": "^C[1-9][0-9]*$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "comment"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Where to scroll to: a heading, a line, a quote, a PDF page or a comment thread."
+        },
+        "wait": {
+          "description": "Seconds to wait for the user's answer when Lectern asks them first, up to 60; 0, the default, answers at once.",
+          "maximum": 60,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace": {
+          "description": "The workspace to show it in, by name; by default the one whose folders hold it.",
+          "maxLength": 60,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "show",
+    "title": "Show a file"
+  },
+  {
+    "description": "Switches to a Lectern workspace by name, bringing its window forward or reopening it, or creates a new one holding the given folders in a new window. It never changes the workspace an open window shows.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "switch brings the workspace's window forward, reopening it if it is closed; create makes a new workspace.",
+          "enum": [
+            "switch",
+            "create"
+          ],
+          "type": "string"
+        },
+        "folders": {
+          "description": "The folders a new workspace holds, for create only: each a Windows path (S:\\Notes\\Garden) or a WSL path (/mnt/s/Notes/Garden).",
+          "items": {
+            "description": "A folder. A Windows path (S:\\Notes\\My Vault) or a WSL path (/mnt/s/Notes/My Vault).",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "name": {
+          "description": "The workspace's name: one that exists, to switch to it, or a new one.",
+          "maxLength": 60,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "workspace",
+    "title": "Switch or create a workspace"
+  },
+  {
+    "annotations": {
+      "idempotentHint": true
+    },
+    "description": "Highlights passages, by heading, line, quote or PDF page, in a file a Lectern window shows, after removing your earlier highlights when `clear` is set. Highlights are temporary: they are never saved and go when the user leaves the file.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "clear": {
+          "description": "Remove your earlier highlights first; with no targets, only that.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "The file to highlight in, which a window must show; by default the file shown. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "targets": {
+          "description": "The passages to highlight, at most 20.",
+          "items": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "heading": {
+                    "description": "A heading's text, or its path: Plan › Rollout.",
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "heading"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "line": {
+                    "description": "A line of the file's source, from 1.",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "line"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "prefix": {
+                    "description": "Text just before the passage, to tell apart two places it appears.",
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "quote": {
+                    "description": "The passage, word for word, at most 2,000 characters.",
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "suffix": {
+                    "description": "Text just after the passage.",
+                    "maxLength": 2000,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "quote"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "page": {
+                    "description": "A PDF's page, from 1.",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "page"
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "A passage."
+          },
+          "maxItems": 20,
+          "type": "array"
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "type": "object"
+    },
+    "name": "highlight",
+    "title": "Highlight passages"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Reads the text of a file a Lectern window shows, as rendered (an HTML page's after its scripts ran), in blocks with their lines and headings. A long text comes in parts: when the answer is `truncated`, call again with `from` where it stopped.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "description": "The character to start from; 0 by default.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max": {
+          "description": "The most characters to return, up to 40,000; 20,000 by default.",
+          "maximum": 40000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file to read, which a window must show; by default the file shown. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "read",
+    "title": "Read the rendered text"
+  },
+  {
+    "description": "Starts a review comment thread on a passage of a note, text file or HTML page, saved in its review sidecar under your name. Its kind is question (the default), reply or pushback.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "question (the default), reply or pushback.",
+          "enum": [
+            "question",
+            "reply",
+            "pushback"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "description": "The note, text file or HTML page to comment on. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "heading": {
+                  "description": "A heading's text, or its path: Plan › Rollout.",
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "heading"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "line": {
+                  "description": "A line of the file's source, from 1.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "line"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "prefix": {
+                  "description": "Text just before the passage, to tell apart two places it appears.",
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                "quote": {
+                  "description": "The passage, word for word, at most 2,000 characters.",
+                  "maxLength": 2000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "suffix": {
+                  "description": "Text just after the passage.",
+                  "maxLength": 2000,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "quote"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "The passage the comment is about: a quote, a line or a heading."
+        },
+        "text": {
+          "description": "What you have to say, in Markdown.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "target",
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "comment",
+    "title": "Start a comment"
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Lists a file's review comment threads as Lectern's Comments tab shows them: each thread's id, status, where it is anchored now, its quote and its entries. By default it leaves out resolved and dismissed threads.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "The file whose threads to list. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "description": "Which threads to list; by default every thread that isn't resolved or dismissed.",
+          "enum": [
+            "open",
+            "question",
+            "pushback",
+            "resolved",
+            "all"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "comments",
+    "title": "List comments"
+  },
+  {
+    "description": "Adds your reply to a review comment thread, given by its id (C1, C2 and so on). Its kind is reply (the default), question or pushback.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The thread's id: C3.",
+          "pattern": "^C[1-9][0-9]*$",
+          "type": "string"
+        },
+        "kind": {
+          "description": "reply (the default), question or pushback.",
+          "enum": [
+            "reply",
+            "question",
+            "pushback"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "description": "The file the thread is on. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "description": "Your reply, in Markdown.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "id",
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "reply",
+    "title": "Reply to a comment"
+  },
+  {
+    "annotations": {
+      "idempotentHint": true
+    },
+    "description": "Resolves a review comment thread, given by its id, with an optional closing note. A later reply from the user opens it again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "The thread's id: C3.",
+          "pattern": "^C[1-9][0-9]*$",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file the thread is on. A Windows path (S:\\Notes\\plan.md) or a WSL path (/mnt/s/Notes/plan.md).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "description": "A closing note; \"Resolved.\" by default.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "resolve",
+    "title": "Resolve a comment"
+  }
+]

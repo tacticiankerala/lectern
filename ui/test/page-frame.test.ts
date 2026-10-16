@@ -351,6 +351,29 @@ describe("a page's session", () => {
     expect(host.scrolled).toHaveBeenCalled();
   });
 
+  it("tells the heading the view's top is under, after the headings it sits under", () => {
+    const { page } = session();
+    expect(page.headingPath()).toEqual([]);
+    page.receive({
+      ...READY,
+      headings: [
+        ...READY.headings,
+        { level: 2, text: "Costs", id: "costs", offset: 41 },
+        { level: 3, text: "Travel", id: "travel", offset: 47 },
+      ],
+      blocks: [
+        ...READY.blocks,
+        { text: "Costs", headingLevel: 2 },
+        { text: "Travel", headingLevel: 3 },
+      ],
+    });
+    expect(page.headingPath()).toEqual(["Weekly report"]);
+    page.receive({ lx: 1, type: "scroll", scroll: { fraction: 0.4, top: 2 } });
+    expect(page.headingPath()).toEqual(["Weekly report", "Results"]);
+    page.receive({ lx: 1, type: "scroll", scroll: { fraction: 0.9, top: 4 } });
+    expect(page.headingPath()).toEqual(["Weekly report", "Costs", "Travel"]);
+  });
+
   it("keeps the page's blocks, as core takes them, and its selection, and says when they change", () => {
     const { page, host } = session();
     page.receive(READY);

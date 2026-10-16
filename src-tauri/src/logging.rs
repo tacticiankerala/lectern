@@ -37,6 +37,30 @@ pub fn init_logging(dir: &Path) {
     }));
 }
 
+/// Sends the `log` records of `lectern.exe mcp` to stderr, where an MCP client keeps them: its
+/// stdout carries the protocol alone.
+pub fn init_stderr_logging() {
+    if log::set_boxed_logger(Box::new(StderrLog)).is_ok() {
+        log::set_max_level(LevelFilter::Info);
+    }
+}
+
+struct StderrLog;
+
+impl log::Log for StderrLog {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("lectern mcp: {} {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 /// A log file of at most 1 MB that is rotated once: when full it becomes `lectern.log.1`,
 /// replacing the previous one, and a new file starts.
 struct FileLog {

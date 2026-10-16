@@ -419,6 +419,21 @@ export class PageFrame implements FindPage, PageSurface {
     return this.starts[this.topBlock] ?? 0;
   }
 
+  /**
+   * The heading the view's top is under, after the headings it sits under, outermost first; empty
+   * above the first heading.
+   */
+  headingPath(): string[] {
+    const top = this.top;
+    const path: PageHeading[] = [];
+    for (const heading of this.headings) {
+      if (heading.offset > top) break;
+      while (path.length > 0 && (path[path.length - 1]?.level ?? 0) >= heading.level) path.pop();
+      path.push(heading);
+    }
+    return path.map((h) => h.text);
+  }
+
   /** A message the frame's own window posted (frame-view.ts checked where it came from). */
   receive(data: unknown): void {
     const message = parseBridgeMessage(data);

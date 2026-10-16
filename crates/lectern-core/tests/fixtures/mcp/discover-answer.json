@@ -1,0 +1,23 @@
+{
+  "jsonrpc": "2.0",
+  "id": "discover-1",
+  "result": {
+    "resultType": "complete",
+    "supportedVersions": [
+      "2026-07-28",
+      "2025-11-25",
+      "2025-06-18"
+    ],
+    "capabilities": {
+      "tools": {}
+    },
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "lectern",
+        "title": "Lectern",
+        "version": "{version}"
+      }
+    },
+    "instructions": "Lectern is the Markdown reader the user reads notes, text files, HTML pages and PDFs in on Windows. Use it when the user refers to what they are reading, or when showing them a passage beats quoting it: status tells what each window shows and what they have selected; show opens a file at a heading, line, quote or page; workspace switches to or creates a workspace; highlight points at passages; read gives a file's text as rendered; comment, comments, reply and resolve work its review threads. Paths may be Windows paths (S:\\Notes\\plan.md, \\\\nas\\share\\plan.md) or WSL paths (/mnt/s/Notes/plan.md, /home/me/plan.md), and every path in a result comes in both forms."
+  }
+}

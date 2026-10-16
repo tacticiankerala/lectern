@@ -1,6 +1,7 @@
 //! Mapping paths written in notes to files on this machine, and local files to asset and page
 //! URLs.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -165,6 +166,43 @@ impl PathMapper {
             windows: windows.map(|path| path.to_string_lossy().into_owned()),
         }
     }
+}
+
+/// Where the path is in `raw`: without surrounding whitespace, quotes or backticks, and without a
+/// trailing `#anchor`, `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name
+/// with an extension (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs`
+/// keep theirs.
+fn bare_span(raw: &str) -> Range<usize> {
+    let path = raw.trim_start_matches(quoted);
+    let start = raw.len() - path.len();
+    let path = path.trim_end_matches(quoted);
+    let path = match path.rsplit_once('#') {
+        Some((file, anchor)) if !anchor.contains(['/', '\\']) && has_extension(file) => file,
+        _ => path,
+    };
+    // What `split_line_suffix` leaves is the start of `path`.
+    start..start + split_line_suffix(path).path.len()
+}
+
+/// Whitespace, or a quote or backtick a path may be written in.
+fn quoted(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’')
+}
+
+/// `raw`, a path written as text, such as one an agent gives: the path itself, and what follows
+/// it, a `:line`, `:line:col`, `#Lline` or `#anchor`. The whitespace, quotes and backticks around
+/// both are dropped.
+pub fn split_path_suffix(raw: &str) -> (&str, &str) {
+    let span = bare_span(raw);
+    (&raw[span.clone()], raw[span.end..].trim_end_matches(quoted))
+}
+
+/// Whether the last component of `path` is a file name with an extension, such as `plan.md`.
+fn has_extension(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
 }
 
 /// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`.

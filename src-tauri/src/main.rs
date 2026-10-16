@@ -4,17 +4,22 @@
 //! the grammars the vault uses most, at low priority. A second launch skips all of it: the
 //! single-instance plugin hands its arguments to the running Lectern and exits.
 //!
+//! `lectern.exe mcp` is an agent's MCP server instead (`mcp.rs`), which starts none of that.
+//!
 //! Lectern targets Windows only.
 
 // Release builds run without a console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod accelerators;
+mod agent;
 mod app;
 mod commands;
 mod events;
 mod logging;
+mod mcp;
 mod navigate;
+mod pipe;
 mod shell;
 mod state;
 mod updater;
@@ -38,12 +43,16 @@ use crate::state::{Early, EarlyDoc, Profile, Slot};
 const LAUNCH_PROBE: Duration = Duration::from_millis(500);
 
 fn main() {
+    // Before anything else: the MCP server needs only the app's identifier, for its pipe.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(mcp::run(&context().config().identifier));
+    }
     let args = Args::parse(std::env::args());
     let started_ms = win::process_start_unix_ms().unwrap_or_else(unix_now_ms);
     let perf = Arc::new(PerfLog::new(args.perf_log.clone(), started_ms));
     perf.mark("main", None);
 
-    let context = tauri::generate_context!();
+    let context = context();
     let dirs = Dirs::for_app(&context.config().identifier);
     let profile = Arc::new(Slot::default());
     let early = Arc::new(Slot::default());
@@ -67,6 +76,11 @@ fn main() {
             booted,
         },
     );
+}
+
+/// The app's context, from `tauri.conf.json`: made in one place, as it embeds the UI.
+fn context() -> tauri::Context {
+    tauri::generate_context!()
 }
 
 /// Starts the boot thread. `main` does this unless another Lectern is running; setup does it when

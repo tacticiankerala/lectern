@@ -4,6 +4,13 @@
 import { HEADINGS, h } from "./dom";
 import type { OutlineItem } from "./generated/OutlineItem";
 
+/**
+ * The top part of the pane a heading is being read in, as a percentage of the pane's height. The
+ * scrollspy marks the first heading in it, else the last scrolled past; agent.ts answers `status`
+ * by the same rule.
+ */
+export const READING_BAND_PERCENT = 30;
+
 export class Outline {
   private observer: IntersectionObserver | null = null;
   /** Each outline entry, by its heading's id. */
@@ -74,8 +81,8 @@ export class Outline {
   }
 
   /**
-   * Marks the topmost heading inside the top 30% of the pane; when none is, the last heading
-   * scrolled past.
+   * Marks the topmost heading inside the top part of the pane (READING_BAND_PERCENT); when none
+   * is, the last heading scrolled past.
    */
   private watch(doc: HTMLElement): void {
     if (typeof IntersectionObserver === "undefined") {
@@ -100,7 +107,7 @@ export class Outline {
           this.mark(current.id);
         }
       },
-      { root: this.scroller, rootMargin: "0px 0px -70% 0px" },
+      { root: this.scroller, rootMargin: `0px 0px -${String(100 - READING_BAND_PERCENT)}% 0px` },
     );
     for (const el of headings) {
       this.observer.observe(el);

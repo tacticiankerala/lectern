@@ -254,6 +254,49 @@ export function quoteFromRange(range: Range): string {
 }
 
 /**
+ * `range` trimmed to the text it covers, as far as the note's text goes (see the module comment):
+ * each end moved into the first or last text node it selects a character of, so an end between
+ * nodes, or at the very start of the next block (a triple click), counts where its text is.
+ * Null when it covers no text.
+ */
+export function textOnly(range: Range, doc: Element): Range | null {
+  const root = range.commonAncestorContainer;
+  const counts = (t: Text): boolean => {
+    const from = t === range.startContainer ? range.startOffset : 0;
+    const to = t === range.endContainer ? range.endOffset : t.length;
+    return (
+      range.intersectsNode(t) &&
+      t.data.slice(from, to).trim() !== "" &&
+      t.parentElement?.closest(SKIP) == null &&
+      leafBlockOf(t, doc) !== null
+    );
+  };
+  let first: Text | null = null;
+  let last: Text | null = null;
+  if (root instanceof Text) {
+    first = last = counts(root) ? root : null;
+  } else {
+    // In from each end, so a long selection isn't walked whole.
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n && !first; n = walker.nextNode()) {
+      if (n instanceof Text && counts(n)) first = n;
+    }
+    walker.currentNode = root;
+    for (let n = walker.lastChild(); n && !last && n !== first; n = walker.previousNode()) {
+      if (n instanceof Text && counts(n)) last = n;
+    }
+    last ??= first;
+  }
+  if (!first || !last) {
+    return null;
+  }
+  const out = document.createRange();
+  out.setStart(first, first === range.startContainer ? range.startOffset : 0);
+  out.setEnd(last, last === range.endContainer ? range.endOffset : last.length);
+  return out;
+}
+
+/**
  * An element's source lines from its `data-sourcepos` (`12:1-14:3`); an end at column 0 is the
  * end of the line before. Null without one.
  */

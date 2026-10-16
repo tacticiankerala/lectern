@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use lectern_core::ipc::{
-    EditorPref, HtmlPages, Measure, PathMapping, RecentEntry, SavedPosition, Settings,
-    SettingsPatch, ThemeId, ThemeMode,
+    AgentFocus, AgentOpens, EditorPref, HtmlPages, Measure, PathMapping, RecentEntry,
+    SavedPosition, Settings, SettingsPatch, ThemeId, ThemeMode,
 };
 use lectern_core::store::{load_json_or_default, write_json_atomic, Loaded, State};
 use lectern_core::workspace::{apply_patch, ShownMut, Workspace};
@@ -322,6 +322,8 @@ fn settings_json_shape() {
     assert_eq!(j["htmlPages"], "full");
     assert_eq!(j["recentInMenu"], 10);
     assert_eq!(j["wslDistro"], serde_json::Value::Null);
+    assert_eq!(j["agentOpens"], "ask");
+    assert_eq!(j["agentFocus"], "front");
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -385,6 +387,35 @@ fn html_pages_round_trip_in_lowercase() {
     }
     let p: SettingsPatch = serde_json::from_str(r#"{"htmlPages": "offline"}"#).unwrap();
     assert_eq!(p.html_pages, Some(HtmlPages::Offline));
+}
+
+#[test]
+fn agent_settings_are_lowercase_and_patchable() {
+    for (opens, json) in [
+        (AgentOpens::Ask, "\"ask\""),
+        (AgentOpens::Switch, "\"switch\""),
+    ] {
+        assert_eq!(serde_json::to_string(&opens).unwrap(), json);
+        assert_eq!(serde_json::from_str::<AgentOpens>(json).unwrap(), opens);
+    }
+    for (focus, json) in [
+        (AgentFocus::Front, "\"front\""),
+        (AgentFocus::Raise, "\"raise\""),
+        (AgentFocus::None, "\"none\""),
+    ] {
+        assert_eq!(serde_json::to_string(&focus).unwrap(), json);
+        assert_eq!(serde_json::from_str::<AgentFocus>(json).unwrap(), focus);
+    }
+    let p: SettingsPatch =
+        serde_json::from_str(r#"{"agentOpens": "switch", "agentFocus": "none"}"#).unwrap();
+    assert_eq!(p.agent_opens, Some(AgentOpens::Switch));
+    assert_eq!(p.agent_focus, Some(AgentFocus::None));
+    // A file from before agents loads with both defaults.
+    let s: Settings = serde_json::from_str(r#"{"fontSize": 20}"#).unwrap();
+    assert_eq!(
+        (s.agent_opens, s.agent_focus),
+        (AgentOpens::Ask, AgentFocus::Front)
+    );
 }
 
 #[test]

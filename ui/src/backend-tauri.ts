@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
+import type { AgentReply } from "./generated/AgentReply";
 import type { Candidate } from "./generated/Candidate";
 import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
@@ -233,6 +234,10 @@ export class TauriBackend implements Backend {
 
   closeWindow(): Promise<void> {
     return invoke("close_window");
+  }
+
+  replyToAgent(id: number, reply: AgentReply): Promise<void> {
+    return invoke("agent_reply", { id, reply });
   }
 
   /**

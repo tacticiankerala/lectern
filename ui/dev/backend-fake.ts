@@ -10,7 +10,8 @@
 // page it opened (`openUrl`). A change of the setting has the page on screen open again, as Rust
 // does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
 // from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
-// which only Rust sees, come from `frameKey`.
+// which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, which
+// answers with what the UI replies, as Rust would wait for it.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -33,6 +34,8 @@
 // with each review command, as its bridge reported it, a block a line; a comment added on a page
 // takes the lines of where its quote is found, as core gives them.
 import type { Backend, BackendEvent } from "../src/backend";
+import type { AgentReply } from "../src/generated/AgentReply";
+import type { AgentRequest } from "../src/generated/AgentRequest";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
@@ -286,6 +289,8 @@ export interface FakeControl {
   readonly followed: FollowTarget[];
   /** Where the UI said the keyboard focus was, each time it said, in order. */
   readonly frameFocus: FrameFocus[];
+  /** Sends an agent's request to the UI (`agent-request`); answers with the UI's reply. */
+  agentRequest(request: AgentRequest): Promise<AgentReply>;
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -587,6 +592,9 @@ export class FakeBackend implements Backend, FakeControl {
   private clock = 0;
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
   private readonly drops = new Set<(paths: string[]) => void>();
+  /** Agents' requests sent to the UI and not answered yet, by id. */
+  private readonly agentCalls = new Map<number, (reply: AgentReply) => void>();
+  private agentCallId = 0;
   /** Sidecars, by note path key. */
   private readonly reviews = new Map<string, StoredReview>();
   /** Core's text blocks, by path key. */
@@ -1413,6 +1421,21 @@ export class FakeBackend implements Backend, FakeControl {
 
   closeWindow(): Promise<void> {
     this.windowCalls.push({ call: "closeWindow" });
+    return Promise.resolve();
+  }
+
+  agentRequest(request: AgentRequest): Promise<AgentReply> {
+    const id = ++this.agentCallId;
+    const replied = new Promise<AgentReply>((resolve) => {
+      this.agentCalls.set(id, resolve);
+    });
+    this.emit("agent-request", { id, request });
+    return replied;
+  }
+
+  replyToAgent(id: number, reply: AgentReply): Promise<void> {
+    this.agentCalls.get(id)?.(reply);
+    this.agentCalls.delete(id);
     return Promise.resolve();
   }
 

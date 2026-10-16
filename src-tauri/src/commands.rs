@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use lectern_core::agent::AgentReply;
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
     RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot, StartupPayload, UpdateInfo,
@@ -452,4 +453,11 @@ pub fn set_workspace_theme(
     state: Shared<'_>,
 ) -> Result<SettingsSnapshot, String> {
     state.set_workspace_theme(window.label(), own)
+}
+
+/// The calling window's UI answers an agent's request, `id`, it was sent (`agent-request`). An
+/// answer nothing waits for any more is dropped.
+#[tauri::command]
+pub fn agent_reply(id: u64, reply: AgentReply, window: WebviewWindow, state: Shared<'_>) {
+    state.agent_reply(window.label(), id, reply);
 }

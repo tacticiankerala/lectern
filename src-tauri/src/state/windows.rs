@@ -452,7 +452,7 @@ impl App {
     }
 
     /// Which window shows each workspace: workspace id to window label.
-    fn shown(&self) -> HashMap<String, String> {
+    pub(super) fn shown(&self) -> HashMap<String, String> {
         self.windows()
             .iter()
             .filter_map(|window| window.workspace_id().map(|id| (id, window.label.clone())))

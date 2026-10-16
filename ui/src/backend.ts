@@ -1,5 +1,6 @@
 // What the UI needs from the host: the Tauri app (backend-tauri.ts) or, for Playwright, a fake
 // that serves pre-rendered fixtures (dev/backend-fake.ts).
+import type { AgentReply } from "./generated/AgentReply";
 import type { Candidate } from "./generated/Candidate";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
@@ -33,7 +34,8 @@ export type BackendEvent =
   | "workspaces-changed"
   | "close-requested"
   | "page-loads"
-  | "frame-key";
+  | "frame-key"
+  | "agent-request";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
@@ -138,6 +140,8 @@ export interface Backend {
    * frame, where only Rust sees the keys and sends Lectern's shortcuts back as `frame-key`.
    */
   setFrameFocus(focus: FrameFocus): Promise<void>;
+  /** Answers the agent's request `id` (`agent-request`) that Rust sent this window. */
+  replyToAgent(id: number, reply: AgentReply): Promise<void>;
   /**
    * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
    * asked again.

@@ -28,7 +28,7 @@ use crate::state::{
     Slot, Timings, WatchControl, WindowState,
 };
 use crate::updater::{self, Updates};
-use crate::{accelerators, commands, navigate, win};
+use crate::{accelerators, agent, commands, navigate, win};
 
 /// The label of the first window, as in `tauri.conf.json`.
 pub const MAIN_WINDOW: &str = "main";
@@ -182,6 +182,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::set_unsaved,
             commands::set_frame_focus,
             commands::close_window,
+            commands::agent_reply,
         ])
         .on_window_event(on_window_event)
         .setup(move |app| setup(app, launch, &held))
@@ -258,6 +259,7 @@ fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<()
     if let Some(main) = main {
         main.start_library();
     }
+    agent::start(state, &app.config().identifier);
     Ok(())
 }
 

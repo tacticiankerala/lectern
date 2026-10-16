@@ -24,6 +24,8 @@
 // - Rust is told whenever the keyboard focus goes into a frame (an HTML page or a PDF) or out of
 //   one, and sends Lectern's shortcuts pressed there as `frame-key`, which run as keydowns do. It
 //   tells what an open page has loaded from the web as `page-loads`.
+// - An agent's request for this window (`agent-request`) is answered from agent.ts, loaded on the
+//   first, with `replyToAgent`; it is listened for before `startup`, like the others.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -43,6 +45,8 @@ import type { CommentsController } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import { trackFrameFocus } from "./frame-view";
+import type { AgentCall } from "./generated/AgentCall";
+import type { AgentReply } from "./generated/AgentReply";
 import type { Crumb } from "./generated/Crumb";
 import type { DocChanged } from "./generated/DocChanged";
 import type { DocPayload } from "./generated/DocPayload";
@@ -99,6 +103,8 @@ export const DEFAULT_SETTINGS: Settings = {
   htmlPages: "full",
   recentInMenu: 10,
   wslDistro: null,
+  agentOpens: "ask",
+  agentFocus: "front",
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */
@@ -353,6 +359,9 @@ export class App {
       if (action !== null && this.layout.app.isConnected && !this.actions.run(action)) {
         if (action === "escape") this.comments?.escape();
       }
+    });
+    this.backend.on<AgentCall>("agent-request", (call) => {
+      if (this.layout.app.isConnected) void this.agentRequested(call);
     });
 
     const navigation = this.nav.beginNavigation();
@@ -998,6 +1007,26 @@ export class App {
     if (comments && !comments.addFromSelection()) {
       comments.addAtTop();
     }
+  }
+
+  /** Answers an agent's request for this window (agent.ts, loaded on the first). */
+  private async agentRequested(call: AgentCall): Promise<void> {
+    let reply: AgentReply;
+    try {
+      const { answer } = await import("./agent.js");
+      reply = answer(
+        {
+          doc: () => this.state.doc,
+          docElement: () => this.layout.doc,
+          scroller: () => this.scroller,
+          page: () => this.view.page,
+        },
+        call.request,
+      );
+    } catch (e) {
+      reply = { kind: "failed", message: `Lectern couldn't answer: ${String(e)}` };
+    }
+    quietly(this.backend.replyToAgent(call.id, reply));
   }
 
   /** The text selected in the HTML page on screen changed: the Comment button follows it. */
