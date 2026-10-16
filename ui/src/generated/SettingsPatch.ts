@@ -9,4 +9,8 @@ import type { ThemeMode } from "./ThemeMode";
 /**
  * A change to some settings; absent fields are left as they are.
  */
-export type SettingsPatch = { themeMode?: ThemeMode | null, lightTheme?: ThemeId | null, darkTheme?: ThemeId | null, bodyFont?: string | null, codeFont?: string | null, fontSize?: number | null, lineHeight?: number | null, measure?: Measure | null, codeWrap?: boolean | null, libraryVisible?: boolean | null, outlineVisible?: boolean | null, libraryWidth?: number | null, outlineWidth?: number | null, libraryRoots?: Array<string> | null, pathMappings?: Array<PathMapping> | null, editor?: EditorPref | null, autoUpdate?: boolean | null, showStatusBadges?: boolean | null, sidebarFontSize?: number | null, reviewComments?: boolean | null, commentsVisible?: boolean | null, htmlPages?: HtmlPages | null, recentInMenu?: number | null, };
+export type SettingsPatch = { themeMode?: ThemeMode | null, lightTheme?: ThemeId | null, darkTheme?: ThemeId | null, bodyFont?: string | null, codeFont?: string | null, fontSize?: number | null, lineHeight?: number | null, measure?: Measure | null, codeWrap?: boolean | null, libraryVisible?: boolean | null, outlineVisible?: boolean | null, libraryWidth?: number | null, outlineWidth?: number | null, libraryRoots?: Array<string> | null, pathMappings?: Array<PathMapping> | null, editor?: EditorPref | null, autoUpdate?: boolean | null, showStatusBadges?: boolean | null, sidebarFontSize?: number | null, reviewComments?: boolean | null, commentsVisible?: boolean | null, htmlPages?: HtmlPages | null, recentInMenu?: number | null, 
+/**
+ * A distribution's name, or `""` for Windows' default: `null` here leaves it as it is.
+ */
+wslDistro?: string | null, };

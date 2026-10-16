@@ -28,6 +28,7 @@ import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
 import type { WorkspaceOutcome } from "./generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
+import type { WslDistros } from "./generated/WslDistros";
 
 declare global {
   interface Window {
@@ -163,6 +164,10 @@ export class TauriBackend implements Backend {
 
   listSystemFonts(): Promise<string[]> {
     return invoke("list_system_fonts");
+  }
+
+  listWslDistros(): Promise<WslDistros> {
+    return invoke("list_wsl_distros");
   }
 
   /** Asks GitHub Releases for a newer Lectern (Rust's updater). */

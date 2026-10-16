@@ -556,10 +556,193 @@ fn forms_of_a_bare_name_or_a_url_are_none() {
         "mailto:me@example.com",
         "host:/srv/notes/plan.md",
         r"C:notes\plan.md",
-        r"\notes\plan.md",
     ] {
         assert_eq!(ubuntu().forms(raw, None), path_forms(None, None), "{raw:?}");
     }
+}
+
+/// Only a real Linux path, one under a standard top-level folder, is copied as a path in the WSL
+/// distribution. Anything else starting with `/`, such as a URL route, only flips its separators,
+/// with or without WSL.
+#[test]
+fn forms_of_a_url_route_only_flip_its_separators() {
+    let route = path_forms(
+        Some(r"\r\reports\admin\writing_benchmark"),
+        Some("/r/reports/admin/writing_benchmark"),
+    );
+    for m in [ubuntu(), PathMapper::default()] {
+        assert_eq!(m.forms("/r/reports/admin/writing_benchmark", None), route);
+        assert_eq!(
+            m.written_forms("/r/reports/admin/writing_benchmark", None),
+            route
+        );
+    }
+    // What surrounds it stays, as for any path.
+    assert_eq!(
+        ubuntu().forms("`/api/v1/users#list`", None),
+        path_forms(Some(r"`\api\v1\users#list`"), Some("`/api/v1/users#list`"))
+    );
+    // The folder must be one of them exactly, letter case and all.
+    for raw in ["/homework/a.md", "/Home/me/a.md", "/users/me/a.md", "/"] {
+        assert_eq!(
+            ubuntu().forms(raw, None),
+            path_forms(Some(&raw.replace('/', "\\")), Some(raw)),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn forms_of_a_path_under_a_linux_top_folder_go_through_the_distro() {
+    for folder in [
+        "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt",
+        "opt", "proc", "root", "run", "sbin", "snap", "srv", "sys", "tmp", "usr", "var",
+    ] {
+        let raw = format!("/{folder}/x.rb");
+        assert_eq!(
+            ubuntu().forms(&raw, None),
+            path_forms(
+                Some(&format!(r"\\wsl.localhost\Ubuntu\{folder}\x.rb")),
+                Some(&raw)
+            ),
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        ubuntu()
+            .written_forms("/home/me/x.rb", None)
+            .windows
+            .as_deref(),
+        Some(r"\\wsl.localhost\Ubuntu\home\me\x.rb")
+    );
+    // `/mnt/<x>/` is on drive X:, and any other folder under `/mnt` is in the distribution.
+    assert_eq!(
+        ubuntu().forms("/mnt/c/x", None),
+        path_forms(Some(r"C:\x"), Some("/mnt/c/x"))
+    );
+    assert_eq!(
+        ubuntu().forms("/mnt/data/x", None).windows.as_deref(),
+        Some(r"\\wsl.localhost\Ubuntu\mnt\data\x")
+    );
+    // Without WSL, a real Linux path still has no Windows form.
+    assert_eq!(
+        PathMapper::default().forms("/home/me/x.rb", None),
+        path_forms(None, None)
+    );
+}
+
+/// A user mapping applies whatever folder the path starts at.
+#[test]
+fn forms_of_a_mapped_path_follow_the_mapping_from_any_folder() {
+    let m = PathMapper {
+        wsl_distro: Some("Ubuntu".into()),
+        ..mapper(&[("/r/shared", r"S:\Shared")])
+    };
+    let x = path_forms(Some(r"S:\Shared\x.md"), Some("/r/shared/x.md"));
+    assert_eq!(m.forms("/r/shared/x.md", None), x);
+    assert_eq!(m.written_forms("/r/shared/x.md", None), x);
+    assert_eq!(
+        m.convert_paths("cat /r/shared/x.md", PathForm::Windows),
+        converted(r"cat S:\Shared\x.md", 1, 0)
+    );
+}
+
+/// A path at the root of no drive (`\api\v1\users`) flips its separators for WSL, as a route does
+/// the other way.
+#[test]
+fn forms_of_a_path_from_the_root_flip_its_separators() {
+    let users = path_forms(Some(r"\api\v1\users"), Some("/api/v1/users"));
+    assert_eq!(ubuntu().forms(r"\api\v1\users", None), users);
+    assert_eq!(ubuntu().written_forms(r"\api\v1\users", None), users);
+    assert_eq!(
+        ubuntu().convert_paths(r"GET \api\v1\users", PathForm::Wsl),
+        converted("GET /api/v1/users", 1, 0)
+    );
+}
+
+/// Each path in a command converts by its own kind: a relative one and a route flip, a real Linux
+/// path goes through the distribution.
+#[test]
+fn convert_paths_tells_routes_from_real_linux_paths() {
+    let command = "curl localhost/r/a && cat /home/me/x";
+    assert_eq!(
+        ubuntu().convert_paths(command, PathForm::Windows),
+        converted(
+            r"curl localhost\r\a && cat \\wsl.localhost\Ubuntu\home\me\x",
+            2,
+            0
+        )
+    );
+    assert_eq!(
+        ubuntu().convert_paths(command, PathForm::Wsl),
+        converted(command, 2, 0)
+    );
+    assert_eq!(
+        ubuntu().convert_paths("curl /r/a && cat /home/me/x", PathForm::Windows),
+        converted(r"curl \r\a && cat \\wsl.localhost\Ubuntu\home\me\x", 2, 0)
+    );
+}
+
+/// The index still finds the file a path from another machine names, as the link opens it; only
+/// the distribution fallback needs a real Linux path.
+#[test]
+fn forms_of_a_path_from_any_folder_still_find_an_indexed_file() {
+    let (_tmp, root) = common::vault_copy();
+    let ix = common::index_of(&root);
+    let moved = common::native_join(&root, "archive/beta/README.md")
+        .to_string_lossy()
+        .into_owned();
+    let written = "/x/vault/work/beta/README.md";
+    assert_eq!(
+        ubuntu().forms(written, Some(&ix)).windows,
+        Some(moved.clone())
+    );
+    assert_eq!(
+        ubuntu().written_forms(written, Some(&ix)).windows,
+        Some(moved)
+    );
+    // Nothing indexed matches it: it only flips.
+    assert_eq!(
+        ubuntu()
+            .forms("/x/vault/work/nowhere.md", Some(&ix))
+            .windows
+            .as_deref(),
+        Some(r"\x\vault\work\nowhere.md")
+    );
+}
+
+/// Following a link is unchanged: `map` still finds any Linux path in the distribution.
+#[test]
+fn map_still_takes_any_linux_path_into_the_distro() {
+    assert_eq!(
+        ubuntu().map("/r/reports/admin/writing_benchmark", None),
+        unverified(r"\\wsl.localhost\Ubuntu\r\reports\admin\writing_benchmark")
+    );
+}
+
+/// The distribution is whichever the mapper is given; a path that names its own keeps it.
+#[test]
+fn forms_go_through_the_chosen_distro() {
+    let debian = PathMapper {
+        wsl_distro: Some("Debian".into()),
+        ..PathMapper::default()
+    };
+    assert_eq!(
+        debian.forms("/home/me/x.rb", None),
+        path_forms(
+            Some(r"\\wsl.localhost\Debian\home\me\x.rb"),
+            Some("/home/me/x.rb")
+        )
+    );
+    assert_eq!(
+        debian.convert_paths("cat /home/me/x.rb", PathForm::Windows),
+        converted(r"cat \\wsl.localhost\Debian\home\me\x.rb", 1, 0)
+    );
+    let ubuntus = r"\\wsl.localhost\Ubuntu\home\me\x.rb";
+    assert_eq!(
+        debian.forms(ubuntus, None),
+        path_forms(Some(ubuntus), Some("/home/me/x.rb"))
+    );
 }
 
 /// A link's path as written (`data-written`): the renderer has already decoded it and dropped its
@@ -592,7 +775,7 @@ fn written_forms_take_a_links_path_as_it_is() {
             "{written}"
         );
     }
-    for written in ["", r"\notes\plan.md", r"C:notes\plan.md"] {
+    for written in ["", r"C:notes\plan.md"] {
         assert_eq!(
             ubuntu().written_forms(written, None),
             path_forms(None, None),

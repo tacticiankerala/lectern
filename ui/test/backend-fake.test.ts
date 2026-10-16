@@ -105,11 +105,52 @@ describe("FakeBackend path forms", () => {
       windows: "`spec\\a\\b_spec.rb:12`",
       wsl: "`spec/a/b_spec.rb:12`",
     });
-    for (const raw of ["notes.md", "https://example.com/a/b", "C:notes\\plan.md", "\\notes\\x"]) {
+    for (const raw of ["notes.md", "https://example.com/a/b", "C:notes\\plan.md"]) {
       expect(await fake.pathForms(raw, false), raw).toEqual({ windows: null, wsl: null });
     }
     // An exact path is never relative.
     expect(await fake.pathForms("notes/plan.md", true)).toEqual({ windows: null, wsl: null });
+  });
+
+  it("only flips a route's separators, or a path's from no drive's root; a real Linux path goes into WSL", async () => {
+    const fake = new FakeBackend(fixtures());
+    const route = {
+      windows: "\\r\\reports\\admin\\writing_benchmark",
+      wsl: "/r/reports/admin/writing_benchmark",
+    };
+    expect(await fake.pathForms("/r/reports/admin/writing_benchmark", false)).toEqual(route);
+    expect(await fake.writtenForms("/r/reports/admin/writing_benchmark")).toEqual(route);
+    const users = { windows: "\\api\\v1\\users", wsl: "/api/v1/users" };
+    expect(await fake.pathForms("\\api\\v1\\users", false)).toEqual(users);
+    expect(await fake.writtenForms("\\api\\v1\\users")).toEqual(users);
+    expect((await fake.pathForms("/mnt/data/x", false)).windows).toBe(
+      "\\\\wsl.localhost\\Ubuntu\\mnt\\data\\x",
+    );
+    // An exact path (the open file, a tree row) still goes into WSL whatever its folder.
+    expect((await fake.pathForms("/r/reports/x", true)).windows).toBe(
+      "\\\\wsl.localhost\\Ubuntu\\r\\reports\\x",
+    );
+  });
+
+  it("maps Linux paths into the distribution the settings choose, else Windows' default", async () => {
+    const fake = new FakeBackend(fixtures());
+    expect(await fake.listWslDistros()).toEqual({
+      default: "Ubuntu",
+      installed: ["Debian", "Ubuntu"],
+    });
+    await fake.setSettings({ wslDistro: "Debian" });
+    expect((await fake.pathForms("/home/me/a.md", false)).windows).toBe(
+      "\\\\wsl.localhost\\Debian\\home\\me\\a.md",
+    );
+    expect((await fake.convertPaths("cat /home/me/a.md", "windows")).text).toBe(
+      "cat \\\\wsl.localhost\\Debian\\home\\me\\a.md",
+    );
+    // `""` asks for Windows' default, as core takes it.
+    await fake.setSettings({ wslDistro: "" });
+    expect(fake.sharedSettings().wslDistro).toBeNull();
+    expect((await fake.pathForms("/home/me/a.md", true)).windows).toBe(
+      "\\\\wsl.localhost\\Ubuntu\\home\\me\\a.md",
+    );
   });
 
   it("follows a user mapping from a Linux folder both ways, as core does", async () => {
@@ -147,7 +188,7 @@ describe("FakeBackend path forms", () => {
     ] as const) {
       expect(await fake.writtenForms(written), written).toEqual({ windows, wsl });
     }
-    for (const written of ["", "\\notes\\plan.md", "C:notes\\plan.md"]) {
+    for (const written of ["", "C:notes\\plan.md"]) {
       expect(await fake.writtenForms(written), written).toEqual({ windows: null, wsl: null });
     }
   });

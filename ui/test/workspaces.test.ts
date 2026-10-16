@@ -805,6 +805,7 @@ describe("Preferences", () => {
       "Reading",
       "HTML pages",
       "Path mappings",
+      "WSL distribution",
       "Editor",
       "Updates",
       "Workspaces",

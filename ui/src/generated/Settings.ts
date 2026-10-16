@@ -48,4 +48,9 @@ htmlPages: HtmlPages,
 /**
  * How many recent files the header's recent files menu lists, 5–20 (10 by default).
  */
-recentInMenu: number, };
+recentInMenu: number, 
+/**
+ * The WSL distribution a copied Linux path goes into (`\\wsl.localhost\<name>\…`), and a
+ * link to one opens in; `None` for Windows' default.
+ */
+wslDistro: string | null, };

@@ -738,3 +738,98 @@ describe("a link's right-click menu", () => {
     expect(document.querySelector(MENU)).toBeNull();
   });
 });
+
+describe("the WSL distribution in Preferences", () => {
+  /** Preferences, open, with its WSL distribution picker once the distributions are listed. */
+  async function picker(fake?: (fake: FakeBackend) => void) {
+    const launched = await started();
+    fake?.(launched.fake);
+    expect(launched.app.actions.run("preferences")).toBe(true);
+    const section = await vi.waitFor(() => {
+      const found = [...document.querySelectorAll<HTMLElement>(".prefs-section")].find(
+        (s) => s.querySelector("h4")?.textContent === "WSL distribution",
+      );
+      if (!found) throw new Error("no WSL distribution section");
+      return found;
+    });
+    const select = section.querySelector<HTMLSelectElement>("select");
+    if (!select) throw new Error("no WSL distribution picker");
+    return { ...launched, section, select };
+  }
+
+  function options(select: HTMLSelectElement): [string, string][] {
+    return [...select.options].map((o) => [o.value, o.textContent]);
+  }
+
+  it("offers Windows' default first, then each installed one, and copies through the one chosen", async () => {
+    const { fake, section, select } = await picker();
+    await vi.waitFor(() => {
+      expect(options(select)).toEqual([
+        ["", "Windows default (Ubuntu)"],
+        ["Debian", "Debian"],
+        ["Ubuntu", "Ubuntu"],
+      ]);
+    });
+    expect(section.hidden).toBe(false);
+    expect(select.getAttribute("aria-label")).toBe("WSL distribution");
+    expect(select.value).toBe("");
+    select.value = "Debian";
+    select.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => {
+      expect(fake.sharedSettings().wslDistro).toBe("Debian");
+    });
+    expect((await fake.pathForms("/home/me/a.md", false)).windows).toBe(
+      "\\\\wsl.localhost\\Debian\\home\\me\\a.md",
+    );
+    // Back to Windows' default.
+    select.value = "";
+    select.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => {
+      expect(fake.sharedSettings().wslDistro).toBeNull();
+    });
+    expect((await fake.pathForms("/home/me/a.md", false)).windows).toBe(
+      "\\\\wsl.localhost\\Ubuntu\\home\\me\\a.md",
+    );
+  });
+
+  it("shows a distribution chosen in another window", async () => {
+    const { fake, select } = await picker();
+    await vi.waitFor(() => {
+      expect(select.options).toHaveLength(3);
+    });
+    fake.settingsElsewhere({ wslDistro: "Debian" });
+    expect(select.value).toBe("Debian");
+  });
+
+  it("keeps a chosen distribution that is no longer installed in the list", async () => {
+    const { select } = await picker((fake) => {
+      fake.settingsElsewhere({ wslDistro: "Alpine" });
+    });
+    await vi.waitFor(() => {
+      expect(options(select)).toEqual([
+        ["", "Windows default (Ubuntu)"],
+        ["Debian", "Debian"],
+        ["Ubuntu", "Ubuntu"],
+        ["Alpine", "Alpine (not installed)"],
+      ]);
+    });
+    expect(select.value).toBe("Alpine");
+  });
+
+  it("is hidden without WSL, as listed each time Preferences opens", async () => {
+    const { fake, app, section } = await picker();
+    await vi.waitFor(() => {
+      expect(section.hidden).toBe(false);
+    });
+    expect(app.actions.run("escape")).toBe(true);
+    fake.wslDistros = { default: null, installed: [] };
+    const listed = vi.spyOn(fake, "listWslDistros");
+    expect(app.actions.run("preferences")).toBe(true);
+    await vi.waitFor(() => {
+      expect(listed).toHaveBeenCalled();
+    });
+    await vi.waitFor(() => {
+      expect(section.hidden).toBe(true);
+    });
+  });
+});
