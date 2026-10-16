@@ -281,6 +281,13 @@ impl Workspaces {
         self.items.iter().find(|w| w.id == id)
     }
 
+    /// The workspace named `name`, compared as names are kept (trimmed, cut to
+    /// [`MAX_NAME_CHARS`]) and in any letter case.
+    pub fn find_by_name(&self, name: &str) -> Option<&Workspace> {
+        let name = clean_name(name)?.to_lowercase();
+        self.items.iter().find(|w| w.name.to_lowercase() == name)
+    }
+
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Workspace> {
         self.items.iter_mut().find(|w| w.id == id)
     }

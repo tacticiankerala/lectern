@@ -1,14 +1,18 @@
 // An agent's requests to a window (src/agent.ts): what `status` hears from it about what it shows,
 // for a note or text file (the heading path and line at the top of the view, and the selection), an
-// HTML page (from its session), a PDF and nothing; and the round trip through the app.
-import { afterEach, describe, expect, it } from "vitest";
-import { FakeBackend } from "../dev/backend-fake";
-import { NOT_YET, answer, view, type AgentHost } from "../src/agent";
+// HTML page (from its session), a PDF and nothing; the round trip through the app; and `show`,
+// which asks first with the bar when the window shows another file, and the agent settings in
+// Preferences.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeBackend, type FakeOptions } from "../dev/backend-fake";
+import { NOT_YET, view, type DocHost } from "../src/agent";
 import { App } from "../src/app";
+import type { AgentRequest } from "../src/generated/AgentRequest";
 import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
 import type { OutlineItem } from "../src/generated/OutlineItem";
-import { A, appRoot, docPayload, fixtures, rendered } from "./helpers";
+import type { Target } from "../src/generated/Target";
+import { A, B, C, appRoot, docPayload, fixtures, rendered, settle } from "./helpers";
 
 const PLAN = "S:\\Notes\\My Vault\\plan.md";
 /** The pane's height, in pixels. */
@@ -44,8 +48,8 @@ function host(
   kind: DocKind,
   layout: { doc: HTMLElement; scroller: HTMLElement },
   outline: OutlineItem[] = [],
-  page: ReturnType<AgentHost["page"]> = null,
-): AgentHost {
+  page: ReturnType<DocHost["page"]> = null,
+): DocHost {
   const doc: DocPayload = { ...docPayload(null), path: PLAN, kind, outline };
   return {
     doc: () => doc,
@@ -259,21 +263,6 @@ describe("what a window shows", () => {
       selection: null,
     });
   });
-
-  it("answers status with the view, and the other tools as not available yet", () => {
-    const layout = plan();
-    expect(answer(host("pdf", layout), { tool: "status" })).toEqual({
-      kind: "view",
-      path: PLAN,
-      heading: [],
-      line: null,
-      selection: null,
-    });
-    expect(answer(host("pdf", layout), { tool: "read" })).toEqual({
-      kind: "failed",
-      message: NOT_YET,
-    });
-  });
 });
 
 describe("an agent's request through the app", () => {
@@ -285,10 +274,202 @@ describe("an agent's request through the app", () => {
     const app = new App(fake, appRoot());
     await app.start();
     const reply = await fake.agentRequest({ tool: "status" });
-    expect(reply).toMatchObject({ kind: "view", path: A, selection: null });
+    expect(reply).toMatchObject({
+      kind: "view",
+      path: A,
+      selection: null,
+      ask: null,
+      answers: [],
+    });
     expect(await fake.agentRequest({ tool: "comments", path: A })).toEqual({
       kind: "failed",
       message: NOT_YET,
     });
+  });
+});
+
+/** The app, started on `initial` (none: the welcome screen), with A, B and C to open. */
+async function launched(initial: string | null = A, options: FakeOptions = {}) {
+  const fake = new FakeBackend(
+    fixtures({
+      [B]: rendered(
+        "Bee",
+        "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><p data-sourcepos='3:1-3:9'>Buzz.</p>",
+      ),
+    }),
+    initial === null ? options : { ...options, initial },
+  );
+  const app = new App(fake, appRoot());
+  await app.start();
+  return { fake, app };
+}
+
+function show(path: string, target?: Target): AgentRequest {
+  return { tool: "show", path, newWindow: false, wait: 0, ...(target ? { target } : {}) };
+}
+
+/** The ask bar, while it shows. */
+function bar(): HTMLElement | null {
+  const el = document.getElementById("lx-agent-ask");
+  return el && !el.hidden ? el : null;
+}
+
+function barButton(name: string): HTMLButtonElement {
+  const button = [...(bar()?.querySelectorAll("button") ?? [])].find((b) => b.textContent === name);
+  if (!button) throw new Error(`no ${name} on the bar`);
+  return button;
+}
+
+describe("an agent's show", () => {
+  it("asks first when the window shows another file: Show opens it, and Back returns", async () => {
+    const { fake, app } = await launched();
+    expect(await fake.agentRequest(show(B, { heading: "Bee › Buzz" }))).toEqual({
+      kind: "asked",
+    });
+    // The file on screen stays until the reader answers.
+    expect(app.state.doc?.path).toBe(A);
+    expect(bar()?.querySelector(".agent-ask-text")?.textContent).toBe(
+      "Claude wants to show b.md › Bee › Buzz",
+    );
+    expect(bar()?.querySelector(".agent-ask-file")?.getAttribute("title")).toBe(B);
+    barButton("Show").click();
+    await vi.waitFor(() => {
+      expect(app.state.doc?.path).toBe(B);
+    });
+    expect(bar()).toBeNull();
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    await app.nav.travel("back");
+    expect(app.state.doc?.path).toBe(A);
+  });
+
+  it("names the agent as Rust does, and Not now leaves the file on screen", async () => {
+    const { fake, app } = await launched();
+    await fake.agentRequest(show(B), "Codex");
+    expect(bar()?.textContent).toContain("Codex wants to show b.md");
+    barButton("Not now").click();
+    await settle();
+    expect(bar()).toBeNull();
+    expect(app.state.doc?.path).toBe(A);
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "dismissed" }]);
+    expect(await fake.agentRequest({ tool: "status" })).toMatchObject({
+      ask: null,
+      answers: [{ path: B, answer: "dismissed" }],
+    });
+  });
+
+  it("offers only the newest request: the older ones are replaced, as status tells", async () => {
+    const { fake } = await launched();
+    for (const path of [B, C, B]) {
+      expect(await fake.agentRequest(show(path))).toEqual({ kind: "asked" });
+    }
+    expect(bar()?.querySelector(".agent-ask-text")?.textContent).toBe("Claude wants to show b.md");
+    expect(fake.agentAnswers).toEqual([
+      { id: 1, answer: "replaced" },
+      { id: 2, answer: "replaced" },
+    ]);
+    expect(await fake.agentRequest({ tool: "status" })).toMatchObject({
+      path: A,
+      ask: B,
+      answers: [
+        { path: B, answer: "replaced" },
+        { path: C, answer: "replaced" },
+      ],
+    });
+  });
+
+  it("switches at once when the setting says so, replacing a request still asking", async () => {
+    const { fake, app } = await launched();
+    await fake.agentRequest(show(C));
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    expect(await fake.agentRequest(show(B))).toEqual({ kind: "shown" });
+    expect(app.state.doc?.path).toBe(B);
+    expect(bar()).toBeNull();
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "replaced" }]);
+    // On the history like any other open.
+    await app.nav.travel("back");
+    expect(app.state.doc?.path).toBe(A);
+  });
+
+  it("opens without asking in a window that shows nothing", async () => {
+    const { fake, app } = await launched(null);
+    expect(app.state.doc).toBeNull();
+    expect(await fake.agentRequest(show(B))).toEqual({ kind: "shown" });
+    expect(app.state.doc?.path).toBe(B);
+    expect(bar()).toBeNull();
+  });
+
+  it("moves within the file on screen without asking", async () => {
+    const { fake, app } = await launched(B);
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B.toUpperCase(), { line: 3 }))).toEqual({
+      kind: "shown",
+    });
+    expect(scrolled).toHaveBeenCalledWith(3);
+    expect(bar()).toBeNull();
+    expect(app.state.doc?.path).toBe(B);
+  });
+
+  it("opens at a line target, and says why a file didn't open", async () => {
+    const { fake, app } = await launched(null);
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { line: 3 }))).toEqual({ kind: "shown" });
+    expect(scrolled).toHaveBeenCalledWith(3);
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    const gone = "C:\\V\\gone.md";
+    expect(await fake.agentRequest(show(gone))).toEqual({
+      kind: "failed",
+      message: `gone.md didn't open: Couldn't find ${gone}`,
+    });
+  });
+
+  it("keeps the bar across the reader's own moves until it is answered", async () => {
+    const { fake, app } = await launched();
+    await fake.agentRequest(show(B));
+    await app.open(C, { push: true });
+    expect(bar()?.textContent).toContain("b.md");
+    barButton("Show").click();
+    await vi.waitFor(() => {
+      expect(app.state.doc?.path).toBe(B);
+    });
+  });
+});
+
+describe("Preferences › Agents", () => {
+  it("has the two agent settings as choices, saved for every window", async () => {
+    const { fake, app } = await launched();
+    expect(app.actions.run("preferences")).toBe(true);
+    const section = await vi.waitFor(() => {
+      const found = [...document.querySelectorAll<HTMLElement>(".prefs-section")].find(
+        (s) => s.querySelector("h4")?.textContent === "Agents",
+      );
+      if (!found) throw new Error("no Agents section");
+      return found;
+    });
+    const opens = [...section.querySelectorAll<HTMLInputElement>('input[name="lx-agent-opens"]')];
+    const focus = [...section.querySelectorAll<HTMLInputElement>('input[name="lx-agent-focus"]')];
+    // Each group named, as the design words them.
+    expect(opens[0]?.closest("[role=radiogroup]")?.getAttribute("aria-label")).toBe(
+      "When an agent opens a file",
+    );
+    expect(focus[0]?.closest("[role=radiogroup]")?.getAttribute("aria-label")).toBe(
+      "When an agent shows something",
+    );
+    expect(opens.map((c) => c.closest("label")?.textContent)).toEqual(["Ask", "Switch right away"]);
+    expect(focus.map((c) => c.closest("label")?.textContent)).toEqual([
+      "Bring Lectern to front",
+      "Show without taking focus",
+      "Leave windows alone",
+    ]);
+    expect(section.textContent).toContain("only flashes the taskbar");
+    expect(opens.map((c) => c.checked)).toEqual([true, false]);
+    expect(focus.map((c) => c.checked)).toEqual([true, false, false]);
+    opens[1]?.click();
+    focus[2]?.click();
+    await settle();
+    expect(fake.sharedSettings()).toMatchObject({ agentOpens: "switch", agentFocus: "none" });
+    // Changed elsewhere, they show here.
+    fake.settingsElsewhere({ agentOpens: "ask", agentFocus: "raise" });
+    expect(opens.map((c) => c.checked)).toEqual([true, false]);
+    expect(focus.map((c) => c.checked)).toEqual([false, true, false]);
   });
 });

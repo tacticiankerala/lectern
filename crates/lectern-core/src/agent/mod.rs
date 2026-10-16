@@ -9,11 +9,14 @@
 //!   that window's UI as an [`AgentCall`], which answers with an [`AgentReply`] ([`status`]).
 //! - Paths from an agent may be Windows or WSL paths ([`paths`]); every path in an answer comes
 //!   in both forms.
+//! - `show` and `workspace` go to the window [`show::route_show`] picks; a window already showing
+//!   another file may ask the reader first, and the agent is named to them as [`agent_name`] has it.
 
 pub mod lines;
 pub mod mcp;
 pub mod paths;
 pub mod request;
+pub mod show;
 pub mod status;
 pub mod tools;
 
@@ -23,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use self::request::AgentRequest;
+use self::request::ClientInfo;
 pub use self::status::{AgentCall, AgentReply};
 
 /// The longest line either end of the pipe sends, and the longest MCP message read from stdin, in
@@ -32,6 +36,50 @@ pub const MAX_LINE: usize = 1024 * 1024;
 /// How long Lectern takes at most to answer a request on the pipe; past it, the answer is an
 /// error.
 pub const ANSWER_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long Lectern takes at most to answer `request` on the pipe: [`ANSWER_WITHIN`], and for a
+/// `show`, the seconds it may wait for the reader's answer on top.
+pub fn answer_within(request: &AgentRequest) -> Duration {
+    match request {
+        AgentRequest::Show(args) => ANSWER_WITHIN + Duration::from_secs(args.wait.into()),
+        _ => ANSWER_WITHIN,
+    }
+}
+
+/// The longest name the reader sees an agent by, in characters.
+pub const AGENT_NAME_MAX: usize = 32;
+
+/// What the reader sees an agent called when its client gives no name Lectern can show.
+pub const UNNAMED_AGENT: &str = "An agent";
+
+/// The name the reader sees an agent by, from the name its MCP client gives (`hello`): "Claude"
+/// for Claude Code (`claude-code`) or any name starting `claude`, "Codex" for `codex`, in any
+/// letter case. Any other name keeps only its ASCII letters, digits, spaces and `._-`, trimmed, at
+/// most [`AGENT_NAME_MAX`] of them. With no client, or nothing left, or "You" left (the reader's
+/// own name in a review sidecar), it is [`UNNAMED_AGENT`].
+pub fn agent_name(client: Option<&ClientInfo>) -> String {
+    let Some(client) = client else {
+        return UNNAMED_AGENT.to_owned();
+    };
+    let given = client.name.trim().to_lowercase();
+    if given.starts_with("claude") {
+        return "Claude".to_owned();
+    }
+    if given == "codex" {
+        return "Codex".to_owned();
+    }
+    let kept: String = client
+        .name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
+        .collect();
+    let name: String = kept.trim().chars().take(AGENT_NAME_MAX).collect();
+    let name = name.trim_end();
+    if name.is_empty() || name.eq_ignore_ascii_case("you") {
+        return UNNAMED_AGENT.to_owned();
+    }
+    name.to_owned()
+}
 
 /// The named pipe Lectern serves agents on, for the app `identifier` and the user whose SID (as a
 /// string, `S-1-5-21-…`) is `user_sid`: `\\.\pipe\lectern-<identifier>-<16 hex digits>`, the

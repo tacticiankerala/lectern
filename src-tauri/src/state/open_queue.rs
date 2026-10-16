@@ -7,21 +7,37 @@ use lectern_core::ipc::OpenRequest;
 
 use super::sync::lock;
 
-/// Files that second launches ask to open. Until the UI has asked for its startup payload it
-/// can't receive events, so the latest request is held for `startup` instead.
+/// Files that second launches, or agents, ask to open. Until the UI has asked for its startup
+/// payload it can't receive events, so the latest request is held for `startup` instead.
 #[derive(Default)]
 pub struct OpenQueue {
-    inner: Mutex<(bool, Option<OpenRequest>)>,
+    inner: Mutex<(bool, Option<HeldOpen>)>,
+}
+
+/// A request held for the UI's startup, and whether an agent made it: an agent's file opens as it
+/// is, trusting nothing, where a launch's makes its host trusted.
+pub(super) struct HeldOpen {
+    pub(super) request: OpenRequest,
+    pub(super) by_agent: bool,
 }
 
 impl OpenQueue {
-    /// Holds `request` while the UI isn't ready, or hands it back to be sent now.
+    /// Holds `request`, a launch's, while the UI isn't ready, or hands it back to be sent now.
     pub fn offer(&self, request: OpenRequest) -> Option<OpenRequest> {
+        self.hold(request, false)
+    }
+
+    /// As `offer`, for an agent's request.
+    pub(super) fn offer_from_agent(&self, request: OpenRequest) -> Option<OpenRequest> {
+        self.hold(request, true)
+    }
+
+    fn hold(&self, request: OpenRequest, by_agent: bool) -> Option<OpenRequest> {
         let mut inner = lock(&self.inner);
         if inner.0 {
             return Some(request);
         }
-        inner.1 = Some(request);
+        inner.1 = Some(HeldOpen { request, by_agent });
         None
     }
 
@@ -31,7 +47,7 @@ impl OpenQueue {
     }
 
     /// Marks the UI ready and returns the request held for it, if any.
-    pub(super) fn ready(&self) -> Option<OpenRequest> {
+    pub(super) fn ready(&self) -> Option<HeldOpen> {
         let mut inner = lock(&self.inner);
         inner.0 = true;
         inner.1.take()
@@ -85,12 +101,23 @@ mod tests {
         };
         assert!(queue.offer(request(r"C:\a.md")).is_none());
         assert!(queue.offer(request(r"C:\b.md")).is_none());
-        assert_eq!(queue.ready().map(|r| r.path), Some(r"C:\b.md".to_owned()));
+        assert_eq!(
+            queue.ready().map(|held| (held.request.path, held.by_agent)),
+            Some((r"C:\b.md".to_owned(), false))
+        );
         assert_eq!(
             queue.offer(request(r"C:\c.md")).map(|r| r.path),
             Some(r"C:\c.md".to_owned())
         );
         assert!(queue.ready().is_none());
+        // An agent's is held the same way, marked as the agent's.
+        let queue = OpenQueue::default();
+        assert!(queue.offer(request(r"C:\a.md")).is_none());
+        assert!(queue.offer_from_agent(request(r"C:\b.md")).is_none());
+        assert_eq!(
+            queue.ready().map(|held| (held.request.path, held.by_agent)),
+            Some((r"C:\b.md".to_owned(), true))
+        );
     }
 
     #[test]

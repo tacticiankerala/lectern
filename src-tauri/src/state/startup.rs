@@ -12,6 +12,7 @@ use std::thread;
 use lectern_core::ipc::{OpenRequest, OpenResult, SettingsSnapshot, StartupPayload, UserOpen};
 
 use super::doc::Early;
+use super::open_queue::HeldOpen;
 use super::paths::path_string;
 use super::sync::{lock, write};
 use super::WindowState;
@@ -43,10 +44,14 @@ impl WindowState {
         // Last, so a second launch during the waits above still wins. It counts as an open even
         // when it opens nothing (a folder without a README), so a boot render landing late
         // stays quiet.
-        if let Some(request) = self.opens.ready() {
+        if let Some(HeldOpen { request, by_agent }) = self.opens.ready() {
             self.next_seq();
             let path = PathBuf::from(&request.path);
-            if self.blank_window_folder(&path) {
+            if by_agent {
+                // A file, its host checked already (`state::agent`): opened as it is, trusting
+                // nothing new.
+                initial = Some(self.open_document(&request.path));
+            } else if self.blank_window_folder(&path) {
                 // The UI's listeners are in place before it asks for this payload.
                 self.emit(UiEvent::OpenRequest(OpenRequest {
                     folder: true,

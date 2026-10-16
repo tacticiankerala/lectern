@@ -697,7 +697,7 @@ fn target(value: &Value, key: &str, places: &[&str]) -> Result<Target, String> {
 }
 
 /// `items` as a list in a sentence: `a`, `a or b`, `a, b or c`.
-fn listed(items: &[&str], and: &str) -> String {
+pub(crate) fn listed(items: &[&str], and: &str) -> String {
     match items {
         [] => String::new(),
         [one] => (*one).to_owned(),

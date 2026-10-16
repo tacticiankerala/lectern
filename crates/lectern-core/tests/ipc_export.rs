@@ -104,6 +104,8 @@ fn ts_bindings_exported() {
         "AgentReply",
         "WindowView",
         "ViewSelection",
+        "AskAnswer",
+        "AskOutcome",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),

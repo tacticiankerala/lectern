@@ -2,7 +2,8 @@
 //! credentials, so a path that comes from a note may only lead to a host the user chose: a
 //! library root's in any workspace, open or closed (its canonical form included), a path
 //! mapping's, WSL's, or one the user opened a file from by launching Lectern with it. Local paths
-//! are always fine.
+//! are always fine. An agent's path reaches only a host trusted already, and an agent's open never
+//! adds one (`state::agent`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

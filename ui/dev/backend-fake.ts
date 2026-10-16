@@ -11,7 +11,8 @@
 // does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
 // from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
 // which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, which
-// answers with what the UI replies, as Rust would wait for it.
+// answers with what the UI replies, as Rust would wait for it; what became of a `show` the UI asked
+// the reader about, which it tells Rust later, is kept in `agentAnswers`.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -36,6 +37,7 @@
 import type { Backend, BackendEvent } from "../src/backend";
 import type { AgentReply } from "../src/generated/AgentReply";
 import type { AgentRequest } from "../src/generated/AgentRequest";
+import type { AskAnswer } from "../src/generated/AskAnswer";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
@@ -289,8 +291,14 @@ export interface FakeControl {
   readonly followed: FollowTarget[];
   /** Where the UI said the keyboard focus was, each time it said, in order. */
   readonly frameFocus: FrameFocus[];
-  /** Sends an agent's request to the UI (`agent-request`); answers with the UI's reply. */
-  agentRequest(request: AgentRequest): Promise<AgentReply>;
+  /**
+   * Sends an agent's request to the UI (`agent-request`), from the agent named `agent` as the
+   * reader sees it ("Claude" when not given); answers with the UI's reply. The requests are
+   * numbered from 1.
+   */
+  agentRequest(request: AgentRequest, agent?: string): Promise<AgentReply>;
+  /** What became of each `show` the UI asked the reader about, as it told Rust, in order. */
+  readonly agentAnswers: { id: number; answer: AskAnswer }[];
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -595,6 +603,7 @@ export class FakeBackend implements Backend, FakeControl {
   /** Agents' requests sent to the UI and not answered yet, by id. */
   private readonly agentCalls = new Map<number, (reply: AgentReply) => void>();
   private agentCallId = 0;
+  readonly agentAnswers: { id: number; answer: AskAnswer }[] = [];
   /** Sidecars, by note path key. */
   private readonly reviews = new Map<string, StoredReview>();
   /** Core's text blocks, by path key. */
@@ -1424,16 +1433,20 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
-  agentRequest(request: AgentRequest): Promise<AgentReply> {
+  agentRequest(request: AgentRequest, agent = "Claude"): Promise<AgentReply> {
     const id = ++this.agentCallId;
     const replied = new Promise<AgentReply>((resolve) => {
       this.agentCalls.set(id, resolve);
     });
-    this.emit("agent-request", { id, request });
+    this.emit("agent-request", { id, request, agent });
     return replied;
   }
 
   replyToAgent(id: number, reply: AgentReply): Promise<void> {
+    if (reply.kind === "answered") {
+      this.agentAnswers.push({ id, answer: reply.answer });
+      return Promise.resolve();
+    }
     this.agentCalls.get(id)?.(reply);
     this.agentCalls.delete(id);
     return Promise.resolve();

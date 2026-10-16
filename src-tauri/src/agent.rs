@@ -1,7 +1,8 @@
 //! The agent pipe's server, in the Lectern window process: `lectern.exe mcp` connects and sends
-//! one request per line, each answered within `ANSWER_WITHIN`, on a thread of its own, by the app
-//! (`App::agent_answer`), and connections are served side by side. Past `MAX_CONNECTIONS`
-//! connections, or `MAX_IN_FLIGHT` requests on one, the answer is that Lectern is busy.
+//! one request per line, each answered in time (`answer_within`: `ANSWER_WITHIN`, and a `show`'s
+//! wait for the reader), on a thread of its own, by the app (`App::agent_answer`), for the agent
+//! its `hello` named; connections are served side by side. Past `MAX_CONNECTIONS` connections, or
+//! `MAX_IN_FLIGHT` requests on one, the answer is that Lectern is busy.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -10,7 +11,8 @@ use std::thread;
 
 use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::{
-    pipe_name, printable, AgentRequest, Answer, PipeReply, PipeRequest, ANSWER_WITHIN, MAX_LINE,
+    agent_name, answer_within, pipe_name, printable, AgentRequest, Answer, PipeReply, PipeRequest,
+    MAX_LINE,
 };
 use serde_json::{json, Value};
 
@@ -19,8 +21,8 @@ use crate::pipe::Stopper;
 use crate::pipe::{self, Listener, Pipe};
 use crate::state::App;
 
-/// What answers a request.
-pub type Handler = Arc<dyn Fn(AgentRequest) -> Result<Value, String> + Send + Sync>;
+/// What answers a request, from the agent named (as the reader sees it, `agent_name`).
+pub type Handler = Arc<dyn Fn(AgentRequest, &str) -> Result<Value, String> + Send + Sync>;
 
 /// The answer when the app takes too long.
 const TOO_SLOW: &str = "Lectern didn't answer in time.";
@@ -47,7 +49,10 @@ pub fn start(app: Arc<App>, identifier: &str) {
                 }
             };
             if let Some(listener) = listen_or_warn(&name) {
-                accept_loop(listener, Arc::new(move |r| app.agent_answer(r)));
+                accept_loop(
+                    listener,
+                    Arc::new(move |r, agent| app.agent_answer(r, agent)),
+                );
             }
         });
     if let Err(e) = started {
@@ -174,10 +179,12 @@ fn refuse_connection(pipe: &Pipe) {
 
 /// Reads the client's requests one line at a time, answering each on a thread of its own, until
 /// it closes or sends something that isn't a request. At most [`MAX_IN_FLIGHT`] are worked on at
-/// once; one past that is answered [`BUSY`] at once.
+/// once; one past that is answered [`BUSY`] at once. Each is answered for the agent the last
+/// `hello` named.
 fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
     let writing = Arc::new(Mutex::new(()));
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let mut agent = agent_name(None);
     let mut lines = LineReader::new(&*pipe, MAX_LINE);
     loop {
         let line = match lines.next_line() {
@@ -205,6 +212,7 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
                 printable(&client.name),
                 printable(&client.version)
             );
+            agent = agent_name(Some(client));
             reply(
                 &pipe,
                 &writing,
@@ -218,24 +226,35 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
             continue;
         };
         let (pipe, writing, handle) = (Arc::clone(&pipe), Arc::clone(&writing), Arc::clone(handle));
+        let agent = agent.clone();
         let answering = thread::Builder::new()
             .name("lectern-agent-call".to_owned())
-            .spawn(move || reply(&pipe, &writing, id, answer_within(&handle, request, place)));
+            .spawn(move || {
+                let answer = answer_in_time(&handle, request, agent, place);
+                reply(&pipe, &writing, id, answer);
+            });
         if let Err(e) = answering {
             log::warn!("couldn't answer an agent: {e}");
         }
     }
 }
 
-/// `handle`'s answer to `request`, or an error once `ANSWER_WITHIN` has passed without one. The
-/// request keeps its `place` until `handle` is done with it, however long that takes.
-fn answer_within(handle: &Handler, request: AgentRequest, place: Taken) -> Result<Value, String> {
+/// `handle`'s answer to `request` from `agent`, or an error once its time (`answer_within`) has
+/// passed without one. The request keeps its `place` until `handle` is done with it, however long
+/// that takes.
+fn answer_in_time(
+    handle: &Handler,
+    request: AgentRequest,
+    agent: String,
+    place: Taken,
+) -> Result<Value, String> {
     let (done, answered) = mpsc::channel();
     let handle = Arc::clone(handle);
+    let within = answer_within(&request);
     let working = thread::Builder::new()
         .name("lectern-agent-work".to_owned())
         .spawn(move || {
-            let answer = handle(request);
+            let answer = handle(request, &agent);
             // Given back before the answer, so a client that has it may ask again at once.
             drop(place);
             let _ = done.send(answer);
@@ -244,7 +263,7 @@ fn answer_within(handle: &Handler, request: AgentRequest, place: Taken) -> Resul
         return Err(format!("Lectern couldn't take the request: {e}"));
     }
     answered
-        .recv_timeout(ANSWER_WITHIN)
+        .recv_timeout(within)
         .unwrap_or_else(|_| Err(TOO_SLOW.to_owned()))
 }
 
@@ -297,7 +316,7 @@ mod tests {
     }
 
     fn status_handler() -> Handler {
-        Arc::new(|request| match request {
+        Arc::new(|request, _| match request {
             AgentRequest::Status => Ok(json!({"windows": [], "closedWorkspaces": []})),
             _ => Err("Not yet available.".to_owned()),
         })
@@ -338,12 +357,37 @@ mod tests {
         );
     }
 
+    /// Each request is answered for the agent its connection's `hello` named, as the reader sees
+    /// it; before any `hello`, for an unnamed agent.
+    #[test]
+    fn requests_are_answered_for_the_agent_hello_named() {
+        let name = test_name("named");
+        let _server = serve(&name, Arc::new(|_, agent| Ok(json!(agent)))).unwrap();
+        let pipe = connect(&name).unwrap();
+        let mut lines = LineReader::new(&pipe, MAX_LINE);
+        assert_eq!(
+            ask(&pipe, &mut lines, 1, AgentRequest::Status),
+            Answer::Ok(json!("An agent"))
+        );
+        let hello = AgentRequest::Hello {
+            client: ClientInfo {
+                name: "claude-code".to_owned(),
+                version: "2.1.0".to_owned(),
+            },
+        };
+        assert!(matches!(ask(&pipe, &mut lines, 2, hello), Answer::Ok(_)));
+        assert_eq!(
+            ask(&pipe, &mut lines, 3, AgentRequest::Status),
+            Answer::Ok(json!("Claude"))
+        );
+    }
+
     #[test]
     fn a_slow_answer_does_not_hold_up_the_next() {
         let name = test_name("slow");
         let (release, released) = mpsc::channel::<()>();
         let released = Mutex::new(released);
-        let handler: Handler = Arc::new(move |request| match request {
+        let handler: Handler = Arc::new(move |request, _| match request {
             AgentRequest::Status => {
                 let _ = released
                     .lock()
@@ -398,7 +442,7 @@ mod tests {
         let entered = Arc::new(AtomicUsize::new(0));
         let handler: Handler = {
             let (gate, entered) = (Arc::clone(&gate), Arc::clone(&entered));
-            Arc::new(move |request| match request {
+            Arc::new(move |request, _| match request {
                 AgentRequest::Status => {
                     entered.fetch_add(1, Ordering::SeqCst);
                     let (open, opened) = &*gate;

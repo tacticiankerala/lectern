@@ -116,6 +116,8 @@ pub struct Timings {
     pub scan_delay: Duration,
     /// The compiled grammars are released once every window has been in the background this long.
     pub release_after: Duration,
+    /// How long an agent's request waits for a window to show before bringing it forward.
+    pub shown: Duration,
 }
 
 impl Default for Timings {
@@ -128,6 +130,7 @@ impl Default for Timings {
             root: Duration::from_secs(8),
             scan_delay: Duration::from_secs(2),
             release_after: Duration::from_secs(60),
+            shown: Duration::from_secs(4),
         }
     }
 }

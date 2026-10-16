@@ -5,11 +5,12 @@
 use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use lectern_core::agent::show::FocusStep;
 use lectern_core::cli::Args;
-use lectern_core::ipc::{OpenRequest, Settings, ThemeId, ThemeMode};
+use lectern_core::ipc::{AgentFocus, OpenRequest, Settings, ThemeId, ThemeMode};
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
 use lectern_core::workspace::WindowPlacement;
@@ -35,6 +36,8 @@ pub const MAIN_WINDOW: &str = "main";
 
 /// How long setup, on the main thread, waits for the boot thread to load the settings.
 const PROFILE_WAIT: Duration = Duration::from_secs(3);
+/// How long bringing a window forward for an agent waits for the main thread to do it.
+const AGENT_FOCUS_WAIT: Duration = Duration::from_secs(2);
 /// The part of a window's top edge that must be on a monitor for the window to be reachable.
 const TITLE_BAR_HEIGHT: u32 = 32;
 const MIN_VISIBLE_WIDTH: u32 = 64;
@@ -322,6 +325,29 @@ pub fn focus_window(handle: &AppHandle, label: &str) {
             let _ = window.set_focus();
         }
     }
+}
+
+/// Brings the window `label` forward for an agent as `mode` has it, on the main thread, which owns
+/// it (`win::bring_forward`), and says how far it came. `None` when it isn't showing, or the main
+/// thread didn't get to it in time.
+pub fn agent_focus(handle: &AppHandle, label: &str, mode: AgentFocus) -> Option<FocusStep> {
+    let window = handle.get_webview_window(label)?;
+    if !window.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let (done, step) = mpsc::channel();
+    let working = window.clone();
+    let queued = window.run_on_main_thread(move || match working.hwnd() {
+        Ok(hwnd) => {
+            let _ = done.send(win::bring_forward(&win::Win32Window(hwnd), mode));
+        }
+        Err(e) => log::warn!("couldn't bring {} forward: {e}", working.label()),
+    });
+    if let Err(e) = queued {
+        log::warn!("couldn't bring {label} forward: {e}");
+        return None;
+    }
+    step.recv_timeout(AGENT_FOCUS_WAIT).ok()
 }
 
 /// Keeps `window`, restored at launch and just shown, behind `front`, the window the user is in,

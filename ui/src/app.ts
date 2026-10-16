@@ -25,7 +25,9 @@
 //   one, and sends Lectern's shortcuts pressed there as `frame-key`, which run as keydowns do. It
 //   tells what an open page has loaded from the web as `page-loads`.
 // - An agent's request for this window (`agent-request`) is answered from agent.ts, loaded on the
-//   first, with `replyToAgent`; it is listened for before `startup`, like the others.
+//   first, with `replyToAgent`; it is listened for before `startup`, like the others. An agent's
+//   `show` opens as a link does, on the history, so unsaved comment text is kept as on any other
+//   switch; asked about first, the bar over the document waits for the reader.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -45,6 +47,7 @@ import type { CommentsController } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import { trackFrameFocus } from "./frame-view";
+import type { Agent } from "./agent";
 import type { AgentCall } from "./generated/AgentCall";
 import type { AgentReply } from "./generated/AgentReply";
 import type { Crumb } from "./generated/Crumb";
@@ -240,6 +243,8 @@ export class App {
   private positionTimer: ReturnType<typeof setTimeout> | null = null;
   /** Tells Rust where the keyboard focus is, should a frame have come or gone. */
   readonly checkFrameFocus: () => void;
+  /** This window's part in answering agents, once the first request has loaded it. */
+  private agent: Agent | null = null;
 
   constructor(
     readonly backend: Backend,
@@ -1013,20 +1018,41 @@ export class App {
   private async agentRequested(call: AgentCall): Promise<void> {
     let reply: AgentReply;
     try {
-      const { answer } = await import("./agent.js");
-      reply = answer(
-        {
-          doc: () => this.state.doc,
-          docElement: () => this.layout.doc,
-          scroller: () => this.scroller,
-          page: () => this.view.page,
+      const { Agent } = await import("./agent.js");
+      this.agent ??= new Agent({
+        doc: () => this.state.doc,
+        docElement: () => this.layout.doc,
+        scroller: () => this.scroller,
+        page: () => this.view.page,
+        shownPath: () => this.nav.currentPath(),
+        opens: () => this.state.settings.agentOpens,
+        open: (path, line) => this.openForAgent(path, line),
+        scrollToLine: (line) => {
+          this.view.scrollToLine(line);
         },
-        call.request,
-      );
+        answered: (id, answer) => {
+          quietly(this.backend.replyToAgent(id, { kind: "answered", answer }));
+        },
+        bar: this.layout.agentAsk,
+      });
+      reply = await this.agent.answer(call);
     } catch (e) {
       reply = { kind: "failed", message: `Lectern couldn't answer: ${String(e)}` };
     }
     quietly(this.backend.replyToAgent(call.id, reply));
+  }
+
+  /**
+   * Opens `path` for an agent, on the history, at the source line `line` when given. Once it has
+   * landed: null when it is on screen, else why it isn't.
+   */
+  private async openForAgent(path: string, line: number | null): Promise<string | null> {
+    await this.open(path, line === null ? { push: true } : { push: true, line });
+    const { doc, error } = this.state;
+    if (doc && samePath(doc.path, path)) {
+      return null;
+    }
+    return error && samePath(error.path, path) ? error.message : "Another file opened first.";
   }
 
   /** The text selected in the HTML page on screen changed: the Comment button follows it. */

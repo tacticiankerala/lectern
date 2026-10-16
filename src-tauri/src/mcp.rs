@@ -28,7 +28,7 @@ use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::mcp::{code, Handled, Mcp};
 use lectern_core::agent::request::ClientInfo;
 use lectern_core::agent::{
-    pipe_name, same_user, AgentRequest, Answer, PipeReply, PipeRequest, ANSWER_WITHIN,
+    answer_within, pipe_name, same_user, AgentRequest, Answer, PipeReply, PipeRequest,
     FOREIGN_PIPE, MAX_LINE,
 };
 use serde_json::{json, Value};
@@ -159,7 +159,8 @@ impl Lectern {
     /// Lectern's answer to `request`, from `client`; the error is a sentence for the agent.
     pub fn call(&self, request: AgentRequest, client: Option<ClientInfo>) -> Result<Value, String> {
         let connection = self.connection(client)?;
-        match connection.ask(request, ANSWER_WITHIN + GRACE) {
+        let within = answer_within(&request) + GRACE;
+        match connection.ask(request, within) {
             Ok(answer) => answer,
             Err(Failure::Lost) => Err("Lost the connection to Lectern. Try again.".to_owned()),
             Err(Failure::TimedOut) => Err("Lectern didn't answer in time.".to_owned()),
@@ -511,7 +512,7 @@ mod tests {
         let served = Arc::new(AtomicBool::new(false));
         let handler: agent::Handler = {
             let served = Arc::clone(&served);
-            Arc::new(move |request| {
+            Arc::new(move |request, _| {
                 served.store(true, Ordering::SeqCst);
                 match request {
                     AgentRequest::Status => Ok(json!({"stub": std::process::id()})),
@@ -564,7 +565,7 @@ mod tests {
         let asked = Arc::new(AtomicU64::new(0));
         let handler: agent::Handler = {
             let asked = Arc::clone(&asked);
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 asked.fetch_add(1, Ordering::SeqCst);
                 Ok(json!({}))
             })

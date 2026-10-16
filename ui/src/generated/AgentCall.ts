@@ -5,4 +5,8 @@ import type { AgentRequest } from "./AgentRequest";
  * Event payload (`agent-request`): a request for a window's UI. It answers with the command
  * `agent_reply(id, reply)`.
  */
-export type AgentCall = { id: number, request: AgentRequest, };
+export type AgentCall = { id: number, request: AgentRequest, 
+/**
+ * The agent's name as the reader sees it ([`super::agent_name`]): "Claude".
+ */
+agent: string, };

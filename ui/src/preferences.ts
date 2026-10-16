@@ -4,11 +4,13 @@
 // status badges, review comments on or off, how many recent files the header's menu lists (5 to
 // 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the WSL
 // distribution Linux paths go into (listed each time Preferences opens, and hidden without WSL),
-// the editor command, automatic update checks, and the workspaces, to rename or delete (not one
-// open in a window). Then the version. Settings changed elsewhere show at once in the switches,
+// the editor command, automatic update checks, what an agent's open of a file does and how its
+// window comes forward, and the workspaces, to rename or delete (not one open in a window). Then the version. Settings changed elsewhere show at once in the switches,
 // the theme, the WSL distribution and the path mappings, unless the mappings were edited here:
 // those are what closing saves. Loaded on first use.
 import { h } from "./dom";
+import type { AgentFocus } from "./generated/AgentFocus";
+import type { AgentOpens } from "./generated/AgentOpens";
 import type { EditorPref } from "./generated/EditorPref";
 import type { HtmlPages } from "./generated/HtmlPages";
 import type { LibraryPayload } from "./generated/LibraryPayload";
@@ -57,6 +59,19 @@ const HTML_PAGES: [HtmlPages, string][] = [
   ["static", "No page scripts"],
 ];
 
+/** What an agent's open of another file does, as Preferences offers it. */
+const AGENT_OPENS: [AgentOpens, string][] = [
+  ["ask", "Ask"],
+  ["switch", "Switch right away"],
+];
+
+/** How the window an agent shows something in comes forward, as Preferences offers it. */
+const AGENT_FOCUS: [AgentFocus, string][] = [
+  ["front", "Bring Lectern to front"],
+  ["raise", "Show without taking focus"],
+  ["none", "Leave windows alone"],
+];
+
 interface MappingRow {
   el: HTMLElement;
   from: HTMLInputElement;
@@ -94,6 +109,8 @@ export class Preferences {
   private readonly reviewComments: HTMLInputElement;
   private readonly recentInMenu: HTMLInputElement;
   private readonly htmlPages: HTMLInputElement[];
+  private readonly agentOpens: HTMLInputElement[];
+  private readonly agentFocus: HTMLInputElement[];
   private readonly version: HTMLElement;
   private returnFocus: Element | null = null;
 
@@ -224,6 +241,20 @@ export class Preferences {
       });
       return input;
     });
+    this.agentOpens = AGENT_OPENS.map(([choice]) => {
+      const input = h("input", { type: "radio", name: "lx-agent-opens", value: choice });
+      input.addEventListener("change", () => {
+        this.host.update({ agentOpens: choice });
+      });
+      return input;
+    });
+    this.agentFocus = AGENT_FOCUS.map(([choice]) => {
+      const input = h("input", { type: "radio", name: "lx-agent-focus", value: choice });
+      input.addEventListener("change", () => {
+        this.host.update({ agentFocus: choice });
+      });
+      return input;
+    });
     this.autoUpdate = h("input", { type: "checkbox", name: "lx-auto-update" });
     this.autoUpdate.addEventListener("change", () => {
       this.host.update({ autoUpdate: this.autoUpdate.checked });
@@ -308,6 +339,18 @@ export class Preferences {
         h("label", { class: "prefs-check" }, this.autoUpdate, "Check for updates automatically"),
       ),
       section(
+        "Agents",
+        "When Claude or another AI agent connected to Lectern shows you a file.",
+        choices("When an agent opens a file", this.agentOpens, AGENT_OPENS),
+        h(
+          "p",
+          { class: "prefs-hint" },
+          "Ask shows a bar over the document, with Show and Not now, before another file replaces the one you're reading.",
+        ),
+        choices("When an agent shows something", this.agentFocus, AGENT_FOCUS),
+        h("p", { class: "prefs-hint" }, "Leave windows alone only flashes the taskbar."),
+      ),
+      section(
         "Workspaces",
         "Each window shows one. Deleting a workspace forgets it, never its files.",
         this.workspaceList,
@@ -379,6 +422,12 @@ export class Preferences {
     }
     for (const input of this.htmlPages) {
       input.checked = input.value === s.htmlPages;
+    }
+    for (const input of this.agentOpens) {
+      input.checked = input.value === s.agentOpens;
+    }
+    for (const input of this.agentFocus) {
+      input.checked = input.value === s.agentFocus;
     }
     const own = this.host.workspace()?.ownTheme ?? false;
     this.ownTheme.checked = own;
@@ -714,6 +763,20 @@ function themeSelect(mode: "light" | "dark", label: string): HTMLSelectElement {
 /** A select in its frame, which draws the arrow. */
 function select(el: HTMLSelectElement): HTMLElement {
   return h("span", { class: "select" }, el);
+}
+
+/** A group of radio `inputs`, named `label`, each beside its label in `options`. */
+function choices(
+  label: string,
+  inputs: HTMLInputElement[],
+  options: [string, string][],
+): HTMLElement {
+  return h(
+    "div",
+    { class: "prefs-choices", role: "radiogroup", "aria-label": label },
+    h("p", { class: "prefs-choices-label", "aria-hidden": "true" }, label),
+    ...options.map(([, text], i) => h("label", { class: "prefs-check" }, inputs[i] ?? "", text)),
+  );
 }
 
 function section(title: string, lede: string | null, ...content: HTMLElement[]): HTMLElement {

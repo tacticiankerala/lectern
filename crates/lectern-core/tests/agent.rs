@@ -183,10 +183,11 @@ fn a_window_is_asked_with_an_id_and_answers_by_kind() {
     let call = AgentCall {
         id: 3,
         request: AgentRequest::Status,
+        agent: "Claude".to_owned(),
     };
     assert_eq!(
         serde_json::to_value(&call).unwrap(),
-        json!({"id": 3, "request": {"tool": "status"}})
+        json!({"id": 3, "request": {"tool": "status"}, "agent": "Claude"})
     );
     let view: AgentReply = serde_json::from_value(json!({
         "kind": "view",
@@ -207,6 +208,7 @@ fn a_window_is_asked_with_an_id_and_answers_by_kind() {
                 start_line: Some(14),
                 end_line: Some(14),
             }),
+            ..WindowView::default()
         })
     );
     let failed: AgentReply =
@@ -301,8 +303,13 @@ fn wsl_mapper() -> PathMapper {
     }
 }
 
+/// The hosts an agent may reach in these tests: a library's share, and WSL's.
+fn reachable() -> Vec<String> {
+    vec!["nas".to_owned(), "wsl.localhost".to_owned()]
+}
+
 fn mapped(raw: &str) -> AgentPath {
-    agent_path(&wsl_mapper(), raw).unwrap_or_else(|e| panic!("{raw}: {e}"))
+    agent_path(&wsl_mapper(), raw, &reachable()).unwrap_or_else(|e| panic!("{raw}: {e}"))
 }
 
 #[test]
@@ -336,7 +343,12 @@ fn any_linux_path_goes_into_wsl_not_only_a_system_one() {
     );
     assert_eq!(path.wsl.as_deref(), Some("/workspace/notes/plan.md"));
     // Without WSL it has no Windows form, rather than a path from the current drive's root.
-    let err = agent_path(&PathMapper::default(), "/workspace/notes/plan.md").unwrap_err();
+    let err = agent_path(
+        &PathMapper::default(),
+        "/workspace/notes/plan.md",
+        &reachable(),
+    )
+    .unwrap_err();
     assert!(err.contains("/workspace/notes/plan.md"), "{err}");
 }
 
@@ -375,11 +387,16 @@ fn a_line_or_anchor_after_the_path_is_set_apart() {
 #[test]
 fn a_path_that_is_not_a_full_one_or_not_reachable_is_refused() {
     for raw in ["plan.md", "notes/plan.md", "", "  "] {
-        let err = agent_path(&wsl_mapper(), raw).unwrap_err();
+        let err = agent_path(&wsl_mapper(), raw, &reachable()).unwrap_err();
         assert!(err.contains("full path"), "{raw}: {err}");
     }
     // Without WSL, a Linux path outside /mnt has no Windows form.
-    let err = agent_path(&PathMapper::default(), "/home/me/notes/today.md").unwrap_err();
+    let err = agent_path(
+        &PathMapper::default(),
+        "/home/me/notes/today.md",
+        &reachable(),
+    )
+    .unwrap_err();
     assert!(err.contains("/home/me/notes/today.md"), "{err}");
 }
 
@@ -395,13 +412,45 @@ fn a_device_path_is_refused() {
         r"\\./C:/Notes/plan.md",
         r#""\\.\PhysicalDrive0""#,
     ] {
-        let err = agent_path(&wsl_mapper(), raw).unwrap_err();
+        let err = agent_path(&wsl_mapper(), raw, &reachable()).unwrap_err();
         assert!(err.contains("device path"), "{raw}: {err}");
     }
     // A share is not a device.
     assert_eq!(
         mapped(r"\\nas\share\plan.md").windows,
         r"\\nas\share\plan.md"
+    );
+}
+
+/// An agent's path is checked on its text alone, before anything touches it: a share is reached
+/// only on a host Lectern already trusts, which the caller gives. A note can steer an agent, so an
+/// agent never makes a host trusted, as the user's own open does.
+#[test]
+fn an_agent_reaches_a_share_only_on_a_host_already_trusted() {
+    let refused = |raw: &str| agent_path(&wsl_mapper(), raw, &reachable()).unwrap_err();
+    assert_eq!(
+        refused(r"\\nas2\share\x.md"),
+        r"Lectern doesn't open files on \\nas2 for an agent; add that share as a library folder first."
+    );
+    // Any letter case. (`//nas2/share` is a Linux path, which goes into WSL.)
+    assert!(refused(r"\\NAS2\Share\x.md").contains(r"\\nas2 "));
+    assert_eq!(
+        mapped(r"\\NAS\share\notes\x.md").windows,
+        r"\\NAS\share\notes\x.md"
+    );
+    let wsl = mapped(r"\\wsl.localhost\Ubuntu\home\me\x.md");
+    assert_eq!(wsl.wsl.as_deref(), Some("/home/me/x.md"));
+    // A WSL path maps onto WSL's share, which is reached as any share is.
+    assert_eq!(
+        mapped("/home/me/x.md").windows,
+        r"\\wsl.localhost\Ubuntu\home\me\x.md"
+    );
+    assert!(agent_path(&wsl_mapper(), "/home/me/x.md", &[]).is_err());
+    // A local path has no host to trust.
+    assert_eq!(agent_path(&wsl_mapper(), PLAN, &[]).unwrap().windows, PLAN);
+    assert_eq!(
+        agent_path(&wsl_mapper(), PLAN_WSL, &[]).unwrap().windows,
+        PLAN
     );
 }
 
@@ -418,6 +467,7 @@ fn a_window_status_gives_both_forms_the_kind_and_the_heading_path() {
             start_line: Some(14),
             end_line: Some(15),
         }),
+        ..WindowView::default()
     };
     let status = window_status("main", Some("Main".to_owned()), view, &wsl_mapper());
     assert_eq!(
@@ -431,6 +481,7 @@ fn a_window_status_gives_both_forms_the_kind_and_the_heading_path() {
             "line": 12,
             "selection": {"quote": "roll back", "startLine": 14, "endLine": 15},
             "ask": null,
+            "answers": [],
         })
     );
 }
@@ -449,6 +500,7 @@ fn a_blank_window_status_is_all_nulls() {
             "line": null,
             "selection": null,
             "ask": null,
+            "answers": [],
         })
     );
 }
@@ -464,6 +516,7 @@ fn a_page_has_a_kind_and_a_long_selection_is_cut() {
             start_line: None,
             end_line: None,
         }),
+        ..WindowView::default()
     };
     let status = window_status("main", None, view, &wsl_mapper());
     assert_eq!(status.kind, Some(DocKind::Html));
