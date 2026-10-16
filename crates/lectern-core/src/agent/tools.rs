@@ -21,7 +21,7 @@ pub const TEXT_MAX: usize = 20_000;
 /// The longest a `show` waits for the reader's answer, in seconds.
 pub const WAIT_MAX: u32 = 60;
 /// The most characters one `read` returns.
-pub const READ_MAX: u32 = 40_000;
+pub const READ_MAX: u32 = 16_000;
 /// The most targets one `highlight` paints.
 pub const TARGETS_MAX: usize = 20;
 /// The most folders a new workspace starts with.
@@ -155,8 +155,8 @@ fn definition(name: &str) -> Option<Value> {
         ),
         "highlight" => (
             "Highlight passages",
-            "Highlights passages, by heading, line, quote or PDF page, in a file a Lectern \
-             window shows, after removing your earlier highlights when `clear` is set. \
+            "Highlights passages, by heading, line or quote, in a note, text file or HTML page \
+             a Lectern window shows, after removing your earlier highlights when `clear` is set. \
              Highlights are temporary: they are never saved and go when the user leaves the \
              file.",
             json!({
@@ -164,7 +164,7 @@ fn definition(name: &str) -> Option<Value> {
                                      default the file shown."),
                 "targets": {
                     "type": "array",
-                    "items": target_schema("A passage.", &PLACES[..4]),
+                    "items": target_schema("A passage.", &PLACES[..3]),
                     "maxItems": TARGETS_MAX,
                     "description": "The passages to highlight, at most 20.",
                 },
@@ -180,8 +180,9 @@ fn definition(name: &str) -> Option<Value> {
         "read" => (
             "Read the rendered text",
             "Reads the text of a file a Lectern window shows, as rendered (an HTML page's after \
-             its scripts ran), in blocks with their lines and headings. A long text comes in \
-             parts: when the answer is `truncated`, call again with `from` where it stopped.",
+             its scripts ran), with where each block starts in it, its line, and its headings as \
+             a place in the answer's `headings`. A long text comes in parts: when the answer is \
+             `truncated`, call again with `from` set to its `next`.",
             json!({
                 "path": path_schema("The file to read, which a window must show; by default \
                                      the file shown."),
@@ -194,8 +195,9 @@ fn definition(name: &str) -> Option<Value> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": READ_MAX,
-                    "description": "The most characters to return, up to 40,000; 20,000 by \
-                                    default.",
+                    "description": "The most characters to return, up to 16,000; 8,000 by \
+                                    default. A page of many small blocks holds fewer, to keep \
+                                    the answer under 48 KB.",
                 },
             }),
             &[][..],
@@ -546,7 +548,7 @@ impl Args<'_> {
         }
         items
             .iter()
-            .map(|item| target(item, "targets", &PLACES[..4]))
+            .map(|item| target(item, "targets", &PLACES[..3]))
             .collect()
     }
 

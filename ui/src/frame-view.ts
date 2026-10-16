@@ -2,14 +2,16 @@
 // (`#lx-doc-pane.framed`). The frame is in the page before its `src` is set, as WebView2 gives the
 // first document the frame's colour scheme only then. Every show loads a new URL (`v=<n>` in its
 // query): only a reload, never a change of hash, takes a PDF to a page or shows a change on disk.
+// A PDF opens at its first page, or the one asked for (`#page=<n>`), and goes to another page by
+// loading again.
 //
 // A PDF's frame has no sandbox, which WebView2's viewer won't run in. A page's always has one that
 // allows scripts and never the same origin, and every response of the page protocol but a PDF's
 // carries a sandboxing CSP of its own. A page's frame follows Lectern's light or dark theme, and
 // its bridge talks to Lectern through page-frame.ts, loaded on first use: only messages its own
-// window posts are taken, held until that module is there, as are an anchor or a saved place to go
-// to once the page is ready (its own saved place unless something else is asked for). Above a page,
-// a notice names what it loads from the web.
+// window posts are taken, held until that module is there, as are a passage to find, an anchor or a
+// saved place to go to once the page is ready (its own saved place unless something else is asked
+// for). Above a page, a notice names what it loads from the web.
 //
 // Only messages signed with the open's key (`bridgeKey`) are taken: Rust puts it in the bridge of
 // the open's own page alone, so no page script can forge one, and no page the frame navigates to
@@ -28,10 +30,10 @@ import { samePath } from "./dom";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FrameFocus } from "./generated/FrameFocus";
 import type { PageLoads } from "./generated/PageLoads";
-import type { PageFrame, PageHost } from "./page-frame";
+import type { PageAim, PageFrame, PageHost } from "./page-frame";
 
-/** Where a PDF opens: no reading position is kept in one. */
-const PDF_START = "#page=1";
+/** Where a PDF opens unless asked otherwise: no reading position is kept in one. */
+const PDF_START = 1;
 /** A page that navigates its frame again within this long, in milliseconds, is let go. */
 const NAVIGATION_LOOP_MS = 10_000;
 /** How long a load of the frame waits for its page's signed `ready` and `loaded`, in ms. */
@@ -60,14 +62,16 @@ function withParam(url: string, name: string, value: string): string {
 export class FrameView {
   private frame: HTMLIFrameElement | null = null;
   private notice: HTMLElement | null = null;
-  /** Bumped by every show, so each loads a new URL. */
+  /** Bumped by every show, and every PDF page gone to, so each loads a new URL. */
   private version = 0;
+  /** The URL showing, before its `v` and its page. */
+  private url: string | null = null;
   /** The page's session with its bridge, once its module has loaded. */
   private session: PageFrame | null = null;
   /** What arrived for a page before its session: its bridge's messages and reports of loads. */
   private held: { messages: unknown[]; loads: PageLoads[] } = { messages: [], loads: [] };
   /** Where to take a page once it is ready, asked for before its session was there. */
-  private start: { fraction: number | null; anchor: string | null } = {
+  private start: { fraction: number | null; anchor: string | null; aim?: PageAim } = {
     fraction: null,
     anchor: null,
   };
@@ -107,8 +111,8 @@ export class FrameView {
     return this.session;
   }
 
-  /** Shows `doc`, a page or a PDF, from `url` (its `frameUrl`) in a new frame. */
-  show(doc: DocPayload, url: string): void {
+  /** Shows `doc`, a page or a PDF (at `pdfPage`), from `url` (its `frameUrl`) in a new frame. */
+  show(doc: DocPayload, url: string, pdfPage = PDF_START): void {
     this.close();
     const page = doc.kind !== "pdf";
     const frame = document.createElement("iframe");
@@ -133,9 +137,10 @@ export class FrameView {
     this.key = page ? doc.bridgeKey : null;
     // Where the reader left it, unless something else is asked for.
     this.start = { fraction: page ? (doc.position?.fraction ?? null) : null, anchor: null };
+    this.url = url;
     this.version += 1;
     const src = withParam(url, "v", String(this.version));
-    frame.src = page ? src : src + PDF_START;
+    frame.src = page ? src : `${src}#page=${String(pdfPage)}`;
     if (page) {
       frame.addEventListener("load", () => {
         this.loaded(frame);
@@ -155,6 +160,7 @@ export class FrameView {
     this.session = null;
     this.held = { messages: [], loads: [] };
     this.start = { fraction: null, anchor: null };
+    this.url = null;
     this.pagePath = null;
     this.key = null;
     this.away = false;
@@ -169,6 +175,31 @@ export class FrameView {
     if (had) {
       this.host.focusMoved();
     }
+  }
+
+  /** Takes the PDF showing to its page `page`, loading it again; nothing for anything else. */
+  toPdfPage(page: number): void {
+    const frame = this.frame;
+    if (frame?.dataset.kind !== "pdf" || this.url === null) {
+      return;
+    }
+    this.version += 1;
+    frame.src = `${withParam(this.url, "v", String(this.version))}#page=${String(page)}`;
+  }
+
+  /**
+   * Scrolls a page to the passage `aim` finds once it is ready, over its anchor or saved place;
+   * false when the ready page hasn't got it, or nothing showing is a page.
+   */
+  aim(aim: PageAim): boolean {
+    if (this.session) {
+      return this.session.aim(aim);
+    }
+    if (this.frame?.dataset.kind !== "page") {
+      return false;
+    }
+    this.start = { ...this.start, aim };
+    return true;
   }
 
   /** Scrolls a page to `fraction` of its height once it is ready. */

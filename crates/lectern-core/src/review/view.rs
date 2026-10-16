@@ -231,7 +231,7 @@ fn comment_view(
 
 /// The UTF-16 code-unit offsets into `text` of the byte offsets `at`, each on a character
 /// boundary, in one pass over the text.
-fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
+pub(crate) fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
     let unit = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     if text.is_ascii() {
         return at.iter().map(|&b| unit(b)).collect();

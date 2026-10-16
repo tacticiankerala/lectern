@@ -39,6 +39,7 @@ const VARIABLES = [
   "comment",
   "comment-focus",
   "comment-dot",
+  "agent-highlight",
 ];
 const SYNTAX = [
   "keyword",
@@ -199,19 +200,24 @@ describe("themes", () => {
     }
   });
 
-  it("comment highlights keep text readable", () => {
+  it("comment and agent highlights keep text readable", () => {
     for (const id of IDS) {
       const theme = themes.get(id) ?? new Map<string, string>();
       const bg = hexOf(theme, "bg");
       const fg = hexOf(theme, "fg");
-      for (const name of ["comment", "comment-focus"]) {
+      for (const name of ["comment", "comment-focus", "agent-highlight"]) {
         const under = over(rgbaOf(theme, name), bg);
         expect(contrast(fg, under), `${id} text on --${name}`).toBeGreaterThanOrEqual(4.5);
       }
       const dot = over(rgbaOf(theme, "comment-dot"), bg);
       expect(contrast(dot, bg), `${id} --comment-dot`).toBeGreaterThanOrEqual(3);
-      // Comments and find in page never share a colour.
+      // Comments, an agent's highlights and find in page never share a colour.
       expect(theme.get("--comment"), `${id} --comment`).not.toBe(theme.get("--mark"));
+      for (const other of ["--mark", "--comment", "--comment-focus"]) {
+        expect(theme.get("--agent-highlight"), `${id} --agent-highlight`).not.toBe(
+          theme.get(other),
+        );
+      }
     }
   });
 

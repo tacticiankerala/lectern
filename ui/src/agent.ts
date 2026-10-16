@@ -5,7 +5,7 @@
 //   ones. A note's or text file's are read from the document; an HTML page's from what its bridge
 //   last said (page-frame.ts), with no lines; a PDF tells only its file.
 // - `show`: a file opens at once in a window that shows none, or that file already (moving to its
-//   line), or when the `agentOpens` setting says to switch. Otherwise the window asks the reader
+//   target), or when the `agentOpens` setting says to switch. Otherwise the window asks the reader
 //   first, with a bar over the top of the document: "Claude wants to show plan.md › Rollout",
 //   Show and Not now. One request asks at a time: a newer one takes its place, whatever the newer
 //   one does. The reader's own moves leave it, unless they open its file themselves, which shows
@@ -13,17 +13,54 @@
 //   (failed, with why). The window leaving (its page reloading into another workspace, or the
 //   window closing once its unsaved comment text is let go) dismisses it. What became of each
 //   request asked about (shown, dismissed, replaced or failed) is told to Rust as an `answered`
-//   reply to it, and kept for `status`. Agent opens go on the history, so Back returns.
-// The other tools aren't offered yet. Loaded on the first request.
-import { blockLines, leafBlockOf, quoteFromRange, textOnly } from "./comments-text";
+//   reply to it, and kept for `status`. Agent opens go on the history, so Back returns, and so
+//   does a move within the file on screen.
+// - Targets (`landing`): in a note or a text file, Rust's core found the target and sends where
+//   (`places`), so the window goes to its line. In an HTML page the window finds it in what the
+//   page's bridge reported (`pageSpan`): a quote by its text, whitespace aside, told apart from
+//   others like it by the text before and after it; a heading by its whole text or its path, in
+//   the page's blocks (the outline's list shortens them). A `show`
+//   waits for a page still loading as long as Rust waits for its answer, and so does Show on the
+//   bar: a passage that isn't there fails, and one the page hadn't loaded in time for is
+//   `pending`, gone to once it has, the page aimed at again should it load afresh meanwhile (a
+//   change on disk). A newer request meanwhile (`replaced`), or another file on screen (failed),
+//   leaves it going nowhere; so does a newer request for a target the window started with. In a
+//   PDF, its page. `show` only moves there; `highlight` paints.
+// - `highlight`: the agent's highlights, on a layer of their own (`agent`) over the comments' and
+//   under find's, at most 20, the oldest dropped first: in a note or a text file where core found
+//   them (else over the blocks on their lines), in an HTML page through its bridge. Each keeps its
+//   target: when the text changes (the file shown afresh, a page's text reported again), they are
+//   found again, a note's by core, and painted where they are now, never at the old places; one
+//   that's gone is dropped. They are never saved, and go when the window shows another file, or
+//   the agent clears them. A PDF can't be painted: that fails.
+// - `read` of an HTML page: its blocks, as its bridge reported them, and whether it stopped them
+//   short at its limit (Rust reads any other file, and reads a page cut short as incomplete).
+// The review tools aren't offered yet. Loaded on the first request.
+import {
+  blockLines,
+  blocksOnLines,
+  buildTextIndex,
+  leafBlockOf,
+  normalize,
+  quoteFromRange,
+  rangeAt,
+  textOnly,
+  type TextIndex,
+} from "./comments-text";
 import { h, HEADINGS, samePath } from "./dom";
+import type { Span } from "./find";
 import type { AgentCall } from "./generated/AgentCall";
 import type { AgentOpens } from "./generated/AgentOpens";
 import type { AgentReply } from "./generated/AgentReply";
 import type { AskAnswer } from "./generated/AskAnswer";
 import type { AskOutcome } from "./generated/AskOutcome";
 import type { DocPayload } from "./generated/DocPayload";
+import type { HighlightArgs } from "./generated/HighlightArgs";
+import type { ReadArgs } from "./generated/ReadArgs";
 import type { ShowArgs } from "./generated/ShowArgs";
+import type { ShowAt } from "./generated/ShowAt";
+import type { Target } from "./generated/Target";
+import type { TextPlace } from "./generated/TextPlace";
 import type { ViewSelection } from "./generated/ViewSelection";
 import type { WindowView } from "./generated/WindowView";
 import { READING_BAND_PERCENT } from "./outline";
@@ -34,6 +71,105 @@ export const NOT_YET = "Not yet available.";
 
 /** How many of the reader's answers the window keeps for `status`, the latest: as Rust keeps. */
 const ANSWERS_KEPT = 10;
+
+/** The most highlights an agent has in a window; past it, the oldest goes. */
+const HIGHLIGHTS_KEPT = 20;
+
+/** Where an agent's highlights paint over the comments' (0 and 1), under find's (3 and 4). */
+const HIGHLIGHT_PRIORITY = 2;
+
+/** The answer while an HTML page hasn't reported its text yet. */
+const PAGE_LOADING = "The page hasn't loaded yet; try again in a moment.";
+
+/** The answer to a highlight in a PDF, which can't be painted. */
+const NO_PDF_HIGHLIGHT = "PDFs can't be highlighted; use show with a page target.";
+
+/** How long the window has to answer when Rust doesn't say, in milliseconds: as Rust waits. */
+const ANSWER_WITHIN_MS = 5000;
+
+/** What a wait for a page keeps of the time to answer in, for the answer to get back. */
+const ANSWER_MARGIN_MS = 500;
+
+/** What an HTML page's session gives an agent: its text as its bridge reported it, and paint. */
+export type PageText = Pick<
+  PageFrame,
+  | "text"
+  | "blocks"
+  | "starts"
+  | "headings"
+  | "ready"
+  | "truncated"
+  | "paint"
+  | "clear"
+  | "headingPath"
+  | "selection"
+>;
+
+/**
+ * Where an open lands in its file, or a move within it goes: a source line, where Rust's core found
+ * the target in a note or a text file; a PDF's page; or a passage of an HTML page, found once the
+ * page has reported its text.
+ */
+export type Landing =
+  { line: number } | { page: number } | { aim: (page: PageText) => number | null };
+
+/**
+ * Where `target` takes the reader, found by core at `place` in a note or a text file; null for none
+ * (a comment thread's, which comes later).
+ */
+export function landing(target: Target | undefined, place: TextPlace | undefined): Landing | null {
+  if (place !== undefined) {
+    return { line: place.startLine };
+  }
+  if (target === undefined || "comment" in target) {
+    return null;
+  }
+  if ("line" in target) {
+    return { line: target.line };
+  }
+  if ("page" in target) {
+    return { page: target.page };
+  }
+  return { aim: (page) => pageSpan(page, target)?.start ?? null };
+}
+
+/**
+ * One of an agent's highlights: its target, and where it is in the text on screen: in a note or a
+ * text file where core found it (`place`), in an HTML page where the window did (`span`). Null
+ * while the text has changed and it hasn't been found again.
+ */
+interface Mark {
+  target: Target;
+  place: TextPlace | null;
+  span: Span | null;
+}
+
+/**
+ * A `show` whose HTML page target is found once the page has loaded: the request, and the
+ * navigation it opened the page in (null until it has). A newer request, or another navigation,
+ * leaves it stale: it goes nowhere.
+ */
+interface Showing {
+  id: number;
+  navigation: number | null;
+}
+
+/** The id of a target the window started with, before any request: a request's is 1 or more. */
+const STARTED_WITH = 0;
+
+/**
+ * A page's target not reached yet: the request, its page, where it goes, and the showing of the
+ * page it was aimed at (null for none yet). A page shown afresh (a reload) is aimed at again.
+ */
+interface Pending {
+  showing: Showing;
+  path: string;
+  aim: (page: PageText) => number | null;
+  doc: DocPayload | null;
+}
+
+/** Whether the CSS Custom Highlight API is there to paint with. */
+const supported = (): boolean => typeof Highlight === "function" && "highlights" in CSS;
 
 /** What reading the window's document needs from the app. */
 export interface DocHost {
@@ -49,22 +185,41 @@ export interface DocHost {
 
 /** What answering agents needs from the app. */
 export interface AgentHost extends DocHost {
+  /** The HTML page's session with its bridge, once it has one. */
+  page(): PageText | null;
   /** The path on screen: the document's, or the one that failed to open; null for none. */
   shownPath(): string | null;
   /** Whether an agent's open of another file asks the reader first, or switches at once. */
   opens(): AgentOpens;
   /**
-   * Opens `path` on the history, at the source line `line` when given. Once it has landed: null
-   * when it is on screen, else why it isn't.
+   * Opens `path` on the history, at `landing` when given. Once it has landed: null when it is on
+   * screen, else why it isn't.
    */
-  open(path: string, line: number | null): Promise<string | null>;
-  /** Scrolls the document on screen to its source line `line`. */
-  scrollToLine(line: number): void;
+  open(path: string, landing: Landing | null): Promise<string | null>;
+  /**
+   * Moves within the document on screen to `landing`, marking where the reader was on the history
+   * first; false, moving nowhere, for a passage the HTML page on screen hasn't got.
+   */
+  move(landing: Landing): boolean;
+  /**
+   * The HTML page on screen once it has reported its text (signed with its open's key), waiting
+   * at most `within` milliseconds for it; null when it hasn't by then.
+   */
+  pageReady(within: number): Promise<PageText | null>;
+  /** The current navigation's number: another one opened another document, or this one again. */
+  navigation(): number;
+  /**
+   * Where each of `targets` is now in `path`, the note or text file on screen, as core finds them
+   * in the file; null for one that's gone.
+   */
+  places(path: string, targets: Target[]): Promise<(TextPlace | null)[]>;
   /**
    * Tells Rust what became of the request `id`, which the window asked the reader about, with why
    * when it `failed`; resolves once told.
    */
   answered(id: number, answer: AskAnswer, message?: string): Promise<void>;
+  /** Aims the HTML page on screen at a passage, found once it has loaded (a reload's frame too). */
+  aimPage(aim: (page: PageText) => number | null): void;
   /** Where the bar that asks the reader goes. */
   readonly bar: HTMLElement;
 }
@@ -77,7 +232,13 @@ interface Ask {
   agent: string;
   /** The heading it is about, as its target names it. */
   heading: string | null;
-  line: number | null;
+  /** Where the file opens. */
+  landing: Landing | null;
+  /** An HTML page's passage, found once the page has loaded; null for any other target. */
+  inPage: Target | null;
+  showing: Showing;
+  /** When Rust stops waiting for the reader's answer, in ms since the epoch; 0 when it doesn't. */
+  answerBy: number;
 }
 
 /** This window's part in answering agents. */
@@ -86,17 +247,31 @@ export class Agent {
   private asking: Ask | null = null;
   /** What became of the requests asked about, the oldest first. */
   private readonly answers: AskOutcome[] = [];
+  /** The agent's highlights in the file `marked`, the oldest first. */
+  private marks: Mark[] = [];
+  private marked: string | null = null;
+  /** The newest `show`'s id: an older one waiting for its page goes nowhere. */
+  private lastShow = STARTED_WITH;
+  /** A page's target not reached yet, aimed at again should the page load afresh. */
+  private pending: Pending | null = null;
 
   constructor(private readonly host: AgentHost) {}
 
   /** This window's answer to `call`. */
   async answer(call: AgentCall): Promise<AgentReply> {
     const request = call.request;
+    const places = call.places ?? [];
+    // When to have answered by, so Rust still waits for it.
+    const by = Date.now() + (call.withinMs ?? ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
     switch (request.tool) {
       case "status":
         return { kind: "view", ...this.view() };
       case "show":
-        return this.show(call.id, call.agent, request);
+        return this.show(call.id, call.agent, request, places, by);
+      case "highlight":
+        return this.highlight(request, places);
+      case "read":
+        return this.read(request);
       default:
         return { kind: "failed", message: NOT_YET };
     }
@@ -107,12 +282,108 @@ export class Agent {
     return { ...view(this.host), ask: this.asking?.path ?? null, answers: [...this.answers] };
   }
 
-  /** The document on screen changed: the file asked about, opened by the reader, is shown. */
+  /**
+   * The document on screen changed: the file asked about, opened by the reader, is shown. The
+   * agent's highlights go with another file. Shown afresh, the same file's text may have changed:
+   * they are taken off and found again, a note's by core (`places`), a page's once it has reported
+   * its text (`pageChanged`), and painted where they are now; one that's gone is dropped.
+   */
   docShown(): void {
     const doc = this.host.doc();
     if (this.asking && doc && samePath(doc.path, this.asking.path)) {
       void this.settle("shown");
     }
+    this.aimAgain(doc);
+    if (this.marked === null) {
+      return;
+    }
+    if (!(doc && samePath(doc.path, this.marked))) {
+      this.marks = [];
+      this.marked = null;
+    }
+    for (const mark of this.marks) {
+      mark.place = null;
+      mark.span = null;
+    }
+    this.paint();
+    if (doc && this.marks.length > 0 && (doc.kind === "markdown" || doc.kind === "text")) {
+      void this.findAgain(doc);
+    }
+  }
+
+  /**
+   * The page a target is pending in shown afresh (it loaded again, a new frame in the old one's
+   * place): it is aimed at again, unless the target has gone stale.
+   */
+  private aimAgain(doc: DocPayload | null): void {
+    const pending = this.pending;
+    if (pending === null || doc === null || doc === pending.doc) {
+      return;
+    }
+    if (!this.current(pending.showing) || !samePath(doc.path, pending.path)) {
+      this.pending = null;
+      return;
+    }
+    if (doc.kind === "html") {
+      pending.doc = doc;
+      this.host.aimPage(pending.aim);
+    }
+  }
+
+  /**
+   * Where a window that started for an agent goes in `path`, its first document, at `at`: a note's
+   * or a PDF's at once, an HTML page's once it has loaded, unless a newer request, or another
+   * navigation than `navigation`, comes first. Null for nowhere.
+   */
+  startedWith(at: ShowAt, path: string, navigation: number): Landing | null {
+    const target = at.target;
+    if (at.place !== undefined || !("quote" in target || "heading" in target)) {
+      return landing(target, at.place);
+    }
+    return this.pageLanding(target, { id: STARTED_WITH, navigation }, path);
+  }
+
+  /**
+   * The HTML page on screen reported its text, maybe changed: the agent's highlights are found in
+   * it again and painted where they are now, and one that's gone is dropped.
+   */
+  pageChanged(): void {
+    const page = this.host.page();
+    if (this.marks.length === 0 || this.host.doc()?.kind !== "html" || !page?.ready) {
+      return;
+    }
+    this.marks = this.marks.flatMap((mark) => {
+      const span = pageSpan(page, mark.target);
+      return span === null ? [] : [{ ...mark, span }];
+    });
+    this.paint();
+  }
+
+  /**
+   * Finds the highlights in the note `doc`, shown afresh, again through core, and paints them,
+   * unless another document, or another showing of it, came meanwhile; one that's gone is dropped.
+   */
+  private async findAgain(doc: DocPayload): Promise<void> {
+    const marks = [...this.marks];
+    let places: (TextPlace | null)[];
+    try {
+      places = await this.host.places(
+        doc.path,
+        marks.map((m) => m.target),
+      );
+    } catch {
+      places = marks.map(() => null);
+    }
+    if (this.host.doc() !== doc) {
+      return;
+    }
+    const found = new Map(marks.map((mark, i) => [mark, places[i] ?? null]));
+    this.marks = this.marks.flatMap((mark) => {
+      const place = found.get(mark);
+      if (place === undefined) return [mark];
+      return place === null ? [] : [{ ...mark, place }];
+    });
+    this.paint();
   }
 
   /**
@@ -124,49 +395,281 @@ export class Agent {
   }
 
   /**
-   * `show` from the agent `agent`, the request `id`: on screen at once, or asked about first (see
-   * the top of this file).
+   * `show` from the agent `agent`, the request `id`, at its target, which core found at `places`
+   * in a note or a text file: on screen at once, or asked about first (see the top of this file).
+   * An HTML page's target is found once the page has loaded, waited for until `by`: a passage
+   * that isn't there fails, and one the page hadn't loaded in time for is `pending`, gone to once
+   * it has.
    */
-  private async show(id: number, agent: string, args: ShowArgs): Promise<AgentReply> {
+  private async show(
+    id: number,
+    agent: string,
+    args: ShowArgs,
+    places: TextPlace[],
+    by: number,
+  ): Promise<AgentReply> {
+    this.lastShow = id;
     const target = args.target;
-    const line = target && "line" in target ? target.line : null;
+    const showing: Showing = { id, navigation: null };
+    const inPage =
+      target !== undefined && places.length === 0 && ("quote" in target || "heading" in target)
+        ? target
+        : null;
+    const land = inPage ? this.pageLanding(inPage, showing, args.path) : landing(target, places[0]);
     void this.settle("replaced");
     const doc = this.host.doc();
     if (doc && samePath(doc.path, args.path)) {
-      if (line !== null) this.host.scrollToLine(line);
+      if (inPage && land && doc.kind === "html") {
+        showing.navigation = this.host.navigation();
+        return this.reach(showing, args.path, inPage, land, by, true);
+      }
+      if (land !== null && !this.host.move(land)) {
+        return { kind: "failed", message: notThere(doc.path) };
+      }
       return { kind: "shown" };
     }
     const shown = this.host.shownPath();
     if (shown === null || samePath(shown, args.path) || this.host.opens() === "switch") {
-      return this.open(args.path, line);
+      const opened = await this.open(args.path, land);
+      if (!inPage || !land || opened.kind !== "shown" || !this.pageShown()) {
+        return opened;
+      }
+      showing.navigation = this.host.navigation();
+      this.aimed(showing, land);
+      return this.reach(showing, args.path, inPage, land, by, false);
     }
     const heading = target && "heading" in target ? target.heading : null;
-    this.asking = { id, path: args.path, agent, heading, line };
+    // Rust waits for the reader's answer `wait` seconds, when it waits.
+    const answerBy = args.wait > 0 ? Date.now() + args.wait * 1000 : 0;
+    this.asking = { id, path: args.path, agent, heading, landing: land, inPage, showing, answerBy };
     this.renderBar();
     return { kind: "asked" };
   }
 
-  /** Opens `path` at `line`: shown, or failed with why. */
-  private async open(path: string, line: number | null): Promise<AgentReply> {
-    const failure = await this.host.open(path, line);
+  /**
+   * Where `showing` goes in its HTML page `path`: `target`, found once the page has loaded, unless
+   * stale; it is pending until then (`pending`), and reached once found.
+   */
+  private pageLanding(target: Target, showing: Showing, path: string): Landing {
+    const aim = (page: PageText): number | null => {
+      const at = this.current(showing) ? (pageSpan(page, target)?.start ?? null) : null;
+      if (at !== null && this.pending?.aim === aim) {
+        this.pending = null;
+      }
+      return at;
+    };
+    this.pending = { showing, path, aim, doc: null };
+    return { aim };
+  }
+
+  /** `showing`'s page, on screen now, was aimed at `land`: aimed again should it load afresh. */
+  private aimed(showing: Showing, land: Landing): void {
+    const pending = this.pending;
+    if (pending?.showing === showing && "aim" in land && pending.aim === land.aim) {
+      pending.doc = this.host.doc();
+    }
+  }
+
+  /** `showing` came to an end: reached, failed or replaced. Nothing is aimed at for it again. */
+  private ended(showing: Showing): void {
+    if (this.pending?.showing === showing) {
+      this.pending = null;
+    }
+  }
+
+  /** Whether the document on screen is an HTML page, whose passages the window finds itself. */
+  private pageShown(): boolean {
+    return this.host.doc()?.kind === "html";
+  }
+
+  /** Whether `showing` is still the request to go to: no newer one came, nor another navigation. */
+  private current(showing: Showing): boolean {
+    return (
+      this.lastShow === showing.id &&
+      (showing.navigation === null || this.host.navigation() === showing.navigation)
+    );
+  }
+
+  /**
+   * Whether `target` is in the HTML page `path` on screen, once it has loaded, waited for until
+   * `by`, going there (`land`, by a move when `move`; an open's page goes there itself as it
+   * loads): shown, failed when it isn't there, or pending when the page hadn't loaded by then,
+   * going there once it has. A newer request meanwhile replaces it, and another file on screen
+   * fails it: either way it goes nowhere.
+   */
+  private async reach(
+    showing: Showing,
+    path: string,
+    target: Target,
+    land: Landing,
+    by: number,
+    move: boolean,
+  ): Promise<AgentReply> {
+    const page = await this.host.pageReady(Math.max(0, by - Date.now()));
+    if (this.lastShow !== showing.id) {
+      this.ended(showing);
+      return { kind: "replaced" };
+    }
+    const doc = this.host.doc();
+    if (!this.current(showing) || !doc || !samePath(doc.path, path)) {
+      this.ended(showing);
+      return { kind: "failed", message: notOnScreen(path) };
+    }
+    if (page !== null && pageSpan(page, target) === null) {
+      this.ended(showing);
+      return { kind: "failed", message: notThere(path) };
+    }
+    if (move) {
+      this.host.move(land);
+    }
+    if (page === null) {
+      // Not loaded yet: it goes there once it has, the page aimed at again should it reload.
+      this.aimed(showing, land);
+      return { kind: "shown", target: "pending" };
+    }
+    this.ended(showing);
+    return { kind: "shown" };
+  }
+
+  /** Opens `path` at `land`: shown, or failed with why. */
+  private async open(path: string, land: Landing | null): Promise<AgentReply> {
+    const failure = await this.host.open(path, land);
     return failure === null
       ? { kind: "shown" }
       : { kind: "failed", message: didNotOpen(path, failure) };
   }
 
   /**
+   * `highlight`: the agent's highlights in the file on screen, its earlier ones cleared first when
+   * `clear`, each target where core found it (`places`) in a note or a text file, or found in an
+   * HTML page's text, all of them or none. A PDF can't be painted. Answers how many the window
+   * shows now.
+   */
+  private highlight(args: HighlightArgs, places: TextPlace[]): AgentReply {
+    const doc = this.host.doc();
+    const path = args.path ?? doc?.path ?? "";
+    if (!doc || !samePath(doc.path, path)) {
+      return { kind: "failed", message: notShown(path) };
+    }
+    let added: Mark[] = [];
+    switch (doc.kind) {
+      case "markdown":
+      case "text":
+        added = args.targets.flatMap((target, i) => {
+          const place = places[i];
+          return place ? [{ target, place, span: null }] : [];
+        });
+        break;
+      case "html": {
+        if (args.targets.length === 0) break;
+        const page = this.host.page();
+        if (!page?.ready) {
+          return { kind: "failed", message: PAGE_LOADING };
+        }
+        for (const target of args.targets) {
+          const span = pageSpan(page, target);
+          if (span === null) {
+            return { kind: "failed", message: notThere(doc.path) };
+          }
+          added.push({ target, place: null, span });
+        }
+        break;
+      }
+      case "pdf":
+        return { kind: "failed", message: NO_PDF_HIGHLIGHT };
+    }
+    if (args.clear || !samePath(this.marked ?? "", doc.path)) {
+      this.marks = [];
+    }
+    this.marked = doc.path;
+    this.marks.push(...added);
+    this.marks.splice(0, Math.max(0, this.marks.length - HIGHLIGHTS_KEPT));
+    this.paint();
+    return { kind: "highlighted", count: this.marks.length };
+  }
+
+  /** `read` of the HTML page on screen: its blocks, once it has reported them. */
+  private read(args: ReadArgs): AgentReply {
+    const doc = this.host.doc();
+    const path = args.path ?? doc?.path ?? "";
+    if (!doc || !samePath(doc.path, path)) {
+      return { kind: "failed", message: notShown(path) };
+    }
+    if (doc.kind !== "html") {
+      return { kind: "failed", message: "Only an HTML page's text comes from its window." };
+    }
+    const page = this.host.page();
+    if (!page?.ready) {
+      return { kind: "failed", message: PAGE_LOADING };
+    }
+    // Cut short at the limit on the text the page reports: Rust reads it as incomplete.
+    return page.truncated
+      ? { kind: "pageText", blocks: page.blocks, truncated: true }
+      : { kind: "pageText", blocks: page.blocks };
+  }
+
+  /**
+   * Paints the agent's highlights in the document on screen: a note's or a text file's on the
+   * `agent` layer, an HTML page's through its bridge. None clears the layer.
+   */
+  private paint(): void {
+    const doc = this.host.doc();
+    if (doc?.kind === "html") {
+      const page = this.host.page();
+      const spans = this.marks.flatMap((m) =>
+        m.span !== null && m.span.end <= (page?.text.length ?? 0) ? [m.span] : [],
+      );
+      if (spans.length > 0) {
+        page?.paint("agent", spans);
+      } else {
+        page?.clear("agent");
+      }
+    }
+    if (!supported()) {
+      return;
+    }
+    const el = this.host.docElement();
+    const notes = doc?.kind === "markdown" || doc?.kind === "text";
+    const places = notes ? this.marks.flatMap((m) => (m.place ? [m.place] : [])) : [];
+    const index = places.some((p) => p.textStart !== undefined) ? buildTextIndex([el]) : null;
+    const ranges = places.flatMap((place) => rangesOf(place, el, index));
+    if (ranges.length === 0) {
+      CSS.highlights.delete("agent");
+      return;
+    }
+    const highlight = new Highlight(...ranges);
+    highlight.priority = HIGHLIGHT_PRIORITY;
+    CSS.highlights.set("agent", highlight);
+  }
+
+  /**
    * Show, on the bar: the request comes off it, and settles once its file has opened (shown), or
-   * hasn't (failed, with why, which the window shows too).
+   * hasn't (failed, with why, which the window shows too). An HTML page's passage settles as an
+   * immediate show's does, once the page has loaded, waited for while Rust still waits for the
+   * answer, else as long as an immediate show waits: failed when it isn't there, replaced when a
+   * newer request came meanwhile.
    */
   private async showAsked(): Promise<void> {
     const ask = this.take();
     if (ask === null) {
       return;
     }
-    const failure = await this.host.open(ask.path, ask.line);
-    await (failure === null
-      ? this.record(ask, "shown")
-      : this.record(ask, "failed", didNotOpen(ask.path, failure)));
+    const failure = await this.host.open(ask.path, ask.landing);
+    if (failure !== null) {
+      await this.record(ask, "failed", didNotOpen(ask.path, failure));
+      return;
+    }
+    if (ask.inPage === null || ask.landing === null || !this.pageShown()) {
+      await this.record(ask, "shown");
+      return;
+    }
+    ask.showing.navigation = this.host.navigation();
+    this.aimed(ask.showing, ask.landing);
+    const by = Math.max(ask.answerBy, Date.now() + ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
+    const reply = await this.reach(ask.showing, ask.path, ask.inPage, ask.landing, by, false);
+    await (reply.kind === "failed"
+      ? this.record(ask, "failed", reply.message)
+      : this.record(ask, reply.kind === "replaced" ? "replaced" : "shown"));
   }
 
   /** The request being asked about, if any, settles as `answer` (see `take` and `record`). */
@@ -239,6 +742,149 @@ function fileName(path: string): string {
 /** Why `path` didn't open, `failure`, as the agent hears it. */
 function didNotOpen(path: string, failure: string): string {
   return `${fileName(path)} didn't open: ${failure}`;
+}
+
+/** The answer when `path` isn't on screen, in the words Rust uses. */
+function notShown(path: string): string {
+  return `${fileName(path)} isn't shown in Lectern. Show it first.`;
+}
+
+/** The answer when another file took the place of `path` before its page loaded. */
+function notOnScreen(path: string): string {
+  return `${fileName(path)} isn't on screen any more: another file took its place.`;
+}
+
+/** The answer when a target isn't in `path`, in the words Rust uses. */
+function notThere(path: string): string {
+  return `That passage isn't in ${fileName(path)}.`;
+}
+
+/**
+ * The ranges of the document `el` that `place` covers: its text, where core found it (`index`, the
+ * text of `el`); else the blocks on its lines, each whole.
+ */
+function rangesOf(place: TextPlace, el: HTMLElement, index: TextIndex | null): Range[] {
+  if (index !== null && place.textStart !== undefined && place.textEnd !== undefined) {
+    const range = rangeAt(index, place.textStart, place.textEnd);
+    if (range !== null) return [range];
+  }
+  return blocksOnLines(el, place.startLine, place.endLine).map((block) => {
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    return range;
+  });
+}
+
+/**
+ * Where `target` is in an HTML page's text, as its bridge reported it; null when it isn't there.
+ * A quote by its text, whitespace aside, and of two or more, the one the text just before and after
+ * it agrees with most, then the first. A heading by its text, or a path of headings each under the
+ * one before (`Report › Results`, with headings between left out), in any letter case: of those
+ * that match, the one whose own path is nearest the target's length, then the first. Nothing else
+ * is in a page.
+ */
+export function pageSpan(
+  page: Pick<PageText, "text" | "blocks" | "starts">,
+  target: Target,
+): Span | null {
+  if ("quote" in target) {
+    return quoteSpan(page.text, target.quote, target.prefix ?? "", target.suffix ?? "");
+  }
+  if ("heading" in target) {
+    return headingSpan(page, target.heading);
+  }
+  return null;
+}
+
+/** The occurrence of `quote` in `text` that agrees most with `prefix` and `suffix`, then the first. */
+function quoteSpan(text: string, quote: string, prefix: string, suffix: string): Span | null {
+  const needle = normalize(quote);
+  if (needle === "") {
+    return null;
+  }
+  const before = normalize(prefix);
+  const after = normalize(suffix);
+  let best: { span: Span; agreement: number } | null = null;
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+    const end = at + needle.length;
+    const agreement = agreesBefore(text, at, before) + agreesAfter(text, end, after);
+    if (best === null || agreement > best.agreement) {
+      best = { span: { start: at, end }, agreement };
+    }
+  }
+  return best?.span ?? null;
+}
+
+/** How many characters of `text` just before `at`, spaces next to it aside, end as `wanted` does. */
+function agreesBefore(text: string, at: number, wanted: string): number {
+  let i = at;
+  while (i > 0 && text[i - 1] === " ") i--;
+  let n = 0;
+  while (n < wanted.length && i - n > 0 && text[i - n - 1] === wanted[wanted.length - n - 1]) n++;
+  return n;
+}
+
+/** How many characters of `text` just after `at`, spaces next to it aside, start as `wanted` does. */
+function agreesAfter(text: string, at: number, wanted: string): number {
+  let i = at;
+  while (i < text.length && text[i] === " ") i++;
+  let n = 0;
+  while (n < wanted.length && i + n < text.length && text[i + n] === wanted[n]) n++;
+  return n;
+}
+
+/** A heading's text as a target is matched against it: as core matches one. */
+function headingKey(heading: string): string {
+  return normalize(heading.trim().replace(/^#+/, "").replace(/[*_`]/g, "")).toLowerCase();
+}
+
+/**
+ * The span of the block of the heading `wanted` names in a page (see `pageSpan`): matched on the
+ * page's blocks, whole headings at their levels, not the outline's list, which shortens them.
+ */
+function headingSpan(page: Pick<PageText, "blocks" | "starts">, wanted: string): Span | null {
+  const segments = wanted
+    .split("›")
+    .map(headingKey)
+    .filter((s) => s !== "");
+  const last = segments.pop();
+  if (last === undefined) {
+    return null;
+  }
+  let best: { block: number; extra: number } | null = null;
+  const path: { level: number; key: string }[] = [];
+  for (const [i, block] of page.blocks.entries()) {
+    const level = block.headingLevel;
+    if (level === undefined) continue;
+    while (path.length > 0 && (path[path.length - 1]?.level ?? 0) >= level) path.pop();
+    const key = headingKey(block.text);
+    if (
+      key === last &&
+      inOrder(
+        segments,
+        path.map((p) => p.key),
+      )
+    ) {
+      const extra = path.length - segments.length;
+      if (best === null || extra < best.extra) best = { block: i, extra };
+    }
+    path.push({ level, key });
+  }
+  if (best === null) {
+    return null;
+  }
+  const { block } = best;
+  const start = page.starts[block] ?? 0;
+  return { start, end: start + (page.blocks[block]?.text.length ?? 0) };
+}
+
+/** Whether each of `wanted` is in `path`, in the same order, others between them or not. */
+function inOrder(wanted: string[], path: string[]): boolean {
+  let at = 0;
+  return wanted.every((w) => {
+    while (at < path.length && path[at] !== w) at++;
+    return at++ < path.length;
+  });
 }
 
 /** What the document on screen shows: its file, the heading and line at the top, the selection. */

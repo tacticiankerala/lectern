@@ -6,9 +6,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::request::AgentRequest;
+use super::show::TargetState;
+use super::target::TextPlace;
 use crate::ipc::{AgentFocus, AgentOpens, PathForms};
 use crate::library::pathmap::PathMapper;
 use crate::library::{doc_kind, DocKind};
+use crate::review::text::PageBlock;
 
 /// The most characters of the reader's selection `status` gives.
 pub const SELECTION_MAX: usize = 2000;
@@ -29,6 +32,16 @@ pub struct AgentCall {
     pub request: AgentRequest,
     /// The agent's name as the reader sees it ([`super::agent_name`]): "Claude".
     pub agent: String,
+    /// In a note or a text file, where each of the request's targets is, as core found it, in
+    /// order: `show`'s one, `highlight`'s each. None for any other file, whose window finds them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<TextPlace>>", optional)]
+    pub places: Vec<TextPlace>,
+    /// How long the window has to answer, in milliseconds, after which Lectern stops waiting: a
+    /// `show`'s, whose window may wait for an HTML page to load to find its target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub within_ms: Option<u32>,
 }
 
 /// A window's UI's answer to an [`AgentCall`], tagged by `kind`.
@@ -38,10 +51,18 @@ pub struct AgentCall {
 pub enum AgentReply {
     /// What the window shows (`status`).
     View(WindowView),
-    /// `show`: the file is on screen, opened or there already.
-    Shown,
+    /// `show`: the file is on screen, opened or there already, at its target; or, with `target`
+    /// `pending`, an HTML page that hasn't loaded yet, which goes to it once it has.
+    Shown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        target: Option<TargetState>,
+    },
     /// `show`: the window shows another file, so it asks the reader first.
     Asked,
+    /// `show`: a newer request took this one's place before its HTML page loaded, so the window
+    /// doesn't go to its target.
+    Replaced,
     /// What became of a `show` the window asked the reader about, sent once it is settled: the
     /// reader's answer, or replaced by a newer request. For an open that failed, why (`message`),
     /// a sentence for the agent.
@@ -51,8 +72,22 @@ pub enum AgentReply {
         #[ts(optional)]
         message: Option<String>,
     },
+    /// `highlight`: how many of the agent's highlights the window shows now.
+    Highlighted { count: u32 },
+    /// `read` of an HTML page: its blocks, as its bridge last reported them, and whether it stopped
+    /// them short, at its limit on the text it reports.
+    PageText {
+        blocks: Vec<PageBlock>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        #[ts(as = "Option<bool>", optional)]
+        truncated: bool,
+    },
     /// What was asked couldn't be done: a sentence for the agent.
     Failed { message: String },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What became of a request to show a file that the window asked the reader about: they showed

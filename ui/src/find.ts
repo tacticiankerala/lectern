@@ -395,9 +395,10 @@ export class FindBar {
     }
     if (supported()) {
       if (this.ranges.length > 0) {
-        // Over the review comments' highlights (0 and 1), so a match shows on commented text.
+        // Over the review comments' highlights (0 and 1) and an agent's (2), so a match shows on
+        // marked text.
         const found = new Highlight(...this.ranges);
-        found.priority = 2;
+        found.priority = 3;
         CSS.highlights.set("find", found);
       } else {
         CSS.highlights.delete("find");
@@ -482,7 +483,7 @@ export class FindBar {
     if (supported()) {
       if (range) {
         const current = new Highlight(range);
-        current.priority = 3;
+        current.priority = 4;
         CSS.highlights.set("find-current", current);
       } else {
         CSS.highlights.delete("find-current");

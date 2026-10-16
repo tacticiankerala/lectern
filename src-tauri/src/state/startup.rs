@@ -21,7 +21,8 @@ use crate::events::UiEvent;
 impl WindowState {
     /// The window's startup payload, with every workspace for its title. The document rendered as
     /// the window started (during boot, for the first window) becomes the initial document, unless
-    /// a second launch asked for another one meanwhile. The payloads of the window that asked
+    /// a second launch, or an agent's `show`, asked for another one meanwhile: the agent's comes
+    /// with its target. The payloads of the window that asked
     /// first are the primary ones, until the automatic update check has run
     /// (`App::claims_update_check`).
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
@@ -41,16 +42,23 @@ impl WindowState {
         // A launch already queued supersedes the boot document, which is then never opened.
         let superseded = self.opens.has_pending();
         let mut initial = early.and_then(|early| self.adopt_early(early, superseded));
+        let mut agent_target = None;
         // Last, so a second launch during the waits above still wins. It counts as an open even
         // when it opens nothing (a folder without a README), so a boot render landing late
         // stays quiet.
-        if let Some(HeldOpen { request, by_agent }) = self.opens.ready() {
+        if let Some(HeldOpen {
+            request,
+            by_agent,
+            at,
+        }) = self.opens.ready()
+        {
             self.next_seq();
             let path = PathBuf::from(&request.path);
             if by_agent {
                 // A file, its host checked already (`state::agent`): opened as it is, trusting
-                // nothing new.
+                // nothing new, then taken to the agent's target.
                 initial = Some(self.open_document(&request.path));
+                agent_target = at;
             } else if self.blank_window_folder(&path) {
                 // The UI's listeners are in place before it asks for this payload.
                 self.emit(UiEvent::OpenRequest(OpenRequest {
@@ -77,6 +85,7 @@ impl WindowState {
             workspace,
             workspaces,
             primary: self.app.claims_update_check(&self.label),
+            agent_target,
         };
         self.app.perf.mark("startup-ready", None);
         payload

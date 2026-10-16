@@ -3,6 +3,8 @@
 //
 // - Navigations (startup's `initial`, opens, links, launches) are numbered, and the answer to an
 //   older one is dropped rather than rendered.
+// - Leaving the document for none (home, or a file deleted while open) tells Rust, so nothing acts
+//   on that document any more.
 // - `doc-changed` for the open document reloads it in place, keeping the reading position; when
 //   the file changed on disk, the properties strip notes the time. Refreshes are numbered apart
 //   from navigations: one never cancels a navigation, and one that arrives while a navigation is
@@ -10,7 +12,8 @@
 // - A navigation that lands somewhere else saves the reading position in the document it leaves.
 //   Those that ask to `push` also record it, with that position, on the history; back and forward
 //   restore it. A travel changes the history only once it lands, and a second one in flight goes
-//   on from its target.
+//   on from its target. Before something moves within the document on screen for the reader (an
+//   agent's show), where they are is marked on the history, so Back returns there.
 import type { App, OpenOptions } from "./app";
 import { nextPaint, samePath } from "./dom";
 import type { OpenRequest } from "./generated/OpenRequest";
@@ -122,6 +125,7 @@ export class Navigation {
    */
   home(): void {
     this.endNavigation(this.beginNavigation());
+    this.app.leaveDocument();
     const leaving = this.currentEntry();
     if (leaving) {
       if (leaving.position) {
@@ -215,6 +219,18 @@ export class Navigation {
     }
   }
 
+  /**
+   * Marks where the reader is in the document on screen on the history, so Back returns there:
+   * before something moves within it for them.
+   */
+  markHere(): void {
+    const here = this.currentEntry();
+    if (here) {
+      this.history.mark(here);
+      this.renderNav();
+    }
+  }
+
   /** The path on screen and the reading position in it, for the history. */
   private currentEntry(): HistoryEntry | null {
     const path = this.currentPath();
@@ -300,6 +316,7 @@ export class Navigation {
     }
     // Any refresh still in flight is now out of date.
     ++this.refreshes;
+    this.app.leaveDocument();
     this.app.show({
       status: "err",
       error: { kind: "notFound", message: "It was moved or deleted while open.", path },

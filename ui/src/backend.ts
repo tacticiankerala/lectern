@@ -1,6 +1,8 @@
 // What the UI needs from the host: the Tauri app (backend-tauri.ts) or, for Playwright, a fake
 // that serves pre-rendered fixtures (dev/backend-fake.ts).
 import type { AgentReply } from "./generated/AgentReply";
+import type { Target } from "./generated/Target";
+import type { TextPlace } from "./generated/TextPlace";
 import type { Candidate } from "./generated/Candidate";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
@@ -142,6 +144,16 @@ export interface Backend {
   setFrameFocus(focus: FrameFocus): Promise<void>;
   /** Answers the agent's request `id` (`agent-request`) that Rust sent this window. */
   replyToAgent(id: number, reply: AgentReply): Promise<void>;
+  /**
+   * Tells Rust the window left its document for none (the welcome page, or a file deleted while
+   * open), so nothing acts on that document any more.
+   */
+  leaveDocument(): Promise<void>;
+  /**
+   * Where each of an agent's `targets` is now in `path`, the note or text file on screen, as core
+   * finds them in the file; null for one that's gone. For its highlights, after the file changed.
+   */
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]>;
   /**
    * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
    * asked again.

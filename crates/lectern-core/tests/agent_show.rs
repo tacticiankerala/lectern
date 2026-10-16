@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use lectern_core::agent::request::{ClientInfo, ShowArgs, Target};
 use lectern_core::agent::show::{
-    route_show, AgentRoute, FocusStep, ShowAnswer, ShowState, WorkspaceAnswer,
+    route_show, AgentRoute, FocusStep, ShowAnswer, ShowState, TargetState, WorkspaceAnswer,
 };
 use lectern_core::agent::status::{
     window_status, AgentCall, AgentReply, AskAnswer, AskOutcome, WindowView, ANSWERS_KEPT,
@@ -277,6 +277,8 @@ fn a_window_is_asked_to_show_with_the_agents_name() {
             wait: 0,
         }),
         agent: "Claude".to_owned(),
+        places: Vec::new(),
+        within_ms: None,
     };
     assert_eq!(
         serde_json::to_value(&call).unwrap(),
@@ -292,6 +294,42 @@ fn a_window_is_asked_to_show_with_the_agents_name() {
             "agent": "Claude",
         })
     );
+    // With how long the window has to answer, as a `show` has.
+    let timed = AgentCall {
+        within_ms: Some(4500),
+        ..call
+    };
+    assert_eq!(serde_json::to_value(&timed).unwrap()["withinMs"], 4500);
+}
+
+/// A window that opened an HTML page still loading says its target is pending: found, and gone to,
+/// once the page has loaded.
+#[test]
+fn a_window_says_when_a_pages_target_is_still_pending() {
+    let pending = AgentReply::Shown {
+        target: Some(TargetState::Pending),
+    };
+    assert_eq!(
+        serde_json::to_value(&pending).unwrap(),
+        json!({"kind": "shown", "target": "pending"})
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentReply>(json!({"kind": "shown", "target": "pending"}))
+            .unwrap(),
+        pending
+    );
+    let answer = ShowAnswer {
+        state: ShowState::Shown,
+        file: PathForms {
+            windows: Some(PLAN.to_owned()),
+            wsl: None,
+        },
+        window: "main".to_owned(),
+        workspace: None,
+        focus: None,
+        target: Some(TargetState::Pending),
+    };
+    assert_eq!(serde_json::to_value(&answer).unwrap()["target"], "pending");
 }
 
 #[test]
@@ -301,8 +339,10 @@ fn a_window_answers_a_show_shown_or_asked_then_with_the_readers_answer() {
         message: None,
     };
     for (json, reply) in [
-        (json!({"kind": "shown"}), AgentReply::Shown),
+        (json!({"kind": "shown"}), AgentReply::Shown { target: None }),
         (json!({"kind": "asked"}), AgentReply::Asked),
+        // A newer request took its place before its page loaded.
+        (json!({"kind": "replaced"}), AgentReply::Replaced),
         (
             json!({"kind": "answered", "answer": "shown"}),
             answered(AskAnswer::Shown),
@@ -419,6 +459,7 @@ fn show_answers_its_state_the_file_in_both_forms_the_window_and_the_focus() {
         window: "main".to_owned(),
         workspace: Some("Studio".to_owned()),
         focus: Some(FocusStep::Foreground),
+        target: None,
     };
     assert_eq!(
         serde_json::to_value(&answer).unwrap(),

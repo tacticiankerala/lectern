@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use lectern_core::agent::request::Target;
+use lectern_core::agent::target::TextPlace;
 use lectern_core::agent::AgentReply;
 use lectern_core::ipc::{
     Candidate, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult, OpenWhere,
@@ -460,4 +462,28 @@ pub fn set_workspace_theme(
 #[tauri::command]
 pub fn agent_reply(id: u64, reply: AgentReply, window: WebviewWindow, state: Shared<'_>) {
     state.agent_reply(window.label(), id, reply);
+}
+
+/// The calling window's UI left its document for none: the welcome page, or a file deleted while
+/// open. Nothing acts on that document any more.
+#[tauri::command]
+pub fn leave_document(window: WebviewWindow, state: Shared<'_>) {
+    if let Some(s) = state.window(window.label()) {
+        s.leave_document();
+    }
+}
+
+/// Where each of an agent's `targets` is now in `path`, the note or text file the calling window
+/// shows, for its highlights after the file changed: none for one that's gone.
+#[tauri::command]
+pub async fn agent_places(
+    path: String,
+    targets: Vec<Target>,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> Result<Vec<Option<TextPlace>>, String> {
+    blocking(window_state(&window, &state)?, move |s| {
+        s.agent_places(&path, &targets)
+    })
+    .await?
 }

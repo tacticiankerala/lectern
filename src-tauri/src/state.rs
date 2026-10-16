@@ -701,6 +701,9 @@ pub struct WindowState {
     current: Mutex<Option<Current>>,
     /// Numbers opens, so only the latest becomes the current document.
     open_seq: AtomicU64,
+    /// The number the UI last left its document at, for none (`leave_document`): an open numbered
+    /// before it never becomes current.
+    left_at: AtomicU64,
     snapshots_loaded: Gate,
     /// The window's ready gate: it is showing its first document, so scans may start.
     ui_shown: Gate,
@@ -762,6 +765,7 @@ impl WindowState {
             content: ContentCache::new(),
             current: Mutex::new(None),
             open_seq: AtomicU64::new(0),
+            left_at: AtomicU64::new(0),
             snapshots_loaded: Gate::default(),
             ui_shown: Gate::default(),
             early,

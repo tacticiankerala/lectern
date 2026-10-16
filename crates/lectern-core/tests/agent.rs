@@ -184,6 +184,8 @@ fn a_window_is_asked_with_an_id_and_answers_by_kind() {
         id: 3,
         request: AgentRequest::Status,
         agent: "Claude".to_owned(),
+        places: Vec::new(),
+        within_ms: None,
     };
     assert_eq!(
         serde_json::to_value(&call).unwrap(),
@@ -889,16 +891,21 @@ fn highlight_takes_up_to_twenty_targets_or_a_clear() {
     let many: Vec<Value> = (1..=21).map(|line| json!({ "line": line })).collect();
     assert!(invalid("highlight", json!({ "targets": many })).contains("20"));
     assert!(invalid("highlight", json!({"targets": [{"comment": "C1"}]})).contains("comment"));
+    // PDFs can't be highlighted: a page is no target for it.
+    assert_eq!(
+        invalid("highlight", json!({"targets": [{"page": 2}]})),
+        "`targets` can't be a page here: give one of heading, line or quote."
+    );
 }
 
 #[test]
-fn read_pages_by_offset_up_to_forty_thousand() {
+fn read_pages_by_offset_up_to_sixteen_thousand() {
     assert_eq!(
-        call("read", json!({"path": PLAN, "from": 100, "max": 40000})),
+        call("read", json!({"path": PLAN, "from": 100, "max": 16000})),
         Ok(AgentRequest::Read(ReadArgs {
             path: Some(PLAN.to_owned()),
             from: Some(100),
-            max: Some(40000),
+            max: Some(16000),
         }))
     );
     assert_eq!(
@@ -909,7 +916,10 @@ fn read_pages_by_offset_up_to_forty_thousand() {
             max: None,
         }))
     );
-    assert!(invalid("read", json!({"max": 40001})).contains("max"));
+    assert_eq!(
+        invalid("read", json!({"max": 16001})),
+        "`max` must be a whole number from 1 to 16,000."
+    );
     assert!(invalid("read", json!({"max": 0})).contains("max"));
     assert!(invalid("read", json!({"from": -1})).contains("from"));
 }

@@ -10,7 +10,8 @@
 // page it opened (`openUrl`). A change of the setting has the page on screen open again, as Rust
 // does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
 // from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
-// which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, which
+// which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, with
+// where its targets are in a note as the test gives them (Rust's core would find them), which
 // answers with what the UI replies, as Rust would wait for it; what became of a `show` the UI asked
 // the reader about, which it tells Rust later, is kept in `agentAnswers`.
 //
@@ -35,6 +36,7 @@
 // with each review command, as its bridge reported it, a block a line; a comment added on a page
 // takes the lines of where its quote is found, as core gives them.
 import type { Backend, BackendEvent } from "../src/backend";
+import type { AgentCall } from "../src/generated/AgentCall";
 import type { AgentReply } from "../src/generated/AgentReply";
 import type { AgentRequest } from "../src/generated/AgentRequest";
 import type { AskAnswer } from "../src/generated/AskAnswer";
@@ -71,8 +73,11 @@ import type { Segment } from "../src/generated/Segment";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { SettingsSnapshot } from "../src/generated/SettingsSnapshot";
+import type { ShowAt } from "../src/generated/ShowAt";
 import type { StartupPayload } from "../src/generated/StartupPayload";
 import type { StatusChange } from "../src/generated/StatusChange";
+import type { Target } from "../src/generated/Target";
+import type { TextPlace } from "../src/generated/TextPlace";
 import type { TreeNode } from "../src/generated/TreeNode";
 import type { UnreadableView } from "../src/generated/UnreadableView";
 import type { UpdateInfo } from "../src/generated/UpdateInfo";
@@ -117,6 +122,8 @@ export interface FakeOptions {
   current?: string | null;
   /** Whether this is the process's first startup, which checks for updates; true when not given. */
   primary?: boolean;
+  /** Where an agent's `show` takes the reader in `initial`, opened for it as the window started. */
+  agentTarget?: ShowAt;
 }
 
 /** A workspace in the fake's model. */
@@ -293,10 +300,10 @@ export interface FakeControl {
   readonly frameFocus: FrameFocus[];
   /**
    * Sends an agent's request to the UI (`agent-request`), from the agent named `agent` as the
-   * reader sees it ("Claude" when not given); answers with the UI's reply. The requests are
-   * numbered from 1.
+   * reader sees it ("Claude" when not given), with where Rust found its targets in a note
+   * (`places`, none when not given); answers with the UI's reply. The requests are numbered from 1.
    */
-  agentRequest(request: AgentRequest, agent?: string): Promise<AgentReply>;
+  agentRequest(request: AgentRequest, agent?: string, places?: TextPlace[]): Promise<AgentReply>;
   /**
    * What became of each `show` the UI asked the reader about, as it told Rust, in order, with why
    * when it `failed`.
@@ -688,6 +695,7 @@ export class FakeBackend implements Backend, FakeControl {
       workspace: current ? this.summary(current) : null,
       workspaces: this.summaries(),
       primary: this.options.primary ?? true,
+      ...(this.options.agentTarget ? { agentTarget: this.options.agentTarget } : {}),
     });
   }
 
@@ -1436,13 +1444,69 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
-  agentRequest(request: AgentRequest, agent = "Claude"): Promise<AgentReply> {
+  agentRequest(
+    request: AgentRequest,
+    agent = "Claude",
+    places: TextPlace[] = [],
+  ): Promise<AgentReply> {
     const id = ++this.agentCallId;
     const replied = new Promise<AgentReply>((resolve) => {
       this.agentCalls.set(id, resolve);
     });
-    this.emit("agent-request", { id, request, agent });
+    const call: AgentCall = { id, request, agent };
+    if (places.length > 0) call.places = places;
+    this.emit("agent-request", call);
     return replied;
+  }
+
+  /** As Rust: the window left its document for none; nothing is on screen. */
+  leaveDocument(): Promise<void> {
+    this.onScreen = null;
+    return Promise.resolve();
+  }
+
+  /**
+   * As core finds an agent's targets again, simplified, in a note's text (`textBlocks`): a quote
+   * where it first is, a heading by its block's text, a line by the block holding it.
+   */
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
+    const blocks = this.textBlocks.get(key(path)) ?? [];
+    const starts: number[] = [];
+    let at = 0;
+    for (const [, , text] of blocks) {
+      starts.push(at);
+      at += text.length + 1;
+    }
+    const text = blocks.map(([, , t]) => t).join(" ");
+    const blockAt = (offset: number): number => starts.filter((s) => s <= offset).length - 1;
+    const place = (from: number, to: number): TextPlace => ({
+      startLine: blocks[blockAt(from)]?.[0] ?? 1,
+      endLine: blocks[blockAt(to - 1)]?.[1] ?? 1,
+      textStart: from,
+      textEnd: to,
+    });
+    const whole = (i: number): TextPlace | null => {
+      const block = blocks[i];
+      const start = starts[i];
+      return block && start !== undefined ? place(start, start + block[2].length) : null;
+    };
+    return Promise.resolve(
+      targets.map((target) => {
+        if ("quote" in target) {
+          const quote = normalize(target.quote);
+          const found = quote === "" ? -1 : text.indexOf(quote);
+          return found === -1 ? null : place(found, found + quote.length);
+        }
+        if ("heading" in target) {
+          const wanted = (target.heading.split("›").pop() ?? "").trim().toLowerCase();
+          return whole(blocks.findIndex(([, , t]) => t.toLowerCase() === wanted));
+        }
+        if ("line" in target) {
+          return whole(blocks.findIndex(([s, e]) => s <= target.line && target.line <= e));
+        }
+        return null;
+      }),
+    );
   }
 
   replyToAgent(id: number, reply: AgentReply): Promise<void> {

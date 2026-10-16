@@ -1,6 +1,8 @@
 // An agent's requests (src/agent.ts), through the fake backend: `status` names the heading the
 // outline marks as being read, which a navigation lands a little below the pane's top; `show` asks
-// with a bar over the document, and an agent's switch keeps a half-written comment.
+// with a bar over the document, and an agent's switch keeps a half-written comment. A target lands
+// at the top, with Back to where the reader was; an agent's highlights paint on their own layer in
+// a note, and through its bridge in an HTML page, whose text `read` takes from the page.
 import { expect, test, type Page } from "@playwright/test";
 import { expectLandedOn, fixturePath, headingOffset, openFixture } from "./util";
 
@@ -90,4 +92,207 @@ test("a half-written comment survives an agent's switch to another note", async 
   await expect(page).toHaveTitle("Alpha — Lectern");
   await expect(editor).toBeVisible();
   await expect(editor.locator("textarea")).toHaveValue("Half a thought");
+});
+
+/** Where `quote` is in the note on screen's text, as Rust's core sends it: lines and offsets. */
+function placeOf(page: Page, quote: string) {
+  return page.evaluate((quote) => {
+    const text = window.__lxDocText();
+    const start = text.indexOf(quote);
+    const heading = [...document.querySelectorAll("#lx-doc [data-sourcepos]")].find((el) =>
+      el.textContent.includes(quote),
+    );
+    const line = Number(/^(\d+):/.exec(heading?.getAttribute("data-sourcepos") ?? "")?.[1]);
+    return { startLine: line, endLine: line, textStart: start, textEnd: start + quote.length };
+  }, quote);
+}
+
+test("a target lands its heading at the top, and Back returns to where the reader was", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const top = await headingOffset(page, "big-plan");
+  const place = await placeOf(page, "Section 12");
+  const shown = await page.evaluate(
+    ({ path, place }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { heading: "Section 12" }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      ),
+    { path: fixturePath(BIG_PLAN), place },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await expectLandedOn(page, "section-12");
+  await expect(bar(page)).toBeHidden();
+  await page.keyboard.press("Alt+ArrowLeft");
+  await expect.poll(() => headingOffset(page, "big-plan")).toBe(top);
+});
+
+/** The text of each range of the agent's layer in the document. */
+function agentPainted(page: Page) {
+  return page.evaluate(() => {
+    const highlight = CSS.highlights.get("agent");
+    return highlight ? [...highlight].map((range) => (range as Range).toString()) : [];
+  });
+}
+
+test("an agent's highlights paint a note's passages on their layer, and go with the file", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const places = [await placeOf(page, "Section 12"), await placeOf(page, "Big Plan")];
+  const reply = await page.evaluate(
+    ({ path, places }) =>
+      window.__fake.agentRequest(
+        {
+          tool: "highlight",
+          path,
+          targets: [{ heading: "Section 12" }, { heading: "Big Plan" }],
+          clear: false,
+        },
+        "Claude",
+        places,
+      ),
+    { path: fixturePath(BIG_PLAN), places },
+  );
+  expect(reply).toEqual({ kind: "highlighted", count: 2 });
+  expect(await agentPainted(page)).toEqual(["Section 12", "Big Plan"]);
+  // Painted in the agent's colour, over the comments' and under find's.
+  const layer = await page.evaluate(() => {
+    const highlight = CSS.highlights.get("agent");
+    const rule = [...document.styleSheets]
+      .flatMap((sheet) => [...sheet.cssRules])
+      .find((r) => r.cssText.startsWith("::highlight(agent)"));
+    return { priority: highlight?.priority, rule: rule?.cssText ?? "" };
+  });
+  expect(layer.priority).toBe(2);
+  expect(layer.rule).toContain("var(--agent-highlight)");
+  // The reader opens another note: they go.
+  await page.evaluate((path) => {
+    window.__fake.emit("open-request", { path, t0Ms: null, folder: false });
+  }, fixturePath(ALPHA));
+  await expect(page).toHaveTitle("Alpha — Lectern");
+  expect(await agentPainted(page)).toEqual([]);
+});
+
+const REPORT = "artifacts/report.html";
+
+/** The text of each range the page's bridge paints in the agent's layer, in the page. */
+function pagePainted(page: Page) {
+  return page
+    .frameLocator("#lx-doc-pane > iframe.lx-frame")
+    .locator("body")
+    .evaluate(() => {
+      const highlight = CSS.highlights.get("lx-agent");
+      return highlight ? [...highlight].map((range) => (range as Range).toString()) : [];
+    });
+}
+
+test("in an HTML page, the window finds a passage in what the page reported, and paints it", async ({
+  page,
+}) => {
+  await openFixture(page, REPORT);
+  await expect.poll(() => page.evaluate(() => window.__lxPage()?.ready ?? false)).toBe(true);
+  const path = fixturePath(REPORT);
+  const request = (targets: unknown[]) =>
+    page.evaluate(
+      ({ path, targets }) =>
+        window.__fake.agentRequest({
+          tool: "highlight",
+          path,
+          targets: targets as { quote: string }[],
+          clear: false,
+        }),
+      { path, targets },
+    );
+  expect(await request([{ quote: "conversion dipped\n in week 3" }])).toEqual({
+    kind: "highlighted",
+    count: 1,
+  });
+  await expect.poll(() => pagePainted(page)).toEqual(["conversion dipped in week 3"]);
+  expect(await request([{ quote: "rolled back" }])).toEqual({
+    kind: "failed",
+    message: "That passage isn't in report.html.",
+  });
+  // Its text, scripts and all, for `read`.
+  const read = await page.evaluate(
+    (path) => window.__fake.agentRequest({ tool: "read", path }),
+    path,
+  );
+  expect(read.kind).toBe("pageText");
+  expect(JSON.stringify(read)).toContain("Rendered by script");
+});
+
+test("a page an agent opens is waited for: a passage that isn't there fails, one that is is shown", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  await page.evaluate(() => {
+    window.__fake.settingsElsewhere({ agentOpens: "switch" });
+  });
+  const show = (quote: string) =>
+    page.evaluate(
+      ({ path, quote }) =>
+        window.__fake.agentRequest({
+          tool: "show",
+          path,
+          target: { quote },
+          newWindow: false,
+          wait: 0,
+        }),
+      { path: fixturePath(REPORT), quote },
+    );
+  expect(await show("rolled back")).toEqual({
+    kind: "failed",
+    message: "That passage isn't in report.html.",
+  });
+  await expect(page).toHaveTitle("report.html — Lectern");
+  // Opened afresh, and on screen already.
+  await page.evaluate((path) => {
+    window.__fake.emit("open-request", { path, t0Ms: null, folder: false });
+  }, fixturePath(ALPHA));
+  await expect(page).toHaveTitle("Alpha — Lectern");
+  expect(await show("conversion dipped in week 3")).toEqual({ kind: "shown" });
+  expect(await show("Rendered by script")).toEqual({ kind: "shown" });
+});
+
+test("an agent's highlights in a note are found again as it changes, and go when their text does", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  const path = fixturePath(ALPHA);
+  const places = [await placeOf(page, "platform team"), await placeOf(page, "Blocked on")];
+  const reply = await page.evaluate(
+    ({ path, places }) =>
+      window.__fake.agentRequest(
+        {
+          tool: "highlight",
+          path,
+          targets: [{ quote: "platform team" }, { quote: "Blocked on" }],
+          clear: false,
+        },
+        "Claude",
+        places,
+      ),
+    { path, places },
+  );
+  expect(reply).toEqual({ kind: "highlighted", count: 2 });
+  expect(await agentPainted(page)).toEqual(["platform team", "Blocked on"]);
+  // The paragraph is rewritten on disk: "Blocked on" goes, "platform team" moves along.
+  await page.evaluate((path) => {
+    const before = "Blocked on a review from the platform team.";
+    const after = "Waiting, still, for a review from the platform team.";
+    const fake = window.__fake;
+    fake.setText(
+      path,
+      fake
+        .blocksOf(path)
+        .map(([s, e, t]): [number, number, string] => [s, e, t === before ? after : t]),
+    );
+    fake.setDoc(path, (fake.html(path) ?? "").replace(before, after));
+    fake.emit("doc-changed", { path });
+  }, path);
+  await expect(page.locator("#lx-doc p", { hasText: "Waiting, still" })).toBeVisible();
+  await expect.poll(() => agentPainted(page)).toEqual(["platform team"]);
 });

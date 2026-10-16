@@ -923,7 +923,7 @@ test("find in page paints over comment highlights", async ({ page }) => {
     await page.evaluate(() =>
       ["comment", "find", "find-current"].map((name) => CSS.highlights.get(name)?.priority),
     ),
-  ).toEqual([0, 2, 3]);
+  ).toEqual([0, 3, 4]);
 });
 
 test("a phrase twice in a paragraph: the comment marks the one selected", async ({ page }) => {

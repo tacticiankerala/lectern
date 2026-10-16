@@ -34,6 +34,7 @@ describe("messages from a page's bridge", () => {
       type: "ready",
       headings: READY.headings,
       blocks: READY.blocks,
+      truncated: false,
       scroll: { fraction: 0, top: 0 },
       dark: false,
     });
@@ -100,6 +101,27 @@ describe("messages from a page's bridge", () => {
       expect(() => parseBridgeMessage(data)).not.toThrow();
       expect(parseBridgeMessage(data), `case ${String(i)}`).toBeNull();
     });
+  });
+
+  it("say when the page stopped its text short, at its limit", () => {
+    expect(parseBridgeMessage({ ...READY, truncated: true })).toMatchObject({ truncated: true });
+    expect(parseBridgeMessage(READY)).toMatchObject({ truncated: false });
+    expect(
+      parseBridgeMessage({ lx: 1, type: "blocks", headings: [], blocks: [], truncated: true }),
+    ).toMatchObject({ truncated: true });
+    expect(parseBridgeMessage({ ...READY, truncated: "yes" })).toBeNull();
+    vi.useFakeTimers();
+    try {
+      const { page } = session();
+      page.receive({ ...READY, truncated: true });
+      expect(page.truncated).toBe(true);
+      // Reported again whole, it no longer is.
+      page.receive({ lx: 1, type: "blocks", headings: READY.headings, blocks: READY.blocks });
+      vi.advanceTimersByTime(1000);
+      expect(page.truncated).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("over 2 MB of text are dropped", () => {
@@ -303,6 +325,7 @@ describe("a page's session", () => {
       "find-current",
       "comment",
       "comment-focus",
+      "agent",
     ]);
   });
 
@@ -465,6 +488,29 @@ describe("a page's session", () => {
     expect(later.page.scrollToAnchor("results")).toBe(true);
     later.page.receive(READY);
     expect(later.posted).toContainEqual({ lx: 1, type: "scroll-to", offset: 14 });
+  });
+
+  it("goes to a passage found once the page is ready, over an anchor and a saved place", () => {
+    const script = (page: PageFrame) => page.text.indexOf("script");
+    const aimed = session(0.4, "results");
+    expect(aimed.page.aim(script)).toBe(true);
+    aimed.page.receive(READY);
+    const scrolls = aimed.posted.filter((m) => m.type === "scroll-to");
+    expect(scrolls).toEqual([{ lx: 1, type: "scroll-to", offset: 34 }]);
+    // A passage that isn't there leaves the anchor to go to.
+    const missing = session(0.4, "results");
+    missing.page.aim(() => null);
+    missing.page.receive(READY);
+    expect(missing.posted).toContainEqual({ lx: 1, type: "scroll-to", offset: 14 });
+    // Once the page is ready, at once; false when it isn't there.
+    const ready = session();
+    ready.page.receive(READY);
+    expect(ready.page.aim(script)).toBe(true);
+    expect(ready.posted.at(-1)).toEqual({ lx: 1, type: "scroll-to", offset: 34 });
+    expect(ready.page.aim(() => null)).toBe(false);
+    expect(ready.posted.at(-1)).toEqual({ lx: 1, type: "scroll-to", offset: 34 });
+    // Its headings, as they came.
+    expect(ready.page.headings.map((h) => h.offset)).toEqual([0, 14]);
   });
 
   it("takes the page's text at most every half second, the latest of it", () => {

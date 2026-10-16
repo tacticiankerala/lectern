@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::status::AskAnswer;
 use super::tools::listed;
@@ -129,6 +130,15 @@ impl ShowState {
     }
 }
 
+/// Where a `show`'s target stands when the window answered: `pending` for an HTML page that hadn't
+/// loaded yet, in which the window finds it, and goes there, once it has.
+#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum TargetState {
+    Pending,
+}
+
 /// How a window came forward for an agent (the `agentFocus` setting): it took the foreground, came
 /// to the top without the focus, or only flashed on the taskbar.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +162,9 @@ pub struct ShowAnswer {
     pub workspace: Option<String>,
     /// How the window came forward; none when it hadn't shown yet.
     pub focus: Option<FocusStep>,
+    /// Where the target stands, when it isn't found yet; none once the window is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TargetState>,
 }
 
 /// `workspace`'s answer.

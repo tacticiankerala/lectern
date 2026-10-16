@@ -11,13 +11,18 @@
 //!   in both forms.
 //! - `show` and `workspace` go to the window [`show::route_show`] picks; a window already showing
 //!   another file may ask the reader first, and the agent is named to them as [`agent_name`] has it.
+//! - A target (a heading, a line, a quote or a PDF's page) is found by core in a note or a text
+//!   file, and by the window in an HTML page ([`target`]); `read` gives the text as shown, a page
+//!   at a time ([`read`]).
 
 pub mod lines;
 pub mod mcp;
 pub mod paths;
+pub mod read;
 pub mod request;
 pub mod show;
 pub mod status;
+pub mod target;
 pub mod tools;
 
 use std::time::Duration;

@@ -356,3 +356,21 @@ describe("App reading position and live reload", () => {
     expect(toasts()).toEqual([]);
   });
 });
+
+describe("leaving the document for none", () => {
+  it("tells Rust when the window goes home or its file is deleted, never when it opens another", async () => {
+    const { fake, app } = await started(null);
+    const left = vi.spyOn(fake, "leaveDocument");
+    // Starting on the welcome page leaves nothing.
+    expect(left).not.toHaveBeenCalled();
+    await app.open(A, { push: true });
+    await app.open(B, { push: true });
+    expect(left).not.toHaveBeenCalled();
+    app.nav.home();
+    expect(left).toHaveBeenCalledTimes(1);
+    await app.open(A, { push: true });
+    fake.emit("doc-removed", { path: A });
+    expect(app.state.error?.kind).toBe("notFound");
+    expect(left).toHaveBeenCalledTimes(2);
+  });
+});

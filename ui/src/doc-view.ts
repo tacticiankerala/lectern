@@ -18,7 +18,7 @@ import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
-import type { PageFrame } from "./page-frame";
+import type { PageAim, PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
 import { placeAt } from "./reflow";
 import { effectiveTheme } from "./themes";
@@ -109,11 +109,12 @@ export class DocView {
     }
   }
 
-  render(doc: DocPayload): void {
+  /** Shows `doc`; a PDF at its page `pdfPage` when given, else its first. */
+  render(doc: DocPayload, pdfPage?: number): void {
     if (doc.frameUrl !== null) {
       // A page or a PDF shows in a frame, in place of the document.
       this.host.replaceChildren();
-      this.frame.show(doc, doc.frameUrl);
+      this.frame.show(doc, doc.frameUrl, pdfPage);
       this.lastHeading = null;
       this.fitRoom();
       return;
@@ -183,6 +184,19 @@ export class DocView {
     } else {
       this.scrollToAnchor(id);
     }
+  }
+
+  /**
+   * Scrolls the HTML page showing to the passage `aim` finds, once it is ready, over its anchor or
+   * saved place; false when the ready page hasn't got it, or nothing showing is a page.
+   */
+  aimPage(aim: PageAim): boolean {
+    return this.frame.aim(aim);
+  }
+
+  /** Takes the PDF showing to its page `page`; nothing for anything else. */
+  toPdfPage(page: number): void {
+    this.frame.toPdfPage(page);
   }
 
   /** Scrolls the block holding source line `line` to the top of the pane. */

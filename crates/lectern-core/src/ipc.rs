@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::agent::target::ShowAt;
 use crate::frontmatter::Frontmatter;
 use crate::library::tree::TreeNode;
 use crate::library::DocKind;
@@ -382,6 +383,11 @@ pub struct StartupPayload {
     /// asked for its startup payload, each time it starts again (it turned to another workspace),
     /// until a check has run.
     pub primary: bool,
+    /// Where an agent's `show` takes the reader in `initial`, when the window opened it for an
+    /// agent while starting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_target: Option<ShowAt>,
 }
 
 /// A workspace as the header's workspace chip and a blank window's list show it.

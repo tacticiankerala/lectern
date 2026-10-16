@@ -12,15 +12,33 @@
 //!   error.
 //! - **`workspace`:** switches to a workspace, bringing its window forward or reopening it in a
 //!   new one, or creates one in a new window; an open window never changes workspace.
+//! - **Targets:** a `show`'s target in a note or a text file is found by core, in the file as it
+//!   is on disk, before anything opens: one that isn't there is the tool's error. A file the open
+//!   wouldn't read (a text file over 20 MB) is refused unread, as the open refuses it. The window is
+//!   sent it with where it is (`AgentCall::places`); a window still starting gets it with the file
+//!   it opens first thing (`StartupPayload::agent_target`). An HTML page's target goes to the
+//!   window as it is, to find in what the page reports, waiting for a page still loading as long
+//!   as the pipe gives it (`AgentCall::within_ms`): one that isn't there is the tool's error, and
+//!   one the page hadn't loaded in time for, or that a starting window will find, is `pending`. A
+//!   PDF's target is its page.
+//! - **`highlight`:** goes to the window showing the file (the most recently focused, and by
+//!   default the file it shows), with where core found each target in a note or a text file. No
+//!   window comes forward. A PDF can't be painted: the tool's error. Once the note changes, the
+//!   window asks core where its highlights are now (`WindowState::agent_places`).
+//! - **`read`:** a note's or a text file's text, as shown, read by Rust from the file; an HTML
+//!   page's from what its window's page reported, read as incomplete when its bridge cut it short
+//!   at its limit. A PDF has none.
+//! - **The file shown** is the one the window's UI last opened, until it leaves it for none
+//!   (`WindowState::leave_document`): then no agent acts on it.
 //!
-//! Both answer within the pipe's time (`ANSWER_WITHIN`, and the reader's `wait`), a second to
+//! Each answers within the pipe's time (`ANSWER_WITHIN`, and the reader's `wait`), a second to
 //! spare: each step that waits waits only as long as is left of it (`Budget`).
 //!
 //! An agent's path on a network share is taken only when Lectern already trusts the share's host:
 //! a library's, a path mapping's, WSL's, or one the user opened a file from (`agent_location`).
 //! An agent's open never adds one. That differs from the user's own opens (a launch, Explorer, the
 //! file dialog), which make the host trusted for the session: an agent's path may come from text a
-//! note fed it, and reaching a new host would hand that host the user's credentials. The other
+//! note fed it, and reaching a new host would hand that host the user's credentials. The review
 //! tools are not available yet.
 
 use std::collections::HashMap;
@@ -34,19 +52,29 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lectern_core::agent::paths::{agent_path, AgentPath};
-use lectern_core::agent::request::{ShowArgs, Target, WorkspaceAction, WorkspaceArgs};
+use lectern_core::agent::read::{read_page, ReadAnswer, PAGE_TEXT_CUT};
+use lectern_core::agent::request::{
+    HighlightArgs, ReadArgs, ShowArgs, Target, WorkspaceAction, WorkspaceArgs,
+};
 use lectern_core::agent::show::{
-    no_such_workspace, AgentRoute, FocusStep, ShowAnswer, ShowState, WorkspaceAnswer,
+    no_such_workspace, AgentRoute, FocusStep, ShowAnswer, ShowState, TargetState, WorkspaceAnswer,
 };
 use lectern_core::agent::status::{
     window_status, AgentCall, AgentReply, AgentSettings, AskAnswer, Status, WindowView,
 };
+use lectern_core::agent::target::{
+    check_target, resolve_target, HighlightAnswer, ShowAt, TextPlace,
+};
+use lectern_core::agent::tools::TARGETS_MAX;
 use lectern_core::agent::{AgentRequest, ANSWER_WITHIN};
 use lectern_core::ipc::{AgentFocus, OpenRequest};
 use lectern_core::library::pathmap::PathMapper;
+use lectern_core::library::DocKind;
+use lectern_core::review::text::{page_text_len, TextMap, MAX_PAGE_TEXT};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::doc::{check_size, opened_kind, read_text as read_file, stat_doc};
 use super::open_queue::AgentOffer;
 use super::paths::{normalize_root, path_string, same_path};
 use super::sync::{lock, read};
@@ -59,8 +87,9 @@ use crate::events::UiEvent;
 /// answered by then is reported from what Rust knows of it: its workspace and its file.
 const VIEW_WAIT: Duration = Duration::from_secs(3);
 
-/// How long `show` waits for the window's UI to open the file or ask the reader.
-const SHOW_WAIT: Duration = Duration::from_secs(5);
+/// How long `show` waits for the window's UI to open the file or ask the reader, and
+/// `highlight` and `read` for it to answer.
+const UI_WAIT: Duration = Duration::from_secs(5);
 
 /// What `show` and `workspace` keep of the pipe's time (`ANSWER_WITHIN`) to answer in.
 const ANSWER_SPARE: Duration = Duration::from_secs(1);
@@ -74,6 +103,15 @@ const OPENING_FOR_USER: &str = "Lectern is opening a file for the user; try agai
 
 /// The answer to a tool Lectern doesn't offer yet.
 pub const NOT_YET: &str = "Not yet available.";
+
+/// The tool error when a window's UI answers with something else than what was asked.
+const UNEXPECTED: &str = "The window gave an answer Lectern didn't expect.";
+
+/// The tool error for `read` of a PDF.
+const NO_PDF_TEXT: &str = "PDF text isn't available.";
+
+/// The tool error for `highlight` in a PDF, which can't be painted.
+const NO_PDF_HIGHLIGHT: &str = "PDFs can't be highlighted; use show with a page target.";
 
 /// The requests sent to windows' UIs that wait for an answer, by id, with the window each went
 /// to; and the `show`s whose agents wait for what becomes of them, by the same id.
@@ -179,7 +217,7 @@ enum Placed {
 
 impl App {
     /// The answer to the request of the agent `agent` (its name as the reader sees it): `status`,
-    /// `show` and `workspace`, or a tool error for the tools not offered yet.
+    /// `show`, `workspace`, `highlight` and `read`, or a tool error for the tools not offered yet.
     pub fn agent_answer(
         self: &Arc<Self>,
         request: AgentRequest,
@@ -189,6 +227,10 @@ impl App {
             AgentRequest::Status => to_value(&self.agent_status(agent)),
             AgentRequest::Show(args) => to_value(&self.agent_show(args, agent, Budget::new())?),
             AgentRequest::Workspace(args) => to_value(&self.agent_workspace(args, Budget::new())?),
+            AgentRequest::Highlight(args) => {
+                to_value(&self.agent_highlight(args, agent, Budget::new())?)
+            }
+            AgentRequest::Read(args) => to_value(&self.agent_read(args, agent, Budget::new())?),
             // The connection answers it; nothing reaches here.
             AgentRequest::Hello { .. } => Ok(json!({})),
             _ => Err(NOT_YET.to_owned()),
@@ -204,14 +246,7 @@ impl App {
     /// Every window, the most recently focused first, as its UI reports it (else as Rust knows
     /// it), with the closed workspaces and the agent settings.
     pub fn agent_status(&self, agent: &str) -> Status {
-        let focus = lock(&self.focus).clone();
-        let mut windows = self.windows();
-        windows.sort_by_key(|w| {
-            focus
-                .iter()
-                .position(|label| label == w.label())
-                .unwrap_or(usize::MAX)
-        });
+        let windows = self.windows_by_focus();
         // Every window is asked at once, then each answer awaited until the one deadline.
         let asked: Vec<(Arc<WindowState>, u64, Receiver<AgentReply>)> = windows
             .into_iter()
@@ -221,6 +256,8 @@ impl App {
                     id,
                     request: AgentRequest::Status,
                     agent: agent.to_owned(),
+                    places: Vec::new(),
+                    within_ms: None,
                 }));
                 (window, id, answer)
             })
@@ -268,9 +305,9 @@ impl App {
     }
 
     /// `show`: the file `args.path` (a Windows or WSL path) in the window `route_show` picks, at
-    /// its target (a line, for now; the path's own `:12` when no target is given), within
-    /// `budget`. It must be a file, on a share only when Lectern already trusts its host, which is
-    /// checked first.
+    /// its target (the path's own `:12` when no target is given), within `budget`. It must be a
+    /// file, on a share only when Lectern already trusts its host, which is checked first, and its
+    /// target must be there (`show_at`) before anything opens or asks.
     fn agent_show(
         self: &Arc<Self>,
         args: ShowArgs,
@@ -280,6 +317,14 @@ impl App {
         let path = self.agent_location(&args.path)?;
         let file = PathBuf::from(&path.windows);
         check_file(&file, budget.at_most(self.timings.exists))?;
+        let at = match args.target.or(path.line.map(|line| Target::Line { line })) {
+            Some(target) => Some(self.show_at(&file, target, budget)?),
+            None => None,
+        };
+        // An HTML page's passage, which its window finds once the page has loaded.
+        let found_by_page = at.as_ref().is_some_and(|at| {
+            at.place.is_none() && matches!(at.target, Target::Heading { .. } | Target::Quote { .. })
+        });
         let front = read(&self.settings).agent_focus == AgentFocus::Front;
         let request = OpenRequest {
             path: path.windows.clone(),
@@ -297,7 +342,7 @@ impl App {
             let window = self.window(&label).ok_or(CLOSED)?;
             // A window whose UI isn't up yet opens the file first thing, as it would a launch's,
             // but trusting nothing; unless it holds a launch's, which goes first.
-            match window.opens.offer_from_agent(request) {
+            match window.opens.offer_from_agent(request, at.clone()) {
                 AgentOffer::Held => Placed::Starting {
                     label,
                     new,
@@ -307,7 +352,7 @@ impl App {
                 AgentOffer::Refused => return Err(OPENING_FOR_USER.to_owned()),
             }
         };
-        let (label, state, focus) = match placed {
+        let (label, state, target, focus) = match placed {
             Placed::Starting {
                 label,
                 new,
@@ -320,20 +365,25 @@ impl App {
                     }
                 }
                 let focus = self.agent_focus(&label, budget);
-                (label, ShowState::Shown, focus)
+                // Opened as the window starts: a page's passage is found once it has loaded.
+                let target = found_by_page.then_some(TargetState::Pending);
+                (label, ShowState::Shown, target, focus)
             }
             Placed::Ready(window) => {
-                let ShowArgs { target, wait, .. } = args;
+                let (target, places) = match at {
+                    Some(ShowAt { target, place }) => (Some(target), place.into_iter().collect()),
+                    None => (None, Vec::new()),
+                };
                 let shown = ShowArgs {
                     path: path.windows.clone(),
                     workspace: None,
-                    target: target.or(path.line.map(|line| Target::Line { line })),
+                    target,
                     new_window: false,
-                    wait,
+                    wait: args.wait,
                 };
                 let label = window.label().to_owned();
-                let (state, focus) = self.show_in(&window, shown, agent, budget)?;
-                (label, state, focus)
+                let (state, target, focus) = self.show_in(&window, shown, places, agent, budget)?;
+                (label, state, target, focus)
             }
         };
         let workspace = self.window(&label).and_then(|w| self.workspace_name(&w));
@@ -343,20 +393,25 @@ impl App {
             window: label,
             workspace,
             focus,
+            target,
         })
     }
 
-    /// Asks the UI of `window`, which is up, to show `args.path`. It opens it, or asks the reader
-    /// first; either way the window then comes forward. Asked, with a `wait`, what became of it is
+    /// Asks the UI of `window`, which is up, to show `args.path`, at its target, which is at
+    /// `places` in a note or a text file. It opens it, or asks the reader first; either way the
+    /// window then comes forward. The UI is told how long it has to answer (`within_ms`), which an
+    /// HTML page's target may take to load: one that isn't there is the tool's error, and one the
+    /// page hadn't loaded in time for is `pending`. Asked, with a `wait`, what became of it is
     /// waited for that long. A window let go of before it settles the request (`let_go_of`) ends
     /// the wait at once.
     fn show_in(
         &self,
         window: &WindowState,
         args: ShowArgs,
+        places: Vec<TextPlace>,
         agent: &str,
         budget: Budget,
-    ) -> Result<(ShowState, Option<FocusStep>), String> {
+    ) -> Result<(ShowState, Option<TargetState>, Option<FocusStep>), String> {
         let label = window.label();
         let wait = Duration::from_secs(args.wait.into());
         let (id, reply) = self.agent_calls.open(label);
@@ -365,23 +420,31 @@ impl App {
         // Let go of already, its requests went before these came: nothing would answer them.
         if window.is_retired() {
             self.agent_calls.forget(id);
-            return Ok((self.let_go_of(label)?, None));
+            return Ok((self.let_go_of(label)?, None, None));
         }
+        let within = budget.at_most(UI_WAIT);
         window.emit(UiEvent::AgentRequest(AgentCall {
             id,
             request: AgentRequest::Show(args),
             agent: agent.to_owned(),
+            places,
+            within_ms: Some(u32::try_from(within.as_millis()).unwrap_or(u32::MAX)),
         }));
-        let state = match reply.recv_timeout(budget.at_most(SHOW_WAIT)) {
-            Ok(AgentReply::Shown) => ShowState::Shown,
+        let mut target = None;
+        let state = match reply.recv_timeout(within) {
+            Ok(AgentReply::Shown { target: pending }) => {
+                target = pending;
+                ShowState::Shown
+            }
             Ok(AgentReply::Asked) => ShowState::Asked,
+            Ok(AgentReply::Replaced) => ShowState::Replaced,
             Ok(AgentReply::Failed { message }) => {
                 self.agent_calls.forget(id);
                 return Err(message);
             }
             Ok(_) => {
                 self.agent_calls.forget(id);
-                return Err("The window gave an answer Lectern didn't expect.".to_owned());
+                return Err(UNEXPECTED.to_owned());
             }
             Err(RecvTimeoutError::Timeout) => {
                 self.agent_calls.forget(id);
@@ -389,7 +452,7 @@ impl App {
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.agent_calls.forget(id);
-                return Ok((self.let_go_of(label)?, None));
+                return Ok((self.let_go_of(label)?, None, None));
             }
         };
         let focus = self.agent_focus(label, budget);
@@ -408,7 +471,7 @@ impl App {
                 state
             }
         };
-        Ok((state, focus))
+        Ok((state, target, focus))
     }
 
     /// What a `show` answers when the window `label` let go of it before settling it (its state
@@ -419,6 +482,195 @@ impl App {
             Some(_) => Ok(ShowState::Dismissed),
             None => Err(CLOSED.to_owned()),
         }
+    }
+
+    /// Where a `show` of `file` goes in it, `target`, which the file must take (`check_target`).
+    /// In a note or a text file, core finds it in the file as it is on disk, read within `budget`:
+    /// one that isn't there is an error, a sentence for the agent. An HTML page's target is the
+    /// window's to find, and a PDF's is its page. A comment thread's comes with the review tools.
+    fn show_at(&self, file: &Path, target: Target, budget: Budget) -> Result<ShowAt, String> {
+        let kind = opened_kind(file);
+        let name = file_name(file);
+        check_target(kind, &target, &name)?;
+        if matches!(target, Target::Comment { .. }) {
+            return Err(NOT_YET.to_owned());
+        }
+        let place = match kind {
+            DocKind::Markdown | DocKind::Text => {
+                let (text, source) = self.note_text(file, &name, budget)?;
+                Some(resolve_target(&text, &source, &name, &target)?)
+            }
+            DocKind::Html | DocKind::Pdf => None,
+        };
+        Ok(ShowAt { target, place })
+    }
+
+    /// The note or text file `file`, named `name`, read within `budget`: its text as shown, and
+    /// its source.
+    fn note_text(
+        &self,
+        file: &Path,
+        name: &str,
+        budget: Budget,
+    ) -> Result<(TextMap, String), String> {
+        let source = read_source(file, budget.at_most(self.timings.exists))?;
+        let text = TextMap::of_note(name, &source).unwrap_or_default();
+        Ok((text, source))
+    }
+
+    /// `highlight`: the agent's highlights in the file `args.path` (by default the file shown),
+    /// painted by the window showing it, at where core found each target in a note or a text
+    /// file, within `budget`. Every target must be there, or nothing is painted. A PDF can't be
+    /// painted, which is the tool's error.
+    fn agent_highlight(
+        &self,
+        args: HighlightArgs,
+        agent: &str,
+        budget: Budget,
+    ) -> Result<HighlightAnswer, String> {
+        let (window, file) = self.shown_window(args.path.as_deref())?;
+        let kind = opened_kind(&file);
+        if kind == DocKind::Pdf {
+            return Err(NO_PDF_HIGHLIGHT.to_owned());
+        }
+        let name = file_name(&file);
+        for target in &args.targets {
+            check_target(kind, target, &name)?;
+        }
+        let places = match kind {
+            DocKind::Markdown | DocKind::Text if !args.targets.is_empty() => {
+                let (text, source) = self.note_text(&file, &name, budget)?;
+                args.targets
+                    .iter()
+                    .map(|target| resolve_target(&text, &source, &name, target))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            _ => Vec::new(),
+        };
+        let request = AgentRequest::Highlight(HighlightArgs {
+            path: Some(path_string(&file)),
+            ..args
+        });
+        match self.ask_window(&window, request, places, agent, budget)? {
+            AgentReply::Highlighted { count } => Ok(HighlightAnswer {
+                file: self.mapper().literal_forms(&path_string(&file)),
+                window: window.label().to_owned(),
+                highlights: count,
+            }),
+            AgentReply::Failed { message } => Err(message),
+            _ => Err(UNEXPECTED.to_owned()),
+        }
+    }
+
+    /// `read`: a page of the text of the file `args.path` (by default the file shown), as shown,
+    /// within `budget` (`read_page`). A note's or a text file's is read from the file; an HTML
+    /// page's is what the window's page last reported. A PDF has none.
+    fn agent_read(
+        &self,
+        args: ReadArgs,
+        agent: &str,
+        budget: Budget,
+    ) -> Result<ReadAnswer, String> {
+        let (window, file) = self.shown_window(args.path.as_deref())?;
+        let (from, max) = (args.from, args.max);
+        // The text, whether its blocks have lines, and why it is less than the file's.
+        let (text, lines, incomplete) = match opened_kind(&file) {
+            DocKind::Pdf => return Err(NO_PDF_TEXT.to_owned()),
+            DocKind::Html => {
+                let request = AgentRequest::Read(ReadArgs {
+                    path: Some(path_string(&file)),
+                    ..args
+                });
+                match self.ask_window(&window, request, Vec::new(), agent, budget)? {
+                    AgentReply::PageText { blocks, .. }
+                        if page_text_len(&blocks) > MAX_PAGE_TEXT =>
+                    {
+                        return Err("The page's text is over 2 MB, too much to read.".to_owned())
+                    }
+                    AgentReply::PageText { blocks, truncated } => (
+                        TextMap::from_blocks(&blocks, ""),
+                        false,
+                        truncated.then_some(PAGE_TEXT_CUT),
+                    ),
+                    AgentReply::Failed { message } => return Err(message),
+                    _ => return Err(UNEXPECTED.to_owned()),
+                }
+            }
+            DocKind::Markdown | DocKind::Text => {
+                let (text, _) = self.note_text(&file, &file_name(&file), budget)?;
+                (text, true, None)
+            }
+        };
+        let file = self.mapper().literal_forms(&path_string(&file));
+        Ok(read_page(file, &text, lines, incomplete, from, max))
+    }
+
+    /// The window showing the file `raw` names (a Windows or WSL path), else the file shown, and
+    /// that file: of the windows showing it, or any, the most recently focused. An error, a
+    /// sentence for the agent, when no window shows it, or none shows a file.
+    fn shown_window(&self, raw: Option<&str>) -> Result<(Arc<WindowState>, PathBuf), String> {
+        let wanted = raw
+            .map(|raw| self.agent_location(raw).map(|p| PathBuf::from(p.windows)))
+            .transpose()?;
+        self.windows_by_focus()
+            .into_iter()
+            .find_map(|window| {
+                let shown = window.shown_file()?;
+                let wanted = wanted.as_ref().is_none_or(|w| same_path(w, &shown));
+                wanted.then_some((window, shown))
+            })
+            .ok_or_else(|| match &wanted {
+                Some(file) => format!("{} isn't shown in Lectern. Show it first.", file_name(file)),
+                None => "Lectern isn't showing a file. Show one first.".to_owned(),
+            })
+    }
+
+    /// Every window, the most recently focused first.
+    fn windows_by_focus(&self) -> Vec<Arc<WindowState>> {
+        let focus = lock(&self.focus).clone();
+        let mut windows = self.windows();
+        windows.sort_by_key(|w| {
+            focus
+                .iter()
+                .position(|label| label == w.label())
+                .unwrap_or(usize::MAX)
+        });
+        windows
+    }
+
+    /// Sends `request`, with `places`, to the UI of `window` and waits for its answer, within
+    /// `budget`: a sentence for the agent when it doesn't come in time, or the window was let go of
+    /// (it closed, or turned to another workspace) before answering.
+    fn ask_window(
+        &self,
+        window: &WindowState,
+        request: AgentRequest,
+        places: Vec<TextPlace>,
+        agent: &str,
+        budget: Budget,
+    ) -> Result<AgentReply, String> {
+        let label = window.label();
+        let (id, reply) = self.agent_calls.open(label);
+        let answer = if window.is_retired() {
+            Err(RecvTimeoutError::Disconnected)
+        } else {
+            window.emit(UiEvent::AgentRequest(AgentCall {
+                id,
+                request,
+                agent: agent.to_owned(),
+                places,
+                within_ms: None,
+            }));
+            reply.recv_timeout(budget.at_most(UI_WAIT))
+        };
+        self.agent_calls.forget(id);
+        answer.map_err(|e| match e {
+            RecvTimeoutError::Timeout => "The window didn't answer in time.".to_owned(),
+            RecvTimeoutError::Disconnected => match self.window(label) {
+                Some(_) => "That window turned to another workspace.".to_owned(),
+                None => CLOSED.to_owned(),
+            },
+        })
     }
 
     /// `workspace`: switches to the workspace named `args.name`, or creates it with `args.folders`,
@@ -555,6 +807,45 @@ impl App {
 }
 
 impl WindowState {
+    /// Where each of `targets` is now in `path`, the note or text file the window shows, as core
+    /// finds them in the file as it is on disk (`resolve_target`); none for one that isn't there.
+    /// The window asks again for its agent's highlights once the file's text has changed.
+    pub fn agent_places(
+        &self,
+        path: &str,
+        targets: &[Target],
+    ) -> Result<Vec<Option<TextPlace>>, String> {
+        let file = PathBuf::from(path);
+        if !self
+            .shown_file()
+            .is_some_and(|shown| same_path(&shown, &file))
+        {
+            return Err("That file isn't shown in this window.".to_owned());
+        }
+        if !matches!(opened_kind(&file), DocKind::Markdown | DocKind::Text) {
+            return Err("Only a note's or a text file's targets are found again.".to_owned());
+        }
+        if targets.len() > TARGETS_MAX {
+            return Err(format!("At most {TARGETS_MAX} targets are found at once."));
+        }
+        let source = note_source(&file)?;
+        let name = file_name(&file);
+        let text = TextMap::of_note(&name, &source).unwrap_or_default();
+        Ok(targets
+            .iter()
+            .map(|target| resolve_target(&text, &source, &name, target).ok())
+            .collect())
+    }
+
+    /// The file the window shows, which opened; none for a blank window, the welcome page or a
+    /// file that didn't open.
+    fn shown_file(&self) -> Option<PathBuf> {
+        lock(&self.current)
+            .as_ref()
+            .filter(|c| c.doc.is_some())
+            .map(|c| c.path.clone())
+    }
+
     /// What Rust knows the window shows: the file it last opened.
     fn known_view(&self) -> WindowView {
         WindowView {
@@ -570,6 +861,44 @@ impl WindowState {
 /// path; an agent's open never adds a host (`OpenQueue::offer_from_agent`).
 fn agent_location(mapper: &PathMapper, trust: &Trust, raw: &str) -> Result<AgentPath, String> {
     agent_path(mapper, raw, &trust.hosts())
+}
+
+/// `path`'s file name, as an agent is told it; the whole path when it has none.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(|| path_string(path), |n| n.to_string_lossy().into_owned())
+}
+
+/// The text of the note or text file at `path`, as its open reads it: an error, a sentence for the
+/// agent, when it can't be read, or doesn't answer within `timeout` (a stalled share).
+fn read_source(path: &Path, timeout: Duration) -> Result<String, String> {
+    let (done, read) = mpsc::channel();
+    let probed = path.to_path_buf();
+    thread::Builder::new()
+        .name("lectern-agent-read".to_owned())
+        .spawn(move || {
+            // Gone when the read already timed out.
+            let _ = done.send(note_source(&probed));
+        })
+        .map_err(|e| e.to_string())?;
+    match read.recv_timeout(timeout) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(message)) => Err(message),
+        Err(RecvTimeoutError::Timeout) => Err(format!("{} didn't answer in time.", path.display())),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(format!("Lectern couldn't read {}.", path.display()))
+        }
+    }
+}
+
+/// The text of the note or text file at `path`, as its open reads it, and only what it would open:
+/// a text file over the size an open shows is refused, as the open refuses it, before it is read.
+fn note_source(path: &Path) -> Result<String, String> {
+    let stamp = stat_doc(path).map_err(|e| e.message)?;
+    check_size(path, opened_kind(path), stamp.size).map_err(|e| e.message)?;
+    read_file(path)
+        .map(|decoded| decoded.text)
+        .map_err(|e| e.message)
 }
 
 fn to_value(answer: &impl Serialize) -> Result<Value, String> {
@@ -612,8 +941,11 @@ mod tests {
     use crate::state::profile::Profile;
     use crate::state::sync::write;
     use crate::state::test_support::*;
+    use lectern_core::agent::request::{HighlightArgs, ReadArgs, Target as AgentTarget};
     use lectern_core::agent::status::ViewSelection;
+    use lectern_core::agent::target::{ShowAt, TextPlace};
     use lectern_core::ipc::{AgentOpens, OpenWhere, PathMapping, WorkspaceOutcome};
+    use lectern_core::review::text::PageBlock;
 
     /// The `agent-request`s sent, in order, with the window each went to.
     fn agent_requests(host: &FakeHost) -> Vec<(Target, AgentCall)> {
@@ -705,10 +1037,16 @@ mod tests {
     }
 
     #[test]
-    fn the_other_tools_are_not_available_yet() {
+    fn the_review_tools_are_not_available_yet() {
         let f = fixture(profile(&[]), FakeHost::default());
-        let read = AgentRequest::Read(Default::default());
-        assert_eq!(f.app.agent_answer(read, "Claude"), Err(NOT_YET.to_owned()));
+        let comments = AgentRequest::Comments(lectern_core::agent::request::CommentsArgs {
+            path: r"S:\Notes\My Vault\plan.md".to_owned(),
+            status: None,
+        });
+        assert_eq!(
+            f.app.agent_answer(comments, "Claude"),
+            Err(NOT_YET.to_owned())
+        );
     }
 
     // show
@@ -797,7 +1135,7 @@ mod tests {
         let (f, plan, _) = vault(|root| profile(&[root]));
         let wsl = f.app.mapper().to_wsl(&plan).expect("a WSL form");
         assert!(wsl.starts_with("/mnt/"), "{wsl}");
-        let answering = ui_answers(&f, "main", vec![AgentReply::Shown]);
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let answer = f.app.agent_answer(show(&wsl, 0), "Claude").unwrap();
         let (_, call) = answering.join().unwrap();
         let AgentRequest::Show(args) = call.request else {
@@ -980,16 +1318,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             f.app
-                .show_in(&turned, args.clone(), "Claude", Budget::new()),
-            Ok((ShowState::Dismissed, None))
+                .show_in(&turned, args.clone(), Vec::new(), "Claude", Budget::new()),
+            Ok((ShowState::Dismissed, None, None))
         );
         let closed = f.app.window("main").unwrap();
         f.app.window_destroyed("main");
         assert_eq!(
-            f.app.show_in(&closed, args, "Claude", Budget::new()),
+            f.app
+                .show_in(&closed, args, Vec::new(), "Claude", Budget::new()),
             Err(CLOSED.to_owned())
         );
-        assert!(started.elapsed() < SHOW_WAIT);
+        assert!(started.elapsed() < UI_WAIT);
         assert!(agent_requests(&f.host).is_empty());
     }
 
@@ -1006,7 +1345,7 @@ mod tests {
             wait: 0,
         };
         let within = |left: Duration| Budget(Instant::now() + left);
-        // A UI that doesn't answer: given 300 ms, the show gives up then, not after SHOW_WAIT.
+        // A UI that doesn't answer: given 300 ms, the show gives up then, not after UI_WAIT.
         let started = Instant::now();
         assert_eq!(
             f.app
@@ -1014,7 +1353,7 @@ mod tests {
                 .unwrap_err(),
             "The window didn't answer in time."
         );
-        assert!(started.elapsed() < SHOW_WAIT);
+        assert!(started.elapsed() < UI_WAIT);
         // Answered at once, the focus is given what is left of a second, not the host's 2 s.
         let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         f.app
@@ -1115,7 +1454,7 @@ mod tests {
         let payload = window.startup();
         assert_eq!(opened_path(payload.initial.as_ref().unwrap()), loose);
         // Main's file goes to Main's window.
-        let answering = ui_answers(&f, "main", vec![AgentReply::Shown]);
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let answer = f.app.agent_answer(in_new(&plan), "Claude").unwrap();
         answering.join().unwrap();
         assert_eq!(
@@ -1184,7 +1523,7 @@ mod tests {
                 wait: 0,
             })
         };
-        let answering = ui_answers(&f, "main", vec![AgentReply::Shown]);
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
         let answer = f.app.agent_answer(in_main("main"), "Claude").unwrap();
         answering.join().unwrap();
         assert_eq!(
@@ -1252,7 +1591,7 @@ mod tests {
         };
         let reach = |raw: &str| agent_location(&f.app.mapper(), &read(&f.app.trust), raw);
         assert!(matches!(
-            f.state.opens.offer_from_agent(request("a.md")),
+            f.state.opens.offer_from_agent(request("a.md"), None),
             AgentOffer::Held
         ));
         let _ = f.state.startup();
@@ -1462,5 +1801,577 @@ mod tests {
             .map(|w| w.label().to_owned())
             .collect();
         assert_eq!(showing.len(), 1, "{showing:?}");
+    }
+
+    // Targets, highlights and read.
+
+    /// A note with a heading over a passage: its text is "Plan Rollout Roll back the migration
+    /// first.", Rollout on line 3, the passage on line 5.
+    const ROLLOUT: &str = "# Plan\n\n## Rollout\n\nRoll back the migration first.\n";
+
+    /// The vault, with plan.md (`ROLLOUT`) on screen in Main's window, whose UI is up.
+    fn shown_plan() -> (Fixture, PathBuf) {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", ROLLOUT);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let _ = f.state.startup();
+        f.state.ui_shown.open();
+        let _ = f.state.open_document(&path_string(&plan));
+        (f, plan)
+    }
+
+    fn quote(text: &str) -> AgentTarget {
+        AgentTarget::Quote {
+            quote: text.to_owned(),
+            prefix: None,
+            suffix: None,
+        }
+    }
+
+    fn heading(text: &str) -> AgentTarget {
+        AgentTarget::Heading {
+            heading: text.to_owned(),
+        }
+    }
+
+    fn place(lines: (u32, u32), text: (u32, u32)) -> TextPlace {
+        TextPlace {
+            start_line: lines.0,
+            end_line: lines.1,
+            text_start: Some(text.0),
+            text_end: Some(text.1),
+        }
+    }
+
+    fn show_at(path: &Path, target: AgentTarget) -> AgentRequest {
+        AgentRequest::Show(ShowArgs {
+            path: path_string(path),
+            workspace: None,
+            target: Some(target),
+            new_window: false,
+            wait: 0,
+        })
+    }
+
+    fn highlight(path: Option<&Path>, targets: Vec<AgentTarget>, clear: bool) -> AgentRequest {
+        AgentRequest::Highlight(HighlightArgs {
+            path: path.map(path_string),
+            targets,
+            clear,
+        })
+    }
+
+    fn read_from(path: Option<&Path>, from: Option<u32>, max: Option<u32>) -> AgentRequest {
+        AgentRequest::Read(ReadArgs {
+            path: path.map(path_string),
+            from,
+            max,
+        })
+    }
+
+    /// The show `call` asked for, with the places sent with it.
+    fn shown_target(call: AgentCall) -> (Option<AgentTarget>, Vec<TextPlace>) {
+        match call.request {
+            AgentRequest::Show(args) => (args.target, call.places),
+            other => panic!("not a show: {other:?}"),
+        }
+    }
+
+    /// In a note, core finds the target: the window's UI is sent it with where it is.
+    #[test]
+    fn a_show_sends_the_window_where_core_found_its_target_in_a_note() {
+        let (f, plan) = shown_plan();
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
+        let answer = f
+            .app
+            .agent_answer(show_at(&plan, quote("Roll back")), "Claude")
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(
+            shown_target(call),
+            (Some(quote("Roll back")), vec![place((5, 5), (13, 22))])
+        );
+        // The path's own line (`plan.md:3`) is a line target, found as any is.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
+        let at_line = format!("{}:3", path_string(&plan));
+        f.app.agent_answer(show(&at_line, 0), "Claude").unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(
+            shown_target(call),
+            (
+                Some(AgentTarget::Line { line: 3 }),
+                vec![place((3, 3), (5, 12))]
+            )
+        );
+    }
+
+    /// A target that isn't there, or that the file doesn't take, is the tool's error: nothing
+    /// opens, nothing asks and no window comes forward.
+    #[test]
+    fn a_show_whose_target_is_not_there_opens_nothing() {
+        let (f, plan) = shown_plan();
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        let brief = f.dir.file("vault/brief.pdf", "%PDF-1.4\n");
+        let error = |path: &Path, target| f.app.agent_answer(show_at(path, target), "Claude");
+        assert_eq!(
+            error(&notes, quote("Roll back")),
+            Err("That passage isn't in notes.md.".to_owned())
+        );
+        assert_eq!(
+            error(&notes, heading("Rollout")),
+            Err("There's no heading “Rollout” in notes.md.".to_owned())
+        );
+        assert_eq!(
+            error(&plan, AgentTarget::Page { page: 2 }),
+            Err("A page target is for PDFs; give a heading, a line or a quote.".to_owned())
+        );
+        assert_eq!(
+            error(&brief, quote("Brief")),
+            Err("brief.pdf is a PDF: give a page target.".to_owned())
+        );
+        // A comment thread's target comes with the review tools.
+        let comment = AgentTarget::Comment {
+            comment: "C1".to_owned(),
+        };
+        assert_eq!(error(&plan, comment), Err(NOT_YET.to_owned()));
+        assert!(agent_requests(&f.host).is_empty());
+        assert!(lock(&f.host.agent_focused).is_empty());
+    }
+
+    /// An HTML page's target goes to the window as it is, to find in what the page reports.
+    #[test]
+    fn a_pages_target_goes_to_the_window_to_find() {
+        let (f, _) = shown_plan();
+        let report = f
+            .dir
+            .file("vault/report.html", "<h1>Report</h1><p>Rose.</p>");
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        f.app
+            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(shown_target(call), (Some(quote("Rose")), vec![]));
+    }
+
+    /// A window still starting, or a new one, goes to the target once the file has opened: its
+    /// startup payload carries it, with where core found it in a note.
+    #[test]
+    fn a_target_reaches_a_window_still_starting() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", ROLLOUT);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let answer = f
+            .app
+            .agent_answer(show_at(&plan, heading("rollout")), "Claude")
+            .unwrap();
+        assert_eq!(answer["state"], "shown");
+        // Core found it: nothing pending.
+        assert_eq!(answer.get("target"), None);
+        assert!(agent_requests(&f.host).is_empty());
+        let payload = f.state.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        assert_eq!(
+            payload.agent_target,
+            Some(ShowAt {
+                target: heading("rollout"),
+                place: Some(place((3, 3), (5, 12))),
+            })
+        );
+        // A PDF no workspace holds, in a new window, at its page.
+        let brief = f.dir.file("elsewhere/brief.pdf", "%PDF-1.4\n");
+        let answer = f
+            .app
+            .agent_answer(
+                AgentRequest::Show(ShowArgs {
+                    path: path_string(&brief),
+                    workspace: None,
+                    target: Some(AgentTarget::Page { page: 3 }),
+                    new_window: true,
+                    wait: 0,
+                }),
+                "Claude",
+            )
+            .unwrap();
+        let window = f.app.window(answer["window"].as_str().unwrap()).unwrap();
+        assert_ne!(window.label(), "main");
+        let payload = window.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), brief);
+        assert_eq!(
+            payload.agent_target,
+            Some(ShowAt {
+                target: AgentTarget::Page { page: 3 },
+                place: None,
+            })
+        );
+        assert_eq!(answer.get("target"), None);
+        // An HTML page's passage, which the new window finds once the page has loaded: pending.
+        let report = f.dir.file("elsewhere/report.html", "<p>Rose.</p>");
+        let answer = f
+            .app
+            .agent_answer(
+                AgentRequest::Show(ShowArgs {
+                    path: path_string(&report),
+                    workspace: None,
+                    target: Some(quote("Rose")),
+                    new_window: true,
+                    wait: 0,
+                }),
+                "Claude",
+            )
+            .unwrap();
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(answer["target"], "pending");
+    }
+
+    /// `highlight` goes to the window showing the file, the shown one by default, with where core
+    /// found each target; it answers how many highlights the window shows now, and brings no
+    /// window forward.
+    #[test]
+    fn highlight_goes_to_the_window_showing_the_file_with_where_each_target_is() {
+        let (f, plan) = shown_plan();
+        for path in [Some(plan.as_path()), None] {
+            let answering = ui_answers(&f, "main", vec![AgentReply::Highlighted { count: 2 }]);
+            let answer = f
+                .app
+                .agent_answer(
+                    highlight(path, vec![heading("Rollout"), quote("migration")], false),
+                    "Claude",
+                )
+                .unwrap();
+            let (target, call) = answering.join().unwrap();
+            assert_eq!(target, Target::Window("main".to_owned()));
+            let AgentRequest::Highlight(args) = &call.request else {
+                panic!("not a highlight: {:?}", call.request);
+            };
+            assert!(same_path(Path::new(args.path.as_deref().unwrap()), &plan));
+            assert_eq!(
+                call.places,
+                [place((3, 3), (5, 12)), place((5, 5), (27, 36))]
+            );
+            assert_eq!(answer["window"], "main");
+            assert_eq!(answer["highlights"], 2);
+            assert!(same_path(
+                Path::new(answer["file"]["windows"].as_str().unwrap()),
+                &plan
+            ));
+        }
+        // Clearing alone reads nothing: the window is only told.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Highlighted { count: 0 }]);
+        let answer = f
+            .app
+            .agent_answer(highlight(None, vec![], true), "Claude")
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert!(call.places.is_empty());
+        assert_eq!(answer["highlights"], 0);
+        assert!(lock(&f.host.agent_focused).is_empty());
+    }
+
+    /// A file no window shows can't be highlighted or read, nor a passage that isn't there:
+    /// nothing is sent.
+    #[test]
+    fn highlight_and_read_need_the_file_shown_and_the_target_there() {
+        let (f, plan) = shown_plan();
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        let not_shown = Err("notes.md isn't shown in Lectern. Show it first.".to_owned());
+        assert_eq!(
+            f.app.agent_answer(
+                highlight(Some(&notes), vec![quote("Notes")], false),
+                "Claude"
+            ),
+            not_shown
+        );
+        assert_eq!(
+            f.app
+                .agent_answer(read_from(Some(&notes), None, None), "Claude"),
+            not_shown
+        );
+        assert_eq!(
+            f.app.agent_answer(
+                highlight(Some(&plan), vec![quote("roll forward")], false),
+                "Claude"
+            ),
+            Err("That passage isn't in plan.md.".to_owned())
+        );
+        assert!(agent_requests(&f.host).is_empty());
+        // A window showing nothing has no file to go by.
+        let f = fixture(profile(&[]), FakeHost::default());
+        let nothing = Err("Lectern isn't showing a file. Show one first.".to_owned());
+        assert_eq!(
+            f.app
+                .agent_answer(highlight(None, vec![quote("x")], false), "Claude"),
+            nothing
+        );
+        assert_eq!(
+            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            nothing
+        );
+    }
+
+    /// A note's text is read by Rust, from the file, a page at a time: the window isn't asked.
+    #[test]
+    fn read_gives_a_notes_text_a_page_at_a_time() {
+        let (f, plan) = shown_plan();
+        let answer = f
+            .app
+            .agent_answer(read_from(None, Some(5), Some(7)), "Claude")
+            .unwrap();
+        assert_eq!(answer["text"], "Rollout");
+        assert_eq!(answer["truncated"], true);
+        assert_eq!(answer["next"], 12);
+        assert_eq!(
+            answer["blocks"],
+            json!([{"start": 0, "line": 3, "heading": 0}])
+        );
+        assert_eq!(answer["headings"], json!(["Plan › Rollout"]));
+        assert_eq!(answer["truncated"], true);
+        assert!(same_path(
+            Path::new(answer["file"]["windows"].as_str().unwrap()),
+            &plan
+        ));
+        assert!(agent_requests(&f.host).is_empty());
+    }
+
+    /// An HTML page's text is what its window's page reported, scripts and all, and its window
+    /// finds a highlight's passage; a PDF has no text to read.
+    #[test]
+    fn a_page_is_read_and_highlighted_by_its_window_and_a_pdf_has_no_text() {
+        let (f, _) = shown_plan();
+        let report = f.dir.file("vault/report.html", "<h1>Report</h1>");
+        let _ = f.state.open_document(&path_string(&report));
+        let blocks = vec![
+            PageBlock {
+                text: "Report".to_owned(),
+                heading_level: Some(1),
+            },
+            PageBlock {
+                text: "Made by a script.".to_owned(),
+                heading_level: None,
+            },
+        ];
+        let answering = ui_answers(
+            &f,
+            "main",
+            vec![AgentReply::PageText {
+                blocks,
+                truncated: false,
+            }],
+        );
+        let answer = f
+            .app
+            .agent_answer(read_from(None, None, None), "Claude")
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert!(matches!(call.request, AgentRequest::Read(_)));
+        assert_eq!(answer["text"], "Report Made by a script.");
+        assert_eq!(answer["blocks"][1], json!({"start": 7, "heading": 0}));
+        assert_eq!(answer["headings"], json!(["Report"]));
+        assert_eq!(answer["blocks"][0], json!({"start": 0, "heading": 0}));
+        assert_eq!(answer.get("incomplete"), None);
+        // A page its bridge cut short at its limit reads as incomplete.
+        let cut = vec![PageBlock {
+            text: "Rows.".to_owned(),
+            heading_level: None,
+        }];
+        let answering = ui_answers(
+            &f,
+            "main",
+            vec![AgentReply::PageText {
+                blocks: cut,
+                truncated: true,
+            }],
+        );
+        let answer = f
+            .app
+            .agent_answer(read_from(None, None, None), "Claude")
+            .unwrap();
+        answering.join().unwrap();
+        assert_eq!(answer["text"], "Rows.");
+        assert_eq!(answer["truncated"], true);
+        assert_eq!(answer["incomplete"], "page text over 2 MiB");
+        assert_eq!(answer.get("next"), None);
+        let missing = "That passage isn't in report.html.";
+        let answering = ui_answers(
+            &f,
+            "main",
+            vec![AgentReply::Failed {
+                message: missing.to_owned(),
+            }],
+        );
+        assert_eq!(
+            f.app
+                .agent_answer(highlight(None, vec![quote("Rose")], false), "Claude"),
+            Err(missing.to_owned())
+        );
+        let (_, call) = answering.join().unwrap();
+        assert!(call.places.is_empty());
+        let brief = f.dir.file("vault/brief.pdf", "%PDF-1.4\n");
+        let _ = f.state.open_document(&path_string(&brief));
+        let sent = agent_requests(&f.host).len();
+        assert_eq!(
+            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            Err("PDF text isn't available.".to_owned())
+        );
+        // A PDF can't be painted: highlighting one, or clearing it, is the tool's error.
+        for (targets, clear) in [(vec![quote("Brief")], false), (vec![], true)] {
+            assert_eq!(
+                f.app
+                    .agent_answer(highlight(None, targets, clear), "Claude"),
+                Err("PDFs can't be highlighted; use show with a page target.".to_owned())
+            );
+        }
+        assert_eq!(agent_requests(&f.host).len(), sent);
+    }
+
+    /// An HTML page's target is found by its window once the page has loaded. The window has as
+    /// long as the pipe gives it to say: one that isn't there is the tool's error, as in a note,
+    /// and one the page hadn't loaded in time for is `pending`.
+    #[test]
+    fn a_pages_target_still_loading_is_pending_and_one_not_there_is_the_tools_error() {
+        let (f, _) = shown_plan();
+        let report = f
+            .dir
+            .file("vault/report.html", "<h1>Report</h1><p>Rose.</p>");
+        let pending = AgentReply::Shown {
+            target: Some(TargetState::Pending),
+        };
+        let answering = ui_answers(&f, "main", vec![pending]);
+        let answer = f
+            .app
+            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        let within = call.within_ms.expect("how long the window has");
+        assert!(
+            within > 0 && u128::from(within) <= UI_WAIT.as_millis(),
+            "{within}"
+        );
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(answer["target"], "pending");
+        let missing = "That passage isn't in report.html.";
+        let answering = ui_answers(
+            &f,
+            "main",
+            vec![AgentReply::Failed {
+                message: missing.to_owned(),
+            }],
+        );
+        assert_eq!(
+            f.app
+                .agent_answer(show_at(&report, quote("Tulip")), "Claude"),
+            Err(missing.to_owned())
+        );
+        answering.join().unwrap();
+        // A newer request took its place before the page loaded.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Replaced]);
+        let answer = f
+            .app
+            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .unwrap();
+        answering.join().unwrap();
+        assert_eq!(answer["state"], "replaced");
+        // Found, or in a note, the answer has no target to tell of.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
+        let answer = f
+            .app
+            .agent_answer(show_at(&report, quote("Rose")), "Claude")
+            .unwrap();
+        answering.join().unwrap();
+        assert_eq!(answer.get("target"), None);
+    }
+
+    /// A text file over the size an open shows is refused before it is read, as the open is.
+    #[test]
+    fn a_target_in_a_text_file_too_large_to_show_is_refused_unread() {
+        let (f, _) = shown_plan();
+        let huge = f.dir.file("vault/huge.txt", "");
+        fs::File::options()
+            .write(true)
+            .open(&huge)
+            .unwrap()
+            .set_len(20 * 1024 * 1024 + 1)
+            .unwrap();
+        assert_eq!(
+            f.app
+                .agent_answer(show_at(&huge, AgentTarget::Line { line: 1 }), "Claude"),
+            Err("This file is too large to show (over 20 MB).".to_owned())
+        );
+        assert!(agent_requests(&f.host).is_empty());
+    }
+
+    /// The window finds its agent's highlights again after the note changes: core looks for each
+    /// target in the file as it is now, and one that's gone is none.
+    #[test]
+    fn the_window_finds_its_notes_targets_again_through_core() {
+        let (f, plan) = shown_plan();
+        let path = path_string(&plan);
+        let targets = [
+            quote("Roll back"),
+            heading("Rollout"),
+            quote("Roll forward"),
+        ];
+        assert_eq!(
+            f.state.agent_places(&path, &targets),
+            Ok(vec![
+                Some(place((5, 5), (13, 22))),
+                Some(place((3, 3), (5, 12))),
+                None
+            ])
+        );
+        // Changed on disk: "Plan Intro. Rollout Roll forward, then roll back." Each is looked
+        // for again.
+        fs::write(
+            &plan,
+            "# Plan\n\nIntro.\n\n## Rollout\n\nRoll forward, then roll back.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.state.agent_places(&path, &targets),
+            Ok(vec![
+                None,
+                Some(place((5, 5), (12, 19))),
+                Some(place((7, 7), (20, 32)))
+            ])
+        );
+        // Only for the file the window shows.
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        assert_eq!(
+            f.state.agent_places(&path_string(&notes), &targets),
+            Err("That file isn't shown in this window.".to_owned())
+        );
+    }
+
+    /// A window whose UI leaves its document for none (the welcome page, a file deleted while
+    /// open) shows no file to Rust either: an agent can't read, highlight or comment on it, and an
+    /// open begun before it left doesn't take its place afterwards.
+    #[test]
+    fn a_window_that_leaves_its_document_shows_none() {
+        let (f, plan) = shown_plan();
+        let path = path_string(&plan);
+        let begun = f.state.next_seq();
+        f.state.leave_document();
+        assert_eq!(f.state.known_view().path, None);
+        assert_eq!(
+            f.app.agent_answer(read_from(None, None, None), "Claude"),
+            Err("Lectern isn't showing a file. Show one first.".to_owned())
+        );
+        assert_eq!(
+            f.app.agent_answer(
+                highlight(Some(&plan), vec![quote("Roll back")], false),
+                "Claude"
+            ),
+            Err("plan.md isn't shown in Lectern. Show it first.".to_owned())
+        );
+        assert!(f.state.load_review(&path, None).is_err());
+        assert!(f.state.agent_places(&path, &[quote("Roll back")]).is_err());
+        // The open begun before it left lands after: it isn't on screen.
+        assert!(!f.state.make_current(begun, &plan, None));
+        assert_eq!(f.state.known_view().path, None);
+        // A new open is.
+        let _ = f.state.open_document(&path);
+        assert!(f.state.shown_file().is_some());
     }
 }

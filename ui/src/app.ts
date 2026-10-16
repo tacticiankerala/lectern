@@ -28,7 +28,9 @@
 //   first, with `replyToAgent`; it is listened for before `startup`, like the others. An agent's
 //   `show` opens as a link does, on the history, so unsaved comment text is kept as on any other
 //   switch; asked about first, the bar over the document waits for the reader, and is dismissed
-//   as the window leaves: before its page reloads into another workspace, or before it closes.
+//   as the window leaves: before its page reloads into another workspace, or before it closes. A
+//   show within the file on screen marks where the reader was on the history first. A window that
+//   started for an agent (`agentTarget` in the startup payload) opens at its target.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -48,7 +50,7 @@ import type { CommentsController } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import { trackFrameFocus } from "./frame-view";
-import type { Agent } from "./agent";
+import type { Agent, Landing } from "./agent";
 import type { AgentCall } from "./generated/AgentCall";
 import type { AgentReply } from "./generated/AgentReply";
 import type { Crumb } from "./generated/Crumb";
@@ -61,6 +63,7 @@ import type { OpenRequest } from "./generated/OpenRequest";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OutlineItem } from "./generated/OutlineItem";
 import type { PageLoads } from "./generated/PageLoads";
+import type { ShowAt } from "./generated/ShowAt";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { Settings } from "./generated/Settings";
@@ -71,6 +74,7 @@ import { LibraryController, NARROW } from "./library-controller";
 import { Navigation } from "./navigation";
 import { Outline } from "./outline";
 import { trackProgress } from "./progress";
+import type { PageAim, PageFrame } from "./page-frame";
 import { renderProperties } from "./properties";
 import { ReadingPanel } from "./reading-panel";
 import { flowAnchor, keepFlow, type FlowAnchor } from "./reflow";
@@ -152,6 +156,10 @@ export interface OpenOptions {
   slug?: string;
   /** A source line to scroll to. */
   line?: number;
+  /** A PDF's page to open at. */
+  page?: number;
+  /** A passage of an HTML page to scroll to once it is ready, found in its text then. */
+  aim?: PageAim;
   /** A captured position to scroll back to (history, live reload). */
   position?: SavedPosition;
   /** Record the document on screen, with its position, on the history once this lands. */
@@ -373,6 +381,7 @@ export class App {
     const navigation = this.nav.beginNavigation();
     let notice: string | null;
     let initial: OpenResult | null = null;
+    let landing: OpenOptions = {};
     let primary = false;
     // The fonts selected last time load while the startup payload is on its way.
     const earlyFonts = loadRememberedFonts();
@@ -390,6 +399,9 @@ export class App {
       notice = payload.startupNotice;
       initial = payload.initial;
       primary = payload.primary;
+      if (payload.agentTarget !== undefined && initial?.status === "ok") {
+        landing = await this.agentLanding(payload.agentTarget, initial.doc.path);
+      }
       this.workspaces.begin(payload.workspace, payload.workspace === null, payload.workspaces);
     } catch (e) {
       notice = `Lectern didn't start properly: ${String(e)}`;
@@ -401,7 +413,7 @@ export class App {
     this.applySettings();
     const fonts = Promise.all([earlyFonts, loadFonts(this.state.settings)]);
     if (this.nav.endNavigation(navigation)) {
-      this.show(initial);
+      this.show(initial, landing);
       this.nav.settleDeferred();
     }
     // Showing something sets the title; otherwise it names the workspace alone.
@@ -468,6 +480,11 @@ export class App {
 
   async open(path: string, opts: OpenOptions = {}): Promise<void> {
     await this.nav.open(path, opts);
+  }
+
+  /** Tells Rust the window left its document for none, so nothing acts on that document any more. */
+  leaveDocument(): void {
+    quietly(this.backend.leaveDocument());
   }
 
   /** Asks for a file and opens it, trusting its host: the user chose it. */
@@ -839,7 +856,7 @@ export class App {
   private showDoc(doc: DocPayload, opts: OpenOptions, position?: SavedPosition): void {
     this.state.doc = doc;
     this.state.error = null;
-    this.view.render(doc);
+    this.view.render(doc, opts.page);
     this.showMeta(doc);
     this.showBanner(doc.lossy);
     if (doc.kind === "pdf") {
@@ -859,6 +876,10 @@ export class App {
       this.view.restore(doc.position);
     } else {
       this.scroller.scrollTop = 0;
+    }
+    if (opts.aim !== undefined) {
+      // A page goes there once it is ready, over where it was restored to.
+      this.view.aimPage(opts.aim);
     }
   }
 
@@ -1028,52 +1049,135 @@ export class App {
   private async agentRequested(call: AgentCall): Promise<void> {
     let reply: AgentReply;
     try {
-      const { Agent } = await import("./agent.js");
-      if (this.agent === null) {
-        const agent = new Agent({
-          doc: () => this.state.doc,
-          docElement: () => this.layout.doc,
-          scroller: () => this.scroller,
-          page: () => this.view.page,
-          shownPath: () => this.nav.currentPath(),
-          opens: () => this.state.settings.agentOpens,
-          open: (path, line) => this.openForAgent(path, line),
-          scrollToLine: (line) => {
-            this.view.scrollToLine(line);
-          },
-          answered: (id, answer, message) =>
-            this.backend
-              .replyToAgent(id, {
-                kind: "answered",
-                answer,
-                ...(message === undefined ? {} : { message }),
-              })
-              .catch(warn),
-          bar: this.layout.agentAsk,
-        });
-        this.on("doc", () => {
-          agent.docShown();
-        });
-        this.agent = agent;
-      }
-      reply = await this.agent.answer(call);
+      const agent = await this.agentHere();
+      reply = await agent.answer(call);
     } catch (e) {
       reply = { kind: "failed", message: `Lectern couldn't answer: ${String(e)}` };
     }
     quietly(this.backend.replyToAgent(call.id, reply));
   }
 
+  /** This window's part in answering agents (agent.ts), made, and loaded, on first use. */
+  private async agentHere(): Promise<Agent> {
+    const { Agent } = await import("./agent.js");
+    if (this.agent !== null) {
+      return this.agent;
+    }
+    const agent = new Agent({
+      doc: () => this.state.doc,
+      docElement: () => this.layout.doc,
+      scroller: () => this.scroller,
+      page: () => this.view.page,
+      shownPath: () => this.nav.currentPath(),
+      opens: () => this.state.settings.agentOpens,
+      open: (path, landing) => this.openForAgent(path, landing),
+      move: (landing) => this.moveForAgent(landing),
+      pageReady: (within) => this.pageReady(within),
+      navigation: () => this.navigation,
+      places: (path, targets) => this.backend.agentPlaces(path, targets),
+      aimPage: (aim) => {
+        this.view.aimPage(aim);
+      },
+      answered: (id, answer, message) =>
+        this.backend
+          .replyToAgent(id, {
+            kind: "answered",
+            answer,
+            ...(message === undefined ? {} : { message }),
+          })
+          .catch(warn),
+      bar: this.layout.agentAsk,
+    });
+    this.on("doc", () => {
+      agent.docShown();
+    });
+    this.on("page", () => {
+      agent.pageChanged();
+    });
+    this.agent = agent;
+    return agent;
+  }
+
   /**
-   * Opens `path` for an agent, on the history, at the source line `line` when given. Once it has
-   * landed: null when it is on screen, else why it isn't.
+   * Where an agent's `show` takes `path`, the file this window started with, at `at` (agent.ts):
+   * a newer request, or another navigation, cancels it as it would any request's.
    */
-  private async openForAgent(path: string, line: number | null): Promise<string | null> {
-    await this.open(path, line === null ? { push: true } : { push: true, line });
+  private async agentLanding(at: ShowAt, path: string): Promise<OpenOptions> {
+    try {
+      const agent = await this.agentHere();
+      return agent.startedWith(at, path, this.navigation) ?? {};
+    } catch (e) {
+      warn(e);
+      return {};
+    }
+  }
+
+  /**
+   * Opens `path` for an agent, on the history, at `landing` when given. Once it has landed: null
+   * when it is on screen, else why it isn't.
+   */
+  private async openForAgent(path: string, landing: Landing | null): Promise<string | null> {
+    await this.open(path, { push: true, ...landing });
     const { doc, error } = this.state;
     if (doc && samePath(doc.path, path)) {
       return null;
     }
     return error && samePath(error.path, path) ? error.message : "Another file opened first.";
+  }
+
+  /**
+   * The HTML page on screen once its session has its text (its signed `ready`), waiting at most
+   * `within` milliseconds for it; null when it hasn't by then.
+   */
+  private pageReady(within: number): Promise<PageFrame | null> {
+    return new Promise((resolve) => {
+      let done = false;
+      const settle = (page: PageFrame | null): void => {
+        if (done) return;
+        done = true;
+        stop();
+        clearTimeout(timer);
+        resolve(page);
+      };
+      const ready = (): PageFrame | null => {
+        const page = this.view.page;
+        return page?.ready === true ? page : null;
+      };
+      const timer = setTimeout(() => {
+        settle(null);
+      }, within);
+      const stop = this.on("page", () => {
+        const page = ready();
+        if (page) settle(page);
+      });
+      const now = ready();
+      if (now) settle(now);
+    });
+  }
+
+  /**
+   * Moves within the document on screen to `landing` for an agent, marking where the reader was
+   * on the history first, so Back returns there. False, moving nowhere, when it is a passage the
+   * HTML page on screen, ready, hasn't got.
+   */
+  private moveForAgent(landing: Landing): boolean {
+    const page = this.view.page;
+    const found = "aim" in landing && page?.ready === true ? landing.aim(page) : undefined;
+    if (found === null) {
+      return false;
+    }
+    this.nav.markHere();
+    if ("line" in landing) {
+      this.view.scrollToLine(landing.line);
+    } else if ("page" in landing) {
+      this.view.toPdfPage(landing.page);
+    } else if (found !== undefined) {
+      page?.scrollTo(found);
+    } else {
+      // Not loaded yet: it goes there once it is.
+      this.view.aimPage(landing.aim);
+    }
+    return true;
   }
 
   /** The text selected in the HTML page on screen changed: the Comment button follows it. */

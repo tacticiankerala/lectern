@@ -31,6 +31,11 @@
   color: var(--bg);
 }
 
+/* An agent's highlights (agent.ts): under find's, over the review comments'. */
+::highlight(agent) {
+  background: var(--agent-highlight);
+}
+
 /* ---- Text ---- */
 
 .doc p,

@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use lectern_core::agent::request::Target;
+use lectern_core::agent::target::{ShowAt, TextPlace};
 use lectern_core::frame_keys::keys;
 use lectern_core::ipc::{
     DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure, OpenError,
@@ -106,6 +108,9 @@ fn ts_bindings_exported() {
         "ViewSelection",
         "AskAnswer",
         "AskOutcome",
+        "TextPlace",
+        "ShowAt",
+        "TargetState",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -648,6 +653,7 @@ fn startup_payload_carries_a_notice() {
         workspace: None,
         workspaces: vec![],
         primary: true,
+        agent_target: None,
     })
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
@@ -658,6 +664,48 @@ fn startup_payload_carries_a_notice() {
     assert!(j["workspace"].is_null());
     assert_eq!(j["workspaces"], json!([]));
     assert_eq!(j["primary"], true);
+}
+
+/// An agent's `show` held for a window still starting comes with its target, which the UI applies
+/// once the file has opened; a payload without one leaves it out.
+#[test]
+fn startup_payload_carries_an_agents_target() {
+    let payload = |agent_target| StartupPayload {
+        settings: Default::default(),
+        settings_rev: 0,
+        library: lectern_core::ipc::LibraryPayload { roots: vec![] },
+        recent: vec![],
+        initial: None,
+        version: "0.5.0".to_owned(),
+        portable: false,
+        startup_notice: None,
+        workspace: None,
+        workspaces: vec![],
+        primary: false,
+        agent_target,
+    };
+    let held = ShowAt {
+        target: Target::Heading {
+            heading: "Rollout".to_owned(),
+        },
+        place: Some(TextPlace {
+            start_line: 5,
+            end_line: 5,
+            text_start: Some(17),
+            text_end: Some(24),
+        }),
+    };
+    let j = serde_json::to_value(payload(Some(held))).unwrap();
+    assert_eq!(
+        j["agentTarget"],
+        json!({
+            "target": {"heading": "Rollout"},
+            "place": {"startLine": 5, "endLine": 5, "textStart": 17, "textEnd": 24},
+        })
+    );
+    let j = serde_json::to_value(payload(None)).unwrap();
+    assert!(j.get("agentTarget").is_none());
+    assert!(decl::<StartupPayload>().contains("agentTarget?: ShowAt"));
 }
 
 #[test]
@@ -690,6 +738,7 @@ fn startup_payload_names_the_window_workspace() {
         workspace: Some(personal.clone()),
         workspaces: vec![work, personal],
         primary: false,
+        agent_target: None,
     })
     .unwrap();
     let personal = json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true});

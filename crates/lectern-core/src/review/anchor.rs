@@ -210,7 +210,10 @@ fn occurrence_near(
 /// is twice in `a a a`). A longer one is matched end to end: visiting the overlapping
 /// occurrences costs the needle's length each, and a needle that long which overlaps itself is
 /// repeated text, in which one occurrence is as good as another.
-fn occurrences<'h>(haystack: &'h str, needle: &'h str) -> impl Iterator<Item = usize> + 'h {
+pub(crate) fn occurrences<'h>(
+    haystack: &'h str,
+    needle: &'h str,
+) -> impl Iterator<Item = usize> + 'h {
     let overlapping = needle.chars().nth(QUOTE_CAP).is_none();
     let mut from = 0;
     std::iter::from_fn(move || {
@@ -338,7 +341,7 @@ fn best_by_context(
 }
 
 /// How many characters `a` and `b` share at their ends.
-fn common_suffix(a: &str, b: &str) -> usize {
+pub(crate) fn common_suffix(a: &str, b: &str) -> usize {
     a.chars()
         .rev()
         .zip(b.chars().rev())
@@ -347,7 +350,7 @@ fn common_suffix(a: &str, b: &str) -> usize {
 }
 
 /// How many characters `a` and `b` share at their starts.
-fn common_prefix(a: &str, b: &str) -> usize {
+pub(crate) fn common_prefix(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 

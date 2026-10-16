@@ -207,11 +207,14 @@ impl WindowState {
         }
     }
 
-    /// Makes `path` the current document unless a newer open (a higher `seq`) already did; true
-    /// when it did. The watcher is told under the same lock, so it always polls the current one.
+    /// Makes `path` the current document unless a newer open (a higher `seq`) already did, or the
+    /// UI left its document since this one began (`leave_document`); true when it did. The watcher
+    /// is told under the same lock, so it always polls the current one.
     pub(super) fn make_current(&self, seq: u64, path: &Path, rendered: Option<&Rendered>) -> bool {
         let mut current = lock(&self.current);
-        if current.as_ref().is_some_and(|c| c.seq > seq) {
+        if current.as_ref().is_some_and(|c| c.seq > seq)
+            || self.left_at.load(Ordering::SeqCst) > seq
+        {
             return false;
         }
         let refreshed_at = current
@@ -231,6 +234,20 @@ impl WindowState {
             watch.doc(Some(path.to_path_buf()));
         }
         true
+    }
+
+    /// The UI left its document for none (the welcome page, or a file deleted while open): there
+    /// is no current document, so nothing acts on the one it showed (an agent's read, highlight or
+    /// comment, a review command), and an open begun before now never becomes current. Numbered as
+    /// an open is, so an open begun after it does. The watcher stops watching it.
+    pub fn leave_document(&self) {
+        let seq = self.next_seq();
+        let mut current = lock(&self.current);
+        self.left_at.store(seq, Ordering::SeqCst);
+        *current = None;
+        if let Some(watch) = &*lock(&self.watch) {
+            watch.doc(None);
+        }
     }
 
     /// Asks the UI to reload the current document when it is stale and an index newer than its

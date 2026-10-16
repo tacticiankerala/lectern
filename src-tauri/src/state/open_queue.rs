@@ -3,6 +3,7 @@
 
 use std::sync::Mutex;
 
+use lectern_core::agent::target::ShowAt;
 use lectern_core::ipc::OpenRequest;
 
 use super::sync::lock;
@@ -16,10 +17,12 @@ pub struct OpenQueue {
 }
 
 /// A request held for the UI's startup, and whether an agent made it: an agent's file opens as it
-/// is, trusting nothing, where a launch's makes its host trusted.
+/// is, trusting nothing, where a launch's makes its host trusted. An agent's may have a target,
+/// which the UI goes to once the file has opened.
 pub(super) struct HeldOpen {
     pub(super) request: OpenRequest,
     pub(super) by_agent: bool,
+    pub(super) at: Option<ShowAt>,
 }
 
 /// What became of an agent's request offered to a window's queue (`offer_from_agent`).
@@ -42,12 +45,14 @@ impl OpenQueue {
         inner.1 = Some(HeldOpen {
             request,
             by_agent: false,
+            at: None,
         });
         None
     }
 
-    /// As `offer`, for an agent's request, which is refused while a launch's is held.
-    pub(super) fn offer_from_agent(&self, request: OpenRequest) -> AgentOffer {
+    /// As `offer`, for an agent's request, going to `at` once open, which is refused while a
+    /// launch's is held.
+    pub(super) fn offer_from_agent(&self, request: OpenRequest, at: Option<ShowAt>) -> AgentOffer {
         let mut inner = lock(&self.inner);
         if inner.0 {
             return AgentOffer::Now;
@@ -58,6 +63,7 @@ impl OpenQueue {
         inner.1 = Some(HeldOpen {
             request,
             by_agent: true,
+            at,
         });
         AgentOffer::Held
     }
@@ -111,6 +117,7 @@ impl HeldLaunches {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lectern_core::agent::request::Target;
 
     #[test]
     fn open_requests_wait_for_the_ui_then_go_straight_through() {
@@ -133,42 +140,55 @@ mod tests {
         assert!(queue.ready().is_none());
     }
 
-    /// An agent's request is held as a launch's is, marked as the agent's: the latest of either
-    /// is kept, except that an agent's never takes the place of a launch's.
+    /// An agent's request is held as a launch's is, marked as the agent's, with its target: the
+    /// latest of either is kept, except that an agent's never takes the place of a launch's.
     #[test]
-    fn an_agents_open_waits_for_the_ui_but_never_displaces_a_launch() {
+    fn an_agents_open_waits_for_the_ui_with_its_target_but_never_displaces_a_launch() {
         let request = |path: &str| OpenRequest {
             path: path.to_owned(),
             t0_ms: None,
             folder: false,
         };
-        let held = |queue: &OpenQueue| queue.ready().map(|h| (h.request.path, h.by_agent));
+        let at = |page: u32| {
+            Some(ShowAt {
+                target: Target::Page { page },
+                place: None,
+            })
+        };
+        let held = |queue: &OpenQueue| {
+            queue
+                .ready()
+                .map(|h| (h.request.path, h.by_agent, h.at.map(|at| at.target)))
+        };
         let queue = OpenQueue::default();
         assert!(matches!(
-            queue.offer_from_agent(request(r"C:\a.md")),
+            queue.offer_from_agent(request(r"C:\a.pdf"), at(2)),
             AgentOffer::Held
         ));
         assert!(matches!(
-            queue.offer_from_agent(request(r"C:\b.md")),
+            queue.offer_from_agent(request(r"C:\b.pdf"), at(3)),
             AgentOffer::Held
         ));
-        assert_eq!(held(&queue), Some((r"C:\b.md".to_owned(), true)));
+        assert_eq!(
+            held(&queue),
+            Some((r"C:\b.pdf".to_owned(), true, Some(Target::Page { page: 3 })))
+        );
         assert!(matches!(
-            queue.offer_from_agent(request(r"C:\c.md")),
+            queue.offer_from_agent(request(r"C:\c.md"), None),
             AgentOffer::Now
         ));
-        // A launch takes an agent's place, and keeps it.
+        // A launch takes an agent's place, target and all, and keeps it.
         let queue = OpenQueue::default();
         assert!(matches!(
-            queue.offer_from_agent(request(r"C:\a.md")),
+            queue.offer_from_agent(request(r"C:\a.pdf"), at(2)),
             AgentOffer::Held
         ));
         assert!(queue.offer(request(r"C:\b.md")).is_none());
         assert!(matches!(
-            queue.offer_from_agent(request(r"C:\c.md")),
+            queue.offer_from_agent(request(r"C:\c.md"), None),
             AgentOffer::Refused
         ));
-        assert_eq!(held(&queue), Some((r"C:\b.md".to_owned(), false)));
+        assert_eq!(held(&queue), Some((r"C:\b.md".to_owned(), false, None)));
     }
 
     #[test]

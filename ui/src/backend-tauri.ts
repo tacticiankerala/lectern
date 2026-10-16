@@ -5,6 +5,8 @@ import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
 import type { AgentReply } from "./generated/AgentReply";
+import type { Target } from "./generated/Target";
+import type { TextPlace } from "./generated/TextPlace";
 import type { Candidate } from "./generated/Candidate";
 import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
@@ -238,6 +240,14 @@ export class TauriBackend implements Backend {
 
   replyToAgent(id: number, reply: AgentReply): Promise<void> {
     return invoke("agent_reply", { id, reply });
+  }
+
+  leaveDocument(): Promise<void> {
+    return invoke("leave_document");
+  }
+
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
+    return invoke("agent_places", { path, targets });
   }
 
   /**

@@ -307,6 +307,10 @@ describe("the page bridge", () => {
     const ready = await p.next("ready");
     expect((ready.blocks as unknown[]).length).toBe(2);
     expect(textOf(ready.blocks).length).toBeLessThanOrEqual(2 * 1024 * 1024);
+    // It says it stopped short, so the text isn't taken for the whole page.
+    expect(ready.truncated).toBe(true);
+    const small = page("<body><p>All of it.</p></body>");
+    expect((await small.next("ready")).truncated).toBeUndefined();
   });
 
   it("hands a clicked link to Lectern as the browser resolves it; in-page anchors stay the page's", async () => {
@@ -570,14 +574,18 @@ describe("the page bridge", () => {
       "Rendered by   script",
       "rendered again",
     ]);
-    expect(found?.priority).toBe(2);
+    // Find's over an agent's, which are over the comments'.
+    expect(found?.priority).toBe(3);
     p.send({
       lx: 1,
       type: "paint",
       layer: "find-current",
       ranges: [{ start: second, end: second + 8 }],
     });
-    expect(p.win.CSS.highlights.get("lx-find-current")?.priority).toBe(3);
+    expect(p.win.CSS.highlights.get("lx-find-current")?.priority).toBe(4);
+    p.send({ lx: 1, type: "paint", layer: "agent", ranges: [{ start: second, end: second + 8 }] });
+    expect(p.win.CSS.highlights.get("lx-agent")?.priority).toBe(2);
+    expect(p.win.CSS.highlights.get("lx-agent")?.ranges[0]?.toString()).toBe("rendered");
     // A range across two blocks covers both.
     const and = text.indexOf("and rendered");
     p.send({ lx: 1, type: "paint", layer: "comment", ranges: [{ start: first, end: and + 3 }] });
@@ -600,6 +608,7 @@ describe("the page bridge", () => {
         "find-current": { background: "#9a5b2e", color: "#f8f5ee" },
         comment: { background: "rgb(46 139 120 / 0.2)" },
         "comment-focus": { background: "red; } body { display: none" },
+        agent: { background: "rgb(124 92 214 / 0.2)" },
       },
     });
     const styles = [...p.doc.querySelectorAll("style")].map((s) => s.textContent).join("\n");
@@ -610,6 +619,7 @@ describe("the page bridge", () => {
     expect(styles).toContain(
       "::highlight(lx-comment) { background-color: rgb(46 139 120 / 0.2); }",
     );
+    expect(styles).toContain("::highlight(lx-agent) { background-color: rgb(124 92 214 / 0.2); }");
     // Nothing that isn't a colour gets in.
     expect(styles).not.toContain("display: none");
   });

@@ -311,6 +311,20 @@ export function blockLines(el: Element): [number, number] | null {
   return [start, Math.max(start, end)];
 }
 
+/**
+ * The innermost blocks of `doc` whose source lines meet `start` to `end`, in order: a list item
+ * rather than its list, never a link or other inline element that carries lines of its own.
+ */
+export function blocksOnLines(doc: Element, start: number, end: number): HTMLElement[] {
+  const blocks = [...doc.querySelectorAll<HTMLElement>("[data-sourcepos]")].filter((el) => {
+    const lines = BLOCKS.has(el.tagName) ? blockLines(el) : null;
+    return lines !== null && lines[0] <= end && lines[1] >= start;
+  });
+  return blocks.filter(
+    (block) => !blocks.some((other) => other !== block && block.contains(other)),
+  );
+}
+
 /** The block a text node's text counts in (see the module comment), or null when it doesn't. */
 export function leafBlockOf(node: Node, doc: Element): HTMLElement | null {
   const block = nearestBlock(node, doc);

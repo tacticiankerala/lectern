@@ -184,7 +184,7 @@ expression: tools
     "annotations": {
       "idempotentHint": true
     },
-    "description": "Highlights passages, by heading, line, quote or PDF page, in a file a Lectern window shows, after removing your earlier highlights when `clear` is set. Highlights are temporary: they are never saved and go when the user leaves the file.",
+    "description": "Highlights passages, by heading, line or quote, in a note, text file or HTML page a Lectern window shows, after removing your earlier highlights when `clear` is set. Highlights are temporary: they are never saved and go when the user leaves the file.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -255,20 +255,6 @@ expression: tools
                   "quote"
                 ],
                 "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "page": {
-                    "description": "A PDF's page, from 1.",
-                    "minimum": 1,
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "page"
-                ],
-                "type": "object"
               }
             ],
             "description": "A passage."
@@ -289,7 +275,7 @@ expression: tools
     "annotations": {
       "readOnlyHint": true
     },
-    "description": "Reads the text of a file a Lectern window shows, as rendered (an HTML page's after its scripts ran), in blocks with their lines and headings. A long text comes in parts: when the answer is `truncated`, call again with `from` where it stopped.",
+    "description": "Reads the text of a file a Lectern window shows, as rendered (an HTML page's after its scripts ran), with where each block starts in it, its line, and its headings as a place in the answer's `headings`. A long text comes in parts: when the answer is `truncated`, call again with `from` set to its `next`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -299,8 +285,8 @@ expression: tools
           "type": "integer"
         },
         "max": {
-          "description": "The most characters to return, up to 40,000; 20,000 by default.",
-          "maximum": 40000,
+          "description": "The most characters to return, up to 16,000; 8,000 by default. A page of many small blocks holds fewer, to keep the answer under 48 KB.",
+          "maximum": 16000,
           "minimum": 1,
           "type": "integer"
         },
