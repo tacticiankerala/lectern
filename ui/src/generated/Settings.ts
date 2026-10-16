@@ -50,7 +50,7 @@ htmlPages: HtmlPages,
  */
 recentInMenu: number, 
 /**
- * The WSL distribution a copied Linux path goes into (`\\wsl.localhost\<name>\…`), and a
- * link to one opens in; `None` for Windows' default.
+ * The WSL distribution a link to a Linux path opens in (`\\wsl.localhost\<name>\…`); `None`
+ * for Windows' default.
  */
 wslDistro: string | null, };

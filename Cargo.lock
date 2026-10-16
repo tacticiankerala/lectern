@@ -2207,12 +2207,13 @@ dependencies = [
 
 [[package]]
 name = "lectern"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dirs",
  "lectern-core",
  "log",
  "percent-encoding",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",
@@ -2226,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "lectern-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ammonia",
  "comrak",

@@ -1186,8 +1186,8 @@ mod tests {
         );
     }
 
-    /// Choosing a WSL distribution rebuilds the mapper at once, as a new mapping does: copies and
-    /// the open document's links go into it, and back into Windows' default when it's cleared.
+    /// Choosing a WSL distribution rebuilds the mapper at once, as a new mapping does: the open
+    /// document's links go into it, and back into Windows' default when it's cleared.
     #[test]
     fn choosing_a_wsl_distro_remaps_at_once() {
         let dir = TempDir::new();
@@ -1204,11 +1204,9 @@ mod tests {
             OpenResult::Ok { doc } => doc.html,
             OpenResult::Err { error } => panic!("{}", error.message),
         };
-        let copied = |f: &Fixture| f.state.path_forms("/home/me/x.md", false).windows;
         let ubuntu = r"\\wsl.localhost\Ubuntu\home\me\x.md";
         let debian = r"\\wsl.localhost\Debian\home\me\x.md";
         assert!(html(&f).contains(&format!(r#"data-target="{ubuntu}""#)));
-        assert_eq!(copied(&f).as_deref(), Some(ubuntu));
         let choose = |f: &Fixture, name: &str| {
             f.state.set_settings(SettingsPatch {
                 wsl_distro: Some(name.to_owned()),
@@ -1221,7 +1219,6 @@ mod tests {
             Some("Debian")
         );
         assert_eq!(f.host.doc_changes(), before + 1);
-        assert_eq!(copied(&f).as_deref(), Some(debian));
         let mapped = html(&f);
         assert!(
             mapped.contains(&format!(r#"data-target="{debian}""#)),
@@ -1229,7 +1226,11 @@ mod tests {
         );
         // Windows' default again.
         assert_eq!(choose(&f, "").settings.wsl_distro, None);
-        assert_eq!(copied(&f).as_deref(), Some(ubuntu));
+        let mapped = html(&f);
+        assert!(
+            mapped.contains(&format!(r#"data-target="{ubuntu}""#)),
+            "{mapped}"
+        );
     }
 
     #[test]

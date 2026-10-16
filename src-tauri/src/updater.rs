@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use lectern_core::ipc::UpdateInfo;
 use lectern_core::library::path_key;
+use reqwest::ClientBuilder;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Error, Update, UpdaterExt};
 
@@ -32,7 +33,12 @@ const RELEASES_URL: &str = "https://github.com/tacticiankerala/lectern/releases/
 /// The per-user uninstall records; the installer names Lectern's after the product name.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 /// How long a check waits for GitHub.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long connecting to GitHub may take, shared among the addresses its name resolves to: one
+/// that never answers, as one of its CDN addresses doesn't on some networks, costs its share and
+/// the next is tried, instead of the 21 s Windows itself would wait. The download connects the
+/// same way.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long downloading the installer may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// A second `install_update` while one is downloading or starting the installer.
@@ -152,12 +158,14 @@ pub async fn install(app: &AppHandle, updates: &Updates) -> Result<(), String> {
     launched
 }
 
-/// The newest release, if it is newer than this one.
+/// The newest release, if it is newer than this one. The update it finds downloads with the same
+/// client settings, `CONNECT_TIMEOUT` included.
 async fn find(app: &AppHandle) -> Result<Option<Update>, String> {
     let saver = app.clone();
     let updater = app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
+        .configure_client(configure)
         .on_before_exit(move || save_before_exit(&saver))
         .build()
         .map_err(|e| describe(&e))?;
@@ -165,6 +173,11 @@ async fn find(app: &AppHandle) -> Result<Option<Update>, String> {
         log::warn!("couldn't check for updates: {e}");
         describe(&e)
     })
+}
+
+/// The updater's HTTP client, for the check and the download: `CONNECT_TIMEOUT` to connect.
+fn configure(client: ClientBuilder) -> ClientBuilder {
+    client.connect_timeout(CONNECT_TIMEOUT)
 }
 
 /// Runs just before the updater starts the installer, after which it exits Lectern without Tauri's
@@ -202,7 +215,11 @@ fn describe(error: &Error) -> String {
     match error {
         // GitHub answers 404 until a release with update information is published.
         Error::ReleaseNotFound => "GitHub has no update information for Lectern".to_owned(),
-        Error::Reqwest(e) if e.is_timeout() => "GitHub didn't answer in time".to_owned(),
+        Error::Reqwest(e) if e.is_timeout() => {
+            "GitHub didn't answer in time. Try again, or download the latest Lectern from the \
+             Releases page."
+                .to_owned()
+        }
         Error::Reqwest(e) if e.is_connect() => "couldn't reach GitHub".to_owned(),
         other => other.to_string(),
     }
@@ -278,6 +295,63 @@ mod tests {
         let shown = Cell::new(false);
         assert_eq!(launch_installer(|| Ok(()), || shown.set(true)), Ok(()));
         assert!(!shown.get());
+    }
+
+    /// The client the updater builds connects within `CONNECT_TIMEOUT`, as reqwest's builder shows
+    /// it (the built client keeps it to itself).
+    #[test]
+    fn the_updater_client_connects_within_the_connect_timeout() {
+        let client = format!("{:?}", configure(reqwest::Client::builder()));
+        assert!(client.contains("connect_timeout: 8s"), "{client}");
+    }
+
+    /// `find` hands `configure` to the updater, which applies it to the check's client and the
+    /// download's. Only the source shows it: the updater keeps its client to itself.
+    #[test]
+    fn the_update_check_and_download_use_the_configured_client() {
+        let source = include_str!("updater.rs");
+        let start = source
+            .find("async fn find(")
+            .expect("`find` is in updater.rs");
+        let end = start + source[start..].find("\n}\n").expect("`find` ends");
+        assert!(
+            source[start..end].contains(".configure_client(configure)"),
+            "`find` must pass `configure` to the updater"
+        );
+    }
+
+    #[test]
+    fn a_dead_github_address_costs_a_share_of_the_connect_timeout() {
+        // GitHub's download host has four addresses, and each gets a quarter of the connect
+        // timeout: one that never answers costs 2 s before the next is tried, not the 21 s Windows
+        // would wait.
+        assert_eq!(CONNECT_TIMEOUT / 4, Duration::from_secs(2));
+        // A check connects twice, to github.com and then to the host it redirects to; both may
+        // take their whole connect timeout and still leave the check time to answer.
+        assert!(CONNECT_TIMEOUT * 2 < CHECK_TIMEOUT);
+    }
+
+    #[test]
+    fn a_request_that_times_out_says_to_try_again_or_download() {
+        // A server that takes the connection and never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/latest.json", silent.local_addr().unwrap());
+        let error = tauri::async_runtime::block_on(async {
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .unwrap()
+                .get(url)
+                .send()
+                .await
+                .unwrap_err()
+        });
+        assert_eq!(
+            describe(&Error::Reqwest(error)),
+            "GitHub didn't answer in time. Try again, or download the latest Lectern from the \
+             Releases page."
+        );
     }
 
     const LOCAL: &str = r"C:\Users\me\AppData\Local\Lectern";

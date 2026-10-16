@@ -480,9 +480,8 @@ export class App {
     await this.nav.openUserPath(path);
   }
 
-  /** A short message at the bottom of the window, with `detail` (such as a path) below it. */
-  toast(message: string, detail?: string): void {
-    this.toasts.show(message, detail);
+  toast(message: string): void {
+    this.toasts.show(message);
   }
 
   /** Saves the reading position in `path`; a save waiting for scrolling to stop is dropped. */
@@ -866,7 +865,7 @@ export class App {
     renderProperties(this.layout.properties, doc, Date.now(), this.state.updated);
   }
 
-  /** The breadcrumbs, each opening the chooser on its folder; an open chooser follows them. */
+  /** The breadcrumbs, each opening the chooser on its siblings; an open chooser follows them. */
   private renderCrumbs(crumbs: Crumb[]): void {
     renderBreadcrumbs(
       this.layout.breadcrumbs,

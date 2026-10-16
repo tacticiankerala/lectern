@@ -17,4 +17,4 @@ outline:
 <li data-sourcepos="5:1-5:21">Café visits: three</li>
 <li data-sourcepos="6:1-6:23">Naïve estimates: two</li>
 </ul>
-<p data-sourcepos="8:1-8:121">The weekly <a data-sourcepos="8:12-8:45" data-written="../artifacts/report.html" href="#" class="link-doc" data-kind="doc" data-target="[vault]/artifacts/report.html">report</a> has a <a data-sourcepos="8:53-8:83" data-written="../artifacts/brief.pdf" href="#" class="link-doc" data-kind="doc" data-target="[vault]/artifacts/brief.pdf">brief</a> and a <a data-sourcepos="8:91-8:110" data-written="readme.txt" href="#" class="link-doc" data-kind="doc" data-target="[vault]/notes/readme.txt">readme</a> beside it.</p>
+<p data-sourcepos="8:1-8:121">The weekly <a data-sourcepos="8:12-8:45" href="#" class="link-doc" data-kind="doc" data-target="[vault]/artifacts/report.html">report</a> has a <a data-sourcepos="8:53-8:83" href="#" class="link-doc" data-kind="doc" data-target="[vault]/artifacts/brief.pdf">brief</a> and a <a data-sourcepos="8:91-8:110" href="#" class="link-doc" data-kind="doc" data-target="[vault]/notes/readme.txt">readme</a> beside it.</p>

@@ -4,7 +4,6 @@
 // title and its folder: below its library root, `/`-separated as quick open has it (the root's own
 // name at its top), else the whole folder, its middle cut when long. actions.ts builds the menu.
 import { pathKey, within } from "./breadcrumbs";
-import { middleTruncate } from "./copy-path";
 import { samePath } from "./dom";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { RootView } from "./generated/RootView";
@@ -61,4 +60,15 @@ function folderOf(path: string, roots: Pick<RootView, "path" | "name">[]): strin
   const folder = path.slice(0, end);
   // A drive's root keeps its separator: `D:\`, not `D:`.
   return folder.endsWith(":") ? path.slice(0, end + 1) : folder;
+}
+
+/** `text` cut to `max` characters by dropping its middle, which an ellipsis stands for. */
+function middleTruncate(text: string, max: number): string {
+  const chars = Array.from(new Intl.Segmenter().segment(text), (s) => s.segment);
+  if (chars.length <= max) {
+    return text;
+  }
+  const head = Math.floor((max - 1) / 2);
+  const tail = max - 1 - head;
+  return `${chars.slice(0, head).join("")}…${chars.slice(chars.length - tail).join("")}`;
 }

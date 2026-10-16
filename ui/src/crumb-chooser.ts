@@ -1,11 +1,13 @@
 // The breadcrumb chooser: a popover under a crumb that lists one folder of the library's tree,
 // folders first (with their status badge when badges show), then Markdown files, in the tree's
-// order. On the file's own crumb it lists the file's folder with the file marked, for moving to a
-// sibling. A filter takes the keyboard: typing filters, ↑/↓ choose, Enter (or a click) opens a file
-// and closes or goes into a folder and stays open, → goes in, ← from an empty filter or its start
-// (or Backspace in an empty filter) goes up, and Esc or a click outside closes. At most 1,000 rows
-// show; the filter searches them all. It works from the tree in hand, follows it as the library
-// changes, and never touches the library sidebar. Loaded on first use.
+// order. Every crumb lists its parent with itself marked and chosen, for moving to a sibling: the
+// file's crumb its folder, a folder's crumb the folder above, and the root's crumb the workspace's
+// roots (those with a tree), listed like folders under the workspace's name. The roots top every
+// listing. A filter takes the keyboard: typing filters, ↑/↓ choose, Enter (or a click) opens a file
+// and closes or goes into a folder or root and stays open, → goes in, ← from an empty filter or its
+// start (or Backspace in an empty filter) goes up, as far as the roots, and Esc or a click outside
+// closes. At most 1,000 rows show; the filter searches them all. It works from the tree in hand,
+// follows it as the library changes, and never touches the library sidebar. Loaded on first use.
 import { pathKey, within } from "./breadcrumbs";
 import { h, samePath } from "./dom";
 import type { Crumb } from "./generated/Crumb";
@@ -28,25 +30,56 @@ const MAX_ROWS = 1000;
 
 /** What a crumb's chooser lists. */
 export interface CrumbFolder {
-  /** The folders from the root's tree down to the one listed, which comes last. */
+  /**
+   * The workspace's roots (see `rootsList`), then the folders from a root's tree down to the one
+   * listed, which comes last.
+   */
   trail: TreeNode[];
-  /** The document, marked in the list, for the file's own crumb. */
+  /** The crumb's own root, folder or document, marked in the list. */
   current: string | null;
 }
 
 /**
- * What the chooser lists for crumb `index`: its folder (the file's own folder for the file's
- * crumb), or as far down towards it as the library's tree goes; null when no root's tree holds it.
+ * What the chooser lists for crumb `index`, marking the crumb: the folder above it, or as far down
+ * towards it as the library's tree goes, and for the root's crumb the roots of the workspace named
+ * `workspace`; null when no root's tree holds the crumb.
  */
-export function crumbFolder(roots: RootView[], crumbs: Crumb[], index: number): CrumbFolder | null {
+export function crumbFolder(
+  roots: RootView[],
+  crumbs: Crumb[],
+  index: number,
+  workspace: string,
+): CrumbFolder | null {
   const crumb = crumbs[index];
-  const isFile = index === crumbs.length - 1;
-  const folder = isFile ? crumbs[index - 1] : crumb;
-  if (!crumb || !folder) {
+  // A document whose only crumb is itself has no folder.
+  if (!crumb || crumbs.length < 2) {
     return null;
   }
-  const trail = folderTrail(roots, folder.path);
-  return trail && { trail, current: isFile ? crumb.path : null };
+  const parent = crumbs[index - 1];
+  const trail = folderTrail(roots, (parent ?? crumb).path);
+  if (!trail) {
+    return null;
+  }
+  // The root's crumb, with no folder above it, lists the roots alone.
+  return { trail: [rootsList(roots, workspace), ...(parent ? trail : [])], current: crumb.path };
+}
+
+/**
+ * The workspace's roots as a folder named `workspace`: each root with a tree, under the root's
+ * name, in the library's order. It has no path, being no folder on disk.
+ */
+function rootsList(roots: RootView[], workspace: string): TreeNode {
+  const children = roots.flatMap((root) => (root.tree ? [{ ...root.tree, name: root.name }] : []));
+  return {
+    name: workspace,
+    path: "",
+    isDir: true,
+    kind: null,
+    children,
+    readme: null,
+    status: null,
+    comments: null,
+  };
 }
 
 /**
@@ -87,9 +120,9 @@ export class CrumbChooser {
   private readonly where: HTMLElement;
   private readonly input: HTMLInputElement;
   private readonly list: HTMLElement;
-  /** The folders from the root down to the one listed. */
+  /** The roots, then the folders from a root down to the one listed. */
   private trail: TreeNode[] = [];
-  /** The document on screen, marked when its folder is listed. */
+  /** The crumb's own root, folder or document, marked wherever it is listed. */
   private current: string | null = null;
   private rows: TreeNode[] = [];
   private selected = 0;
@@ -159,7 +192,7 @@ export class CrumbChooser {
     return this.anchor !== null;
   }
 
-  /** Shows `target`'s folder under `anchor`, the filter focused. */
+  /** Shows `target`'s folder under `anchor`, its marked row chosen and the filter focused. */
   open(anchor: HTMLElement, target: CrumbFolder): void {
     this.anchor?.setAttribute("aria-expanded", "false");
     this.anchor = anchor;
@@ -195,11 +228,12 @@ export class CrumbChooser {
 
   /**
    * After the crumbs in `crumbs` are drawn again (the library or the document changed): hangs from
-   * its crumb's new button and lists from `roots`' trees as they are now, the same folder and
-   * filter while the folder is there, else the nearest folder above it. It closes when its crumb,
-   * known by its place and path, has gone (another document shows), or no root holds the folder.
+   * its crumb's new button and lists from `roots`' trees as they are now, under the workspace named
+   * `workspace`: the same folder and filter while the folder is there, else the nearest folder
+   * above it, the roots at the top. It closes when its crumb, known by its place and path, has
+   * gone (another document shows).
    */
-  follow(crumbs: HTMLElement, roots: RootView[]): void {
+  follow(crumbs: HTMLElement, roots: RootView[], workspace: string): void {
     const old = this.anchor;
     if (!old) {
       return;
@@ -207,13 +241,14 @@ export class CrumbChooser {
     const anchor = crumbs.querySelector<HTMLElement>(
       `button.crumb[data-index="${old.dataset.index ?? ""}"]`,
     );
-    const trail = folderTrail(roots, this.folder.path);
-    if (!anchor || anchor.title !== old.title || !trail) {
+    if (!anchor || anchor.title !== old.title) {
       this.close();
       return;
     }
     this.anchor = anchor;
     anchor.setAttribute("aria-expanded", "true");
+    const below = this.trail.length > 1 ? (folderTrail(roots, this.folder.path) ?? []) : [];
+    const trail = [rootsList(roots, workspace), ...below];
     const stays = samePath((trail[trail.length - 1] as TreeNode).path, this.folder.path);
     const chosen = this.rows[this.selected]?.path ?? null;
     this.trail = trail;
@@ -252,9 +287,13 @@ export class CrumbChooser {
     this.update(choose);
   }
 
-  /** The header: where the listed folder is, and whether there is a folder above it. */
+  /**
+   * The header: where the listed folder is (from its root; the workspace's name for the roots),
+   * and whether there is a folder above it.
+   */
   private head(): void {
-    this.where.textContent = this.trail.map((node) => node.name).join(" / ");
+    const from = this.trail.length > 1 ? this.trail.slice(1) : this.trail;
+    this.where.textContent = from.map((node) => node.name).join(" / ");
     this.where.title = this.folder.path;
     this.list.setAttribute("aria-label", this.folder.name);
     this.up.disabled = this.trail.length < 2;
@@ -292,7 +331,7 @@ export class CrumbChooser {
   }
 
   private row(node: TreeNode, index: number, badges: boolean): HTMLElement {
-    const current = !node.isDir && this.current !== null && samePath(node.path, this.current);
+    const current = this.current !== null && samePath(node.path, this.current);
     const li = h(
       "li",
       {
@@ -359,7 +398,7 @@ export class CrumbChooser {
     this.host.open(node.path);
   }
 
-  /** Lists the folder above, choosing the one just left; false at the root. */
+  /** Lists the folder above, choosing the one just left; false on the roots. */
   private goUp(): boolean {
     if (this.trail.length < 2) {
       return false;

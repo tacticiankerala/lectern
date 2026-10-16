@@ -3,10 +3,9 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lectern_core::ipc::{ConvertedPaths, PathForm, PathForms};
+use lectern_core::ipc::PathForms;
 use lectern_core::library::pathmap::{
-    page_path, page_token, page_url, path_tokens, split_line_suffix, LineRef, Mapped, PathMapper,
-    PAGE_ORIGIN,
+    page_path, page_token, page_url, split_line_suffix, LineRef, Mapped, PathMapper, PAGE_ORIGIN,
 };
 
 fn mapper(mappings: &[(&str, &str)]) -> PathMapper {
@@ -355,23 +354,26 @@ fn path_forms(windows: Option<&str>, wsl: Option<&str>) -> PathForms {
 }
 
 #[test]
-fn forms_of_a_drive_path_and_its_mount() {
+fn literal_forms_of_a_drive_path_and_its_mount() {
     let plan = path_forms(
         Some(r"S:\Notes\My Vault\plan.md"),
         Some("/mnt/s/Notes/My Vault/plan.md"),
     );
-    assert_eq!(ubuntu().forms(r"S:\Notes\My Vault\plan.md", None), plan);
-    assert_eq!(ubuntu().forms("/mnt/s/Notes/My Vault/plan.md", None), plan);
+    assert_eq!(ubuntu().literal_forms(r"S:\Notes\My Vault\plan.md"), plan);
+    assert_eq!(
+        ubuntu().literal_forms("/mnt/s/Notes/My Vault/plan.md"),
+        plan
+    );
 }
 
 #[test]
-fn forms_of_a_wsl_share_path() {
+fn literal_forms_of_a_wsl_share_path() {
     for raw in [
         r"\\wsl.localhost\Ubuntu\home\me\a.md",
         r"\\wsl$\Ubuntu\home\me\a.md",
     ] {
         assert_eq!(
-            ubuntu().forms(raw, None),
+            ubuntu().literal_forms(raw),
             path_forms(Some(raw), Some("/home/me/a.md")),
             "{raw}"
         );
@@ -379,9 +381,9 @@ fn forms_of_a_wsl_share_path() {
 }
 
 #[test]
-fn forms_of_a_linux_path_go_through_the_distro() {
+fn literal_forms_of_a_linux_path_go_through_the_distro() {
     assert_eq!(
-        ubuntu().forms("/home/me/a.md", None),
+        ubuntu().literal_forms("/home/me/a.md"),
         path_forms(
             Some(r"\\wsl.localhost\Ubuntu\home\me\a.md"),
             Some("/home/me/a.md")
@@ -389,667 +391,49 @@ fn forms_of_a_linux_path_go_through_the_distro() {
     );
 }
 
-#[test]
-fn forms_follow_a_user_mapping_both_ways() {
-    let m = mapper(&[("/home/me/shared", r"\\nas\share")]);
-    let x = path_forms(Some(r"\\nas\share\x.md"), Some("/home/me/shared/x.md"));
-    assert_eq!(m.forms("/home/me/shared/x.md", None), x);
-    assert_eq!(m.forms(r"\\nas\share\x.md", None), x);
-}
-
-#[test]
-fn forms_of_an_unmapped_share_have_no_wsl_form() {
-    assert_eq!(
-        ubuntu().forms(r"\\nas\share\x.md", None),
-        path_forms(Some(r"\\nas\share\x.md"), None)
-    );
-}
-
-/// A selection keeps everything but its path's format: the quotes, backticks, `:line` or
-/// `#anchor` around the path, and the whitespace, stay as they are, and only the path between them
-/// is mapped (by itself, so the index and the mappings see the path alone).
-#[test]
-fn forms_keep_what_surrounds_the_path() {
-    for (raw, windows, wsl) in [
-        (
-            r"`S:\Notes\plan.md:12`",
-            r"`S:\Notes\plan.md:12`",
-            "`/mnt/s/Notes/plan.md:12`",
-        ),
-        (
-            r"S:\Notes\plan.md:12:5",
-            r"S:\Notes\plan.md:12:5",
-            "/mnt/s/Notes/plan.md:12:5",
-        ),
-        (
-            r"S:\Notes\plan.md#L12",
-            r"S:\Notes\plan.md#L12",
-            "/mnt/s/Notes/plan.md#L12",
-        ),
-        (
-            "/mnt/s/Notes/plan.md#next-steps",
-            r"S:\Notes\plan.md#next-steps",
-            "/mnt/s/Notes/plan.md#next-steps",
-        ),
-        (
-            r#"  "S:\Notes\plan.md"  "#,
-            r#"  "S:\Notes\plan.md"  "#,
-            r#"  "/mnt/s/Notes/plan.md"  "#,
-        ),
-        (
-            "'/mnt/s/Notes/plan.md'\n",
-            "'S:\\Notes\\plan.md'\n",
-            "'/mnt/s/Notes/plan.md'\n",
-        ),
-        (
-            "spec/a_spec.rb:12",
-            r"spec\a_spec.rb:12",
-            "spec/a_spec.rb:12",
-        ),
-        (r#""app/x y.rb""#, r#""app\x y.rb""#, r#""app/x y.rb""#),
-    ] {
-        assert_eq!(
-            ubuntu().forms(raw, None),
-            path_forms(Some(windows), Some(wsl)),
-            "{raw:?}"
-        );
-    }
-    // A `#` inside a folder name is part of the path.
-    assert_eq!(
-        ubuntu().forms(r"C:\src\C#\app.cs", None),
-        path_forms(Some(r"C:\src\C#\app.cs"), Some("/mnt/c/src/C#/app.cs"))
-    );
-}
-
-/// The index looks up the path alone, not its `:line`: a moved note's link written with a line
-/// still finds the file, and keeps the line.
-#[test]
-fn forms_look_up_the_path_without_what_surrounds_it() {
-    let (_tmp, root) = common::vault_copy();
-    let ix = common::index_of(&root);
-    let readme = common::native_join(&root, "work/alpha/README.md")
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        ubuntu()
-            .forms("`/home/me/shared/vault/work/alpha/README.md:3`", Some(&ix))
-            .windows,
-        Some(format!("`{readme}:3`"))
-    );
-}
-
-#[test]
-fn forms_keep_a_hash_in_a_file_name() {
-    // Only a fragment after a file name with an extension is an anchor.
-    let meeting = path_forms(
-        Some(r"S:\Notes\Meeting #3.md"),
-        Some("/mnt/s/Notes/Meeting #3.md"),
-    );
-    assert_eq!(ubuntu().forms(r"S:\Notes\Meeting #3.md", None), meeting);
-    // `#agenda` is an anchor, kept after the path; the `#3` stays part of the name.
-    assert_eq!(
-        ubuntu().forms("/mnt/s/Notes/Meeting #3.md#agenda", None),
-        path_forms(
-            Some(r"S:\Notes\Meeting #3.md#agenda"),
-            Some("/mnt/s/Notes/Meeting #3.md#agenda"),
-        )
-    );
-    assert_eq!(
-        ubuntu().forms("/home/me/Issue #12 fix.md", None),
-        path_forms(
-            Some(r"\\wsl.localhost\Ubuntu\home\me\Issue #12 fix.md"),
-            Some("/home/me/Issue #12 fix.md")
-        )
-    );
-}
-
-#[test]
-fn forms_of_a_relative_path_flip_its_separators() {
-    assert_eq!(
-        ubuntu().forms("app/services/x/writing_type.rb", None),
-        path_forms(
-            Some(r"app\services\x\writing_type.rb"),
-            Some("app/services/x/writing_type.rb")
-        )
-    );
-    assert_eq!(
-        ubuntu().forms(r"`spec\a\b_spec.rb:12`", None),
-        path_forms(
-            Some(r"`spec\a\b_spec.rb:12`"),
-            Some("`spec/a/b_spec.rb:12`")
-        )
-    );
-    assert_eq!(
-        ubuntu().forms("../artifacts/report.html#summary", None),
-        path_forms(
-            Some(r"..\artifacts\report.html#summary"),
-            Some("../artifacts/report.html#summary")
-        )
-    );
-    assert_eq!(
-        ubuntu().forms(r"docs/My Notes\plan.md", None),
-        path_forms(
-            Some(r"docs\My Notes\plan.md"),
-            Some("docs/My Notes/plan.md")
-        )
-    );
-}
-
-#[test]
-fn forms_of_a_relative_path_are_never_resolved() {
-    let (_tmp, root) = common::vault_copy();
-    let ix = common::index_of(&root);
-    // The index holds this file, but the path stays relative to wherever it was written.
-    assert_eq!(
-        ubuntu().forms("work/alpha/README.md", Some(&ix)),
-        path_forms(Some(r"work\alpha\README.md"), Some("work/alpha/README.md"))
-    );
-}
-
-#[test]
-fn forms_of_a_bare_name_or_a_url_are_none() {
-    for raw in [
-        "notes.md",
-        "`plan.md:12`",
-        "",
-        "https://example.com/a/b",
-        "mailto:me@example.com",
-        "host:/srv/notes/plan.md",
-        r"C:notes\plan.md",
-    ] {
-        assert_eq!(ubuntu().forms(raw, None), path_forms(None, None), "{raw:?}");
-    }
-}
-
-/// Only a real Linux path, one under a standard top-level folder, is copied as a path in the WSL
-/// distribution. Anything else starting with `/`, such as a URL route, only flips its separators,
-/// with or without WSL.
-#[test]
-fn forms_of_a_url_route_only_flip_its_separators() {
-    let route = path_forms(
-        Some(r"\r\reports\admin\writing_benchmark"),
-        Some("/r/reports/admin/writing_benchmark"),
-    );
-    for m in [ubuntu(), PathMapper::default()] {
-        assert_eq!(m.forms("/r/reports/admin/writing_benchmark", None), route);
-        assert_eq!(
-            m.written_forms("/r/reports/admin/writing_benchmark", None),
-            route
-        );
-    }
-    // What surrounds it stays, as for any path.
-    assert_eq!(
-        ubuntu().forms("`/api/v1/users#list`", None),
-        path_forms(Some(r"`\api\v1\users#list`"), Some("`/api/v1/users#list`"))
-    );
-    // The folder must be one of them exactly, letter case and all.
-    for raw in ["/homework/a.md", "/Home/me/a.md", "/users/me/a.md", "/"] {
-        assert_eq!(
-            ubuntu().forms(raw, None),
-            path_forms(Some(&raw.replace('/', "\\")), Some(raw)),
-            "{raw}"
-        );
-    }
-}
-
-#[test]
-fn forms_of_a_path_under_a_linux_top_folder_go_through_the_distro() {
-    for folder in [
-        "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt",
-        "opt", "proc", "root", "run", "sbin", "snap", "srv", "sys", "tmp", "usr", "var",
-    ] {
-        let raw = format!("/{folder}/x.rb");
-        assert_eq!(
-            ubuntu().forms(&raw, None),
-            path_forms(
-                Some(&format!(r"\\wsl.localhost\Ubuntu\{folder}\x.rb")),
-                Some(&raw)
-            ),
-            "{raw}"
-        );
-    }
-    assert_eq!(
-        ubuntu()
-            .written_forms("/home/me/x.rb", None)
-            .windows
-            .as_deref(),
-        Some(r"\\wsl.localhost\Ubuntu\home\me\x.rb")
-    );
-    // `/mnt/<x>/` is on drive X:, and any other folder under `/mnt` is in the distribution.
-    assert_eq!(
-        ubuntu().forms("/mnt/c/x", None),
-        path_forms(Some(r"C:\x"), Some("/mnt/c/x"))
-    );
-    assert_eq!(
-        ubuntu().forms("/mnt/data/x", None).windows.as_deref(),
-        Some(r"\\wsl.localhost\Ubuntu\mnt\data\x")
-    );
-    // Without WSL, a real Linux path still has no Windows form.
-    assert_eq!(
-        PathMapper::default().forms("/home/me/x.rb", None),
-        path_forms(None, None)
-    );
-}
-
-/// A user mapping applies whatever folder the path starts at.
-#[test]
-fn forms_of_a_mapped_path_follow_the_mapping_from_any_folder() {
-    let m = PathMapper {
-        wsl_distro: Some("Ubuntu".into()),
-        ..mapper(&[("/r/shared", r"S:\Shared")])
-    };
-    let x = path_forms(Some(r"S:\Shared\x.md"), Some("/r/shared/x.md"));
-    assert_eq!(m.forms("/r/shared/x.md", None), x);
-    assert_eq!(m.written_forms("/r/shared/x.md", None), x);
-    assert_eq!(
-        m.convert_paths("cat /r/shared/x.md", PathForm::Windows),
-        converted(r"cat S:\Shared\x.md", 1, 0)
-    );
-}
-
-/// A path at the root of no drive (`\api\v1\users`) flips its separators for WSL, as a route does
-/// the other way.
-#[test]
-fn forms_of_a_path_from_the_root_flip_its_separators() {
-    let users = path_forms(Some(r"\api\v1\users"), Some("/api/v1/users"));
-    assert_eq!(ubuntu().forms(r"\api\v1\users", None), users);
-    assert_eq!(ubuntu().written_forms(r"\api\v1\users", None), users);
-    assert_eq!(
-        ubuntu().convert_paths(r"GET \api\v1\users", PathForm::Wsl),
-        converted("GET /api/v1/users", 1, 0)
-    );
-}
-
-/// Each path in a command converts by its own kind: a relative one and a route flip, a real Linux
-/// path goes through the distribution.
-#[test]
-fn convert_paths_tells_routes_from_real_linux_paths() {
-    let command = "curl localhost/r/a && cat /home/me/x";
-    assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Windows),
-        converted(
-            r"curl localhost\r\a && cat \\wsl.localhost\Ubuntu\home\me\x",
-            2,
-            0
-        )
-    );
-    assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Wsl),
-        converted(command, 2, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths("curl /r/a && cat /home/me/x", PathForm::Windows),
-        converted(r"curl \r\a && cat \\wsl.localhost\Ubuntu\home\me\x", 2, 0)
-    );
-}
-
-/// The index still finds the file a path from another machine names, as the link opens it; only
-/// the distribution fallback needs a real Linux path.
-#[test]
-fn forms_of_a_path_from_any_folder_still_find_an_indexed_file() {
-    let (_tmp, root) = common::vault_copy();
-    let ix = common::index_of(&root);
-    let moved = common::native_join(&root, "archive/beta/README.md")
-        .to_string_lossy()
-        .into_owned();
-    let written = "/x/vault/work/beta/README.md";
-    assert_eq!(
-        ubuntu().forms(written, Some(&ix)).windows,
-        Some(moved.clone())
-    );
-    assert_eq!(
-        ubuntu().written_forms(written, Some(&ix)).windows,
-        Some(moved)
-    );
-    // Nothing indexed matches it: it only flips.
-    assert_eq!(
-        ubuntu()
-            .forms("/x/vault/work/nowhere.md", Some(&ix))
-            .windows
-            .as_deref(),
-        Some(r"\x\vault\work\nowhere.md")
-    );
-}
-
-/// Following a link is unchanged: `map` still finds any Linux path in the distribution.
-#[test]
-fn map_still_takes_any_linux_path_into_the_distro() {
-    assert_eq!(
-        ubuntu().map("/r/reports/admin/writing_benchmark", None),
-        unverified(r"\\wsl.localhost\Ubuntu\r\reports\admin\writing_benchmark")
-    );
-}
-
 /// The distribution is whichever the mapper is given; a path that names its own keeps it.
 #[test]
-fn forms_go_through_the_chosen_distro() {
+fn literal_forms_go_through_the_chosen_distro() {
     let debian = PathMapper {
         wsl_distro: Some("Debian".into()),
         ..PathMapper::default()
     };
     assert_eq!(
-        debian.forms("/home/me/x.rb", None),
+        debian.literal_forms("/home/me/x.rb"),
         path_forms(
             Some(r"\\wsl.localhost\Debian\home\me\x.rb"),
             Some("/home/me/x.rb")
         )
     );
-    assert_eq!(
-        debian.convert_paths("cat /home/me/x.rb", PathForm::Windows),
-        converted(r"cat \\wsl.localhost\Debian\home\me\x.rb", 1, 0)
-    );
     let ubuntus = r"\\wsl.localhost\Ubuntu\home\me\x.rb";
     assert_eq!(
-        debian.forms(ubuntus, None),
+        debian.literal_forms(ubuntus),
         path_forms(Some(ubuntus), Some("/home/me/x.rb"))
     );
 }
 
-/// A link's path as written (`data-written`): the renderer has already decoded it and dropped its
-/// fragment and line, so nothing more is trimmed, and a `#` or a quote is part of a name.
 #[test]
-fn written_forms_take_a_links_path_as_it_is() {
-    for (written, windows, wsl) in [
-        (
-            "../notes/v1.0#archive.md",
-            r"..\notes\v1.0#archive.md",
-            "../notes/v1.0#archive.md",
-        ),
-        ("docs/owners'", r"docs\owners'", "docs/owners'"),
-        // A bare file name has no separators to change.
-        ("plan.md", "plan.md", "plan.md"),
-        (
-            "/home/me/notes/v1.0#archive.md",
-            r"\\wsl.localhost\Ubuntu\home\me\notes\v1.0#archive.md",
-            "/home/me/notes/v1.0#archive.md",
-        ),
-        (
-            r"S:\Notes\v1.0#archive.md",
-            r"S:\Notes\v1.0#archive.md",
-            "/mnt/s/Notes/v1.0#archive.md",
-        ),
-    ] {
-        assert_eq!(
-            ubuntu().written_forms(written, None),
-            path_forms(Some(windows), Some(wsl)),
-            "{written}"
-        );
-    }
-    for written in ["", r"C:notes\plan.md"] {
-        assert_eq!(
-            ubuntu().written_forms(written, None),
-            path_forms(None, None),
-            "{written:?}"
-        );
-    }
-}
-
-/// An absolute path a link was written with maps with the index, as the link itself does, so the
-/// copy is the file the link opens rather than where the path once pointed.
-#[test]
-fn written_forms_map_an_absolute_path_with_the_index_as_the_link_does() {
-    let (_tmp, root) = common::vault_copy();
-    let ix = common::index_of(&root);
-    let written = "/home/dev/shared/vault/work/alpha/README.md";
-    let readme = common::native_join(&root, "work/alpha/README.md")
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        ubuntu().written_forms(written, Some(&ix)).windows,
-        Some(readme)
-    );
-    assert_eq!(
-        ubuntu().literal_forms(written).windows.as_deref(),
-        Some(r"\\wsl.localhost\Ubuntu\home\dev\shared\vault\work\alpha\README.md")
-    );
-}
-
-fn tokens(text: &str) -> Vec<&str> {
-    path_tokens(text).into_iter().map(|r| &text[r]).collect()
+fn literal_forms_follow_a_user_mapping_both_ways() {
+    let m = mapper(&[("/home/me/shared", r"\\nas\share")]);
+    let x = path_forms(Some(r"\\nas\share\x.md"), Some("/home/me/shared/x.md"));
+    assert_eq!(m.literal_forms("/home/me/shared/x.md"), x);
+    assert_eq!(m.literal_forms(r"\\nas\share\x.md"), x);
 }
 
 #[test]
-fn path_tokens_are_words_or_quoted_runs_holding_a_separator() {
+fn literal_forms_of_an_unmapped_share_have_no_wsl_form() {
     assert_eq!(
-        tokens("bundle exec rubocop app/services/x spec/services/x"),
-        ["app/services/x", "spec/services/x"]
+        ubuntu().literal_forms(r"\\nas\share\x.md"),
+        path_forms(Some(r"\\nas\share\x.md"), None)
     );
-    assert_eq!(
-        tokens(r#"cat "/mnt/s/My Vault/a.md" 'b c\d' "no path" it's"#),
-        ["/mnt/s/My Vault/a.md", r"b c\d"]
-    );
-    assert_eq!(tokens("x\t`a/b:12`,\n  c\\d"), ["`a/b:12`,", r"c\d"]);
-    // A quote closes on its own line, or it's an ordinary character.
-    assert_eq!(tokens("\"a/b\nc/d\""), ["\"a/b", "c/d\""]);
-    // What follows a closing quote is read afresh; any Unicode space separates words.
-    assert_eq!(
-        tokens("\"é/a\"b/c\u{a0}d/é\u{3000}'x/y"),
-        ["é/a", "b/c", "d/é", "'x/y"]
-    );
-    assert!(tokens("plain words, notes.md and v1.2").is_empty());
 }
 
+/// Any Linux path goes into the distribution, not only one under a standard top-level folder.
 #[test]
-fn path_tokens_take_only_a_flags_value() {
+fn map_takes_any_linux_path_into_the_distro() {
     assert_eq!(
-        tokens(r#"--config=app/x.yml -f=a\b --out="/mnt/s/My Vault/x" --flag"#),
-        ["app/x.yml", r"a\b", "/mnt/s/My Vault/x"]
-    );
-    // Without `=`, the whole word is the candidate.
-    assert_eq!(tokens("-Iinclude/x"), ["-Iinclude/x"]);
-}
-
-#[test]
-fn path_tokens_skip_urls() {
-    assert!(tokens("curl https://example.com/a/b file:///C:/x mailto:me@example.com/x").is_empty());
-    assert_eq!(tokens("see (https://example.com/a) and a/b"), ["a/b"]);
-}
-
-/// A word may open with unquoted shell operators: a redirection (`>`, `>>`, `<`, `2>`, `&>`), a
-/// pipe, `&`, `;` or `(`. They're a boundary, as a flag's `=` is: only what follows is the path.
-#[test]
-fn path_tokens_skip_the_shell_operators_opening_a_word() {
-    assert_eq!(
-        tokens("echo hello >/mnt/c/output.txt"),
-        ["/mnt/c/output.txt"]
-    );
-    assert_eq!(tokens("cat <spec/a.txt"), ["spec/a.txt"]);
-    assert_eq!(tokens("cmd 2>/mnt/c/err.log"), ["/mnt/c/err.log"]);
-    // Only at the start of a word: inside one, an operator is part of it.
-    assert_eq!(tokens("a|b/c |b/c"), ["a|b/c", "b/c"]);
-    assert_eq!(
-        tokens(r#"x &>/tmp/a.log >>logs/b.log |grep y ;(cd app/x && ls) >"/mnt/s/My Vault/x""#),
-        ["/tmp/a.log", "logs/b.log", "app/x", "/mnt/s/My Vault/x"]
-    );
-    // Quoted, they're ordinary characters; alone, or before no path, they're no token.
-    assert_eq!(tokens(r#"">/x""#), [">/x"]);
-    assert!(tokens("2>&1 > | ;ls").is_empty());
-}
-
-/// Each quoted run is scanned to its closing quote, never on to the end of its line, and no word
-/// is read twice: a long line of them takes linear time. Scanning to the line's end made this
-/// 600 KB line take minutes.
-#[test]
-fn path_tokens_read_a_long_line_of_quoted_runs_in_linear_time() {
-    let line = r#""a/b" "#.repeat(100_000);
-    let started = std::time::Instant::now();
-    let found = path_tokens(&line);
-    let elapsed = started.elapsed();
-    assert_eq!(found.len(), 100_000);
-    assert_eq!(&line[found[99_999].clone()], "a/b");
-    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
-    // So does a long word of runs back to back, and of flags with quoted values.
-    for word in [r#""a/b""#.repeat(100_000), r#"-x="a/b""#.repeat(60_000)] {
-        let started = std::time::Instant::now();
-        assert!(!path_tokens(&word).is_empty());
-        let elapsed = started.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
-    }
-}
-
-/// A path with spaces is one path to `forms`, so a user mapping applies to all of it; converted
-/// word by word, its first word alone can't reach the mapping.
-#[test]
-fn forms_map_a_whole_path_with_spaces_that_convert_paths_splits() {
-    let m = PathMapper {
-        wsl_distro: Some("Ubuntu".into()),
-        ..mapper(&[("/home/me/vault", r"S:\Notes\My Vault")])
-    };
-    let plan = r"S:\Notes\My Vault\plan.md";
-    assert_eq!(
-        m.forms(plan, None).wsl.as_deref(),
-        Some("/home/me/vault/plan.md")
-    );
-    assert_eq!(
-        m.convert_paths(plan, PathForm::Wsl).text,
-        "/mnt/s/Notes/My Vault/plan.md"
-    );
-}
-
-fn converted(text: &str, converted: u32, unconverted: u32) -> ConvertedPaths {
-    ConvertedPaths {
-        text: text.to_owned(),
-        converted,
-        unconverted,
-    }
-}
-
-#[test]
-fn convert_paths_flips_the_relative_paths_in_a_command() {
-    let command = "bundle exec rubocop app/services/x spec/services/x";
-    assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Windows),
-        converted(r"bundle exec rubocop app\services\x spec\services\x", 2, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths(command, PathForm::Wsl),
-        converted(command, 2, 0)
-    );
-}
-
-#[test]
-fn convert_paths_maps_absolute_paths_both_ways() {
-    assert_eq!(
-        ubuntu().convert_paths("cat /mnt/s/Notes/plan.md", PathForm::Windows),
-        converted(r"cat S:\Notes\plan.md", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths(r"cat S:\Notes\plan.md", PathForm::Wsl),
-        converted("cat /mnt/s/Notes/plan.md", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths("bash /home/me/run.sh", PathForm::Windows),
-        converted(r"bash \\wsl.localhost\Ubuntu\home\me\run.sh", 1, 0)
-    );
-}
-
-#[test]
-fn convert_paths_keeps_quotes_around_a_quoted_path() {
-    assert_eq!(
-        ubuntu().convert_paths(r#""/mnt/s/My Vault/a.md""#, PathForm::Windows),
-        converted(r#""S:\My Vault\a.md""#, 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths(r"code 'S:\My Vault\a.md' -n", PathForm::Wsl),
-        converted("code '/mnt/s/My Vault/a.md' -n", 1, 0)
-    );
-}
-
-#[test]
-fn convert_paths_converts_a_flags_value_only() {
-    assert_eq!(
-        ubuntu().convert_paths("--config=app/x.yml", PathForm::Windows),
-        converted(r"--config=app\x.yml", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths(
-            r#"run -f=a/b.yml --out="/mnt/s/My Vault/x""#,
-            PathForm::Windows
-        ),
-        converted(r#"run -f=a\b.yml --out="S:\My Vault\x""#, 2, 0)
-    );
-}
-
-#[test]
-fn convert_paths_keeps_the_shell_operators_before_a_path() {
-    assert_eq!(
-        ubuntu().convert_paths("echo hello >/mnt/c/output.txt", PathForm::Windows),
-        converted(r"echo hello >C:\output.txt", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths("cat <spec/a.txt", PathForm::Windows),
-        converted(r"cat <spec\a.txt", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths("cmd 2>/mnt/c/err.log", PathForm::Windows),
-        converted(r"cmd 2>C:\err.log", 1, 0)
-    );
-    assert_eq!(
-        ubuntu().convert_paths("a|b/c", PathForm::Windows),
-        converted(r"a|b\c", 1, 0)
-    );
-    // Quoted, a `>` is part of the path, as before.
-    assert_eq!(
-        ubuntu().convert_paths(r#"">/x""#, PathForm::Windows),
-        converted(r#"">\x""#, 1, 0)
-    );
-}
-
-#[test]
-fn convert_paths_leaves_urls_alone() {
-    let text = "curl https://example.com/a/b";
-    for form in [PathForm::Windows, PathForm::Wsl] {
-        assert_eq!(ubuntu().convert_paths(text, form), converted(text, 0, 0));
-    }
-}
-
-#[test]
-fn convert_paths_keeps_line_breaks_indentation_and_what_surrounds_a_path() {
-    let block =
-        "cd app/services\n    rspec spec/a_spec.rb:12\r\n\tcat `docs/x.md`, /mnt/c/x.md#top\n";
-    assert_eq!(
-        ubuntu().convert_paths(block, PathForm::Windows),
-        converted(
-            "cd app\\services\n    rspec spec\\a_spec.rb:12\r\n\tcat `docs\\x.md`, C:\\x.md#top\n",
-            4,
-            0
-        )
-    );
-}
-
-#[test]
-fn convert_paths_counts_a_path_with_no_form_and_leaves_it_as_written() {
-    assert_eq!(
-        ubuntu().convert_paths(r"\\nas\share\x.md", PathForm::Wsl),
-        converted(r"\\nas\share\x.md", 0, 1)
-    );
-    assert_eq!(
-        ubuntu().convert_paths(r"cp \\nas\share\x.md S:\Notes\x.md", PathForm::Wsl),
-        converted(r"cp \\nas\share\x.md /mnt/s/Notes/x.md", 1, 1)
-    );
-    // A user mapping gives the share one.
-    assert_eq!(
-        mapper(&[("/home/me/shared", r"\\nas\share")])
-            .convert_paths(r"\\nas\share\x.md", PathForm::Wsl),
-        converted("/home/me/shared/x.md", 1, 0)
-    );
-}
-
-#[test]
-fn forms_come_from_the_index_in_memory_never_the_disk() {
-    let (tmp, root) = common::vault_copy();
-    let ix = common::index_of(&root);
-    // The files are gone; the index still knows them, and nothing looks at the disk.
-    drop(tmp);
-    assert!(!root.exists());
-    let forms = ubuntu().forms("/home/me/shared/vault/work/alpha/README.md", Some(&ix));
-    assert_eq!(
-        forms.windows,
-        Some(
-            common::native_join(&root, "work/alpha/README.md")
-                .to_string_lossy()
-                .into_owned()
-        )
+        ubuntu().map("/r/reports/admin/writing_benchmark", None),
+        unverified(r"\\wsl.localhost\Ubuntu\r\reports\admin\writing_benchmark")
     );
 }
 
@@ -1061,14 +445,10 @@ fn literal_forms_never_recover_a_moved_file() {
     fs::write(root.join("project").join("README.md"), "# Project\n").unwrap();
     let ix = common::index_of(&root);
     let archived = r"C:\Notes\.archive\project\README.md";
-    // As text, a path the index doesn't hold finds where the file moved to...
+    // As a link, a path the index doesn't hold finds where the file moved to...
     assert_eq!(
-        ubuntu().forms(archived, Some(&ix)).windows,
-        Some(
-            common::native_join(&root, "project/README.md")
-                .to_string_lossy()
-                .into_owned()
-        )
+        ubuntu().map(archived, Some(&ix)),
+        Mapped::Verified(common::native_join(&root, "project/README.md"))
     );
     // ...but an exact path, such as the open file outside the index, is copied as it is.
     assert_eq!(
@@ -1104,14 +484,6 @@ fn literal_forms_keep_hashes_and_line_numbers_in_names() {
         path_forms(
             Some(r"\\wsl.localhost\Ubuntu\home\me\logs\run:12"),
             Some("/home/me/logs/run:12")
-        )
-    );
-    // As text, the `:12` is a line, kept after the path rather than mapped as part of it.
-    assert_eq!(
-        ubuntu().forms("/home/me/logs/run.md:12", None),
-        path_forms(
-            Some(r"\\wsl.localhost\Ubuntu\home\me\logs\run.md:12"),
-            Some("/home/me/logs/run.md:12")
         )
     );
 }

@@ -173,7 +173,7 @@ export class Preferences {
     });
     this.wslSection = section(
       "WSL distribution",
-      "Linux paths in notes, such as /home/me/notes, open from and copy as paths in this distribution.",
+      "Linux paths in notes, such as /home/me/notes, open from this distribution.",
       select(this.wslDistro),
     );
     this.wslSection.hidden = true;

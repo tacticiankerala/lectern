@@ -115,8 +115,8 @@ pub struct Settings {
     pub html_pages: HtmlPages,
     /// How many recent files the header's recent files menu lists, 5–20 (10 by default).
     pub recent_in_menu: u8,
-    /// The WSL distribution a copied Linux path goes into (`\\wsl.localhost\<name>\…`), and a
-    /// link to one opens in; `None` for Windows' default.
+    /// The WSL distribution a link to a Linux path opens in (`\\wsl.localhost\<name>\…`); `None`
+    /// for Windows' default.
     pub wsl_distro: Option<String>,
 }
 
@@ -437,26 +437,6 @@ pub enum FollowResult {
 pub struct PathForms {
     pub windows: Option<String>,
     pub wsl: Option<String>,
-}
-
-/// One of the two forms a terminal takes a path in: Windows (`C:\…`, `\\server\…`) or WSL (`/…`).
-#[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-#[ts(export)]
-pub enum PathForm {
-    Windows,
-    Wsl,
-}
-
-/// Text with each path in it converted to one form: `converted` of them were, and `unconverted`
-/// had no such form and stay as written.
-#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ConvertedPaths {
-    pub text: String,
-    pub converted: u32,
-    pub unconverted: u32,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]

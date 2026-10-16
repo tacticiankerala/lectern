@@ -58,7 +58,7 @@ export const FRAME_KEYS: readonly {
   { key: "t", shifted: "T", code: "KeyT", lectern: ["Ctrl+Shift"] },
   { key: "u", shifted: "U", code: "KeyU", lectern: [] },
   { key: "v", shifted: "V", code: "KeyV", lectern: [] },
-  { key: "w", shifted: "W", code: "KeyW", lectern: ["Ctrl+Shift"] },
+  { key: "w", shifted: "W", code: "KeyW", lectern: [] },
   { key: "x", shifted: "X", code: "KeyX", lectern: [] },
   { key: "y", shifted: "Y", code: "KeyY", lectern: [] },
   { key: "z", shifted: "Z", code: "KeyZ", lectern: [] },

@@ -6,12 +6,11 @@ use std::path::{Path, PathBuf};
 
 use lectern_core::frame_keys::keys;
 use lectern_core::ipc::{
-    ConvertedPaths, DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure,
-    OpenError, OpenErrorKind, OpenResult, OpenWhere, PageLoads, PathForm, PathForms, RecentEntry,
-    RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome,
-    WorkspaceSummary, WslDistros,
+    DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure, OpenError,
+    OpenErrorKind, OpenResult, OpenWhere, PageLoads, PathForms, RecentEntry, RootState,
+    SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    WslDistros,
 };
-use lectern_core::library::pathmap::{path_tokens, PathMapper, CONVERT_LIMIT};
 use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
 use lectern_core::page::{
     inject_script, page_policy, prepare_page, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS,
@@ -78,8 +77,6 @@ fn ts_bindings_exported() {
         "WorkspaceOutcome",
         "OpenRequest",
         "PathForms",
-        "PathForm",
-        "ConvertedPaths",
         "DocKind",
         "HtmlPages",
         "PageLoads",
@@ -565,110 +562,6 @@ fn wsl_distros_are_the_default_and_the_installed_names() {
         })
         .unwrap(),
         json!({"default": "Ubuntu", "installed": ["Ubuntu", "Debian"]})
-    );
-}
-
-#[test]
-fn converted_paths_are_the_text_and_two_counts_for_a_form() {
-    assert_eq!(decl::<PathForm>(), r#"type PathForm = "windows" | "wsl";"#);
-    let decl = decl::<ConvertedPaths>();
-    assert!(decl.contains("text: string,"), "{decl}");
-    assert!(decl.contains("converted: number,"), "{decl}");
-    assert!(decl.contains("unconverted: number,"), "{decl}");
-    assert_eq!(
-        serde_json::from_value::<PathForm>(json!("wsl")).unwrap(),
-        PathForm::Wsl
-    );
-}
-
-/// What `path_tokens` and `convert_paths` make of a set of texts, for the UI's test that its own
-/// reading of a selection (copy-path.ts) and the fake backend's conversion agree with core's; and
-/// the most text a conversion takes. The mapper is the fake's: the distribution `Ubuntu`, no
-/// mappings and no index.
-#[test]
-fn path_token_vectors_exported() {
-    // JSON, with anything past ASCII spelled out rather than invisible.
-    let quote = |s: &str| {
-        serde_json::to_string(s)
-            .unwrap()
-            .encode_utf16()
-            .map(|unit| match char::from_u32(u32::from(unit)) {
-                Some(c) if c.is_ascii() => c.to_string(),
-                _ => format!("\\u{unit:04x}"),
-            })
-            .collect::<String>()
-    };
-    let texts = [
-        "bundle exec rubocop app/services/x spec/services/x",
-        "cat /mnt/s/Notes/plan.md",
-        r#""/mnt/s/My Vault/a.md""#,
-        "--config=app/x.yml",
-        r#"run -f=a/b.yml --out="/mnt/s/My Vault/x" --flag"#,
-        "curl https://example.com/a/b file:///C:/x mailto:me@example.com/x",
-        "cd app/services\n    rspec spec/a_spec.rb:12\r\n\tcat `docs/x.md`, /mnt/c/x.md#top\n",
-        r"cp \\nas\share\x.md S:\Notes\x.md",
-        r"bash /home/me/run.sh \\wsl.localhost\Ubuntu\home\me\a.md",
-        "\"a/b\nc/d\"",
-        "\"\u{e9}/a\"b/c\u{a0}d/\u{e9}\u{3000}'x/y",
-        r#"it's 'not a/path' or "one" and/or v1.2 notes.md"#,
-        r"-Iinclude/x C:notes\plan.md \root\x host:/srv/x",
-        r#"see (https://example.com/a) and a/b, "S:\Notes\Meeting #3.md#agenda""#,
-        "echo hello >/mnt/c/output.txt 2>/mnt/c/err.log",
-        r#"cat <spec/a.txt |grep x &>/tmp/a.log >>logs/b.log ;(cd app/x && ls) >"/mnt/s/My Vault/x" ">/x" a|b/c 2>&1"#,
-        "curl localhost/r/a && cat /home/me/x",
-        "open /r/reports/admin/writing_benchmark /Home/me /mnt/data/x / //nas/share",
-        r"GET \api\v1\users",
-        "",
-    ];
-    let mapper = PathMapper {
-        wsl_distro: Some("Ubuntu".into()),
-        ..PathMapper::default()
-    };
-    let converted = |c: &ConvertedPaths| {
-        format!(
-            "{{ text: {}, converted: {}, unconverted: {} }}",
-            quote(&c.text),
-            c.converted,
-            c.unconverted
-        )
-    };
-    let rows = texts
-        .iter()
-        .map(|text| {
-            let tokens = path_tokens(text)
-                .into_iter()
-                .map(|r| quote(&text[r]))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "  {{ text: {}, tokens: [{tokens}], windows: {}, wsl: {} }},",
-                quote(text),
-                converted(&mapper.convert_paths(text, PathForm::Windows)),
-                converted(&mapper.convert_paths(text, PathForm::Wsl)),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let ts = format!(
-        "// Generated from `lectern_core::library::pathmap` by `cargo test -p lectern-core`. Do not edit this file manually.\n\n\
-         /** The most text `convert_paths` takes at once, in bytes (`CONVERT_LIMIT`). */\n\
-         export const CONVERT_LIMIT = {CONVERT_LIMIT};\n\n\
-         /**\n * Texts, the path tokens `path_tokens` finds in each, and what `convert_paths` makes of each in\n \
-         * either form with the WSL distribution `Ubuntu`, no mappings and no index, as the fake backend\n \
-         * converts.\n \
-         */\n\
-         export const PATH_TOKEN_VECTORS: readonly {{\n  text: string;\n  tokens: readonly string[];\n  \
-         windows: {{ text: string; converted: number; unconverted: number }};\n  \
-         wsl: {{ text: string; converted: number; unconverted: number }};\n}}[] = [\n{rows}\n];\n"
-    );
-    let path = generated_dir().join("path-tokens.ts");
-    if fs::read_to_string(&path).ok().as_deref() != Some(ts.as_str()) {
-        fs::write(&path, &ts).unwrap();
-    }
-    assert!(ts.contains("export const CONVERT_LIMIT = 65536;"), "{ts}");
-    assert!(
-        ts.contains(r#"{ text: "--config=app/x.yml", tokens: ["app/x.yml"], windows: { text: "--config=app\\x.yml", converted: 1, unconverted: 0 }, wsl: { text: "--config=app/x.yml", converted: 1, unconverted: 0 } },"#),
-        "{ts}"
     );
 }
 
