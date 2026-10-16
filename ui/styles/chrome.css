@@ -1116,7 +1116,7 @@ body.resizing {
   color: var(--fg);
 }
 
-/* The document on screen. */
+/* The crumb's own root, folder or document. */
 .cc-item.current {
   color: var(--accent);
   font-weight: 600;

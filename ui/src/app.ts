@@ -866,7 +866,7 @@ export class App {
     renderProperties(this.layout.properties, doc, Date.now(), this.state.updated);
   }
 
-  /** The breadcrumbs, each opening the chooser on its folder; an open chooser follows them. */
+  /** The breadcrumbs, each opening the chooser on its siblings; an open chooser follows them. */
   private renderCrumbs(crumbs: Crumb[]): void {
     renderBreadcrumbs(
       this.layout.breadcrumbs,

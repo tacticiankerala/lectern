@@ -453,7 +453,7 @@ export class Actions {
     const target =
       anchor.isConnected &&
       doc &&
-      crumbFolder(this.app.state.library.roots, doc.breadcrumbs, index);
+      crumbFolder(this.app.state.library.roots, doc.breadcrumbs, index, this.workspaceName);
     if (!target) {
       return;
     }
@@ -467,7 +467,16 @@ export class Actions {
 
   /** After the crumbs are drawn again: an open chooser follows them (crumb-chooser.ts). */
   refreshChooser(): void {
-    this.chooser?.follow(this.app.layout.breadcrumbs, this.app.state.library.roots);
+    this.chooser?.follow(
+      this.app.layout.breadcrumbs,
+      this.app.state.library.roots,
+      this.workspaceName,
+    );
+  }
+
+  /** The name the chooser gives the workspace's roots. */
+  private get workspaceName(): string {
+    return this.app.workspaces.current?.name ?? "";
   }
 
   /** Ctrl+Shift+.: the chooser on the file's own crumb; false when it has none. */

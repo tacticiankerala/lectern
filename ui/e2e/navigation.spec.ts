@@ -129,35 +129,35 @@ function chooser(page: Page) {
     filter: panel.getByRole("combobox", { name: "Filter" }),
     names: panel.locator(".cc-item .cc-name"),
     chosen: panel.locator('.cc-item[aria-selected="true"] .cc-name'),
+    marked: panel.locator(".cc-item.current .cc-name"),
+    up: panel.getByRole("button", { name: "Up" }),
   };
 }
 
-test("the breadcrumb chooser lists the folder of each kind of crumb", async ({ page }) => {
+test("the breadcrumb chooser lists each kind of crumb among its siblings, marked", async ({
+  page,
+}) => {
   await openFixture(page, BIG_PLAN);
   const crumbs = page.locator("#lx-breadcrumbs .crumb");
   await expect(crumbs).toHaveText(["vault", "work", "alpha", "plans", "2026-01-01-big-plan.md"]);
   const cc = chooser(page);
-  // The root's crumb: the root's children, folders first.
+  // The root's crumb: the workspace's roots under its name, badged like folders. The offline
+  // share has no tree to list.
   await crumbs.nth(0).click();
   await expect(cc.panel).toBeVisible();
   await expect(cc.filter).toBeFocused();
-  await expect(cc.where).toHaveText("vault");
-  await expect(cc.names).toHaveText([
-    "archive",
-    "artifacts",
-    "friends",
-    "memory",
-    "notes",
-    "prompts",
-    "stress",
-    "work",
-    "README.md",
-  ]);
+  await expect(cc.where).toHaveText("Studio");
+  await expect(cc.names).toHaveText(["vault"]);
+  await expect(cc.chosen).toHaveText("vault");
+  await expect(cc.marked).toHaveText("vault");
+  await expect(cc.panel.locator(".cc-item .badge.status-active")).toHaveText("active");
+  await expect(cc.up).toBeDisabled();
   await expect(crumbs.nth(0)).toHaveAttribute("aria-expanded", "true");
-  // A folder's crumb: that folder, its README folders badged.
-  await crumbs.nth(1).click();
+  // A folder's crumb: the folder above it, the folder marked and chosen, badges and all.
+  await crumbs.nth(2).click();
   await expect(cc.where).toHaveText("vault / work");
   await expect(cc.names).toHaveText(["alpha"]);
+  await expect(cc.marked).toHaveText("alpha");
   await expect(cc.panel.locator(".cc-item .badge.status-blocked")).toHaveText("blocked");
   await expect(crumbs.nth(0)).toHaveAttribute("aria-expanded", "false");
   // The file's crumb: its folder, the file marked and chosen.
@@ -165,7 +165,7 @@ test("the breadcrumb chooser lists the folder of each kind of crumb", async ({ p
   await expect(cc.where).toHaveText("vault / work / alpha / plans");
   await expect(cc.names).toHaveText(["2026-01-01-big-plan.md"]);
   await expect(cc.chosen).toHaveText("2026-01-01-big-plan.md");
-  await expect(cc.panel.locator(".cc-item.current")).toHaveCount(1);
+  await expect(cc.marked).toHaveText("2026-01-01-big-plan.md");
   // A second click on the crumb closes it.
   await crumbs.nth(4).click();
   await expect(cc.panel).toBeHidden();
@@ -175,37 +175,64 @@ test("the breadcrumb chooser lists the folder of each kind of crumb", async ({ p
   await expect(cc.chosen).toHaveText("2026-01-01-big-plan.md");
 });
 
+test("the breadcrumb chooser scrolls the marked crumb into view", async ({ page }) => {
+  // A list too short for the root's nine entries.
+  await page.setViewportSize({ width: 1000, height: 250 });
+  await openFixture(page, BIG_PLAN);
+  const cc = chooser(page);
+  await page.locator("#lx-breadcrumbs .crumb").nth(1).click();
+  await expect(cc.where).toHaveText("vault");
+  await expect(cc.names).toHaveCount(9);
+  await expect(cc.chosen).toHaveText("work");
+  await expect(cc.marked).toBeInViewport();
+  await expect(cc.names.first()).not.toBeInViewport();
+});
+
 test("the breadcrumb chooser goes into folders, staying open, and opens a file", async ({
   page,
 }) => {
   await openFixture(page, BIG_PLAN);
   const cc = chooser(page);
-  const up = cc.panel.getByRole("button", { name: "Up" });
-  await page.locator("#lx-breadcrumbs .crumb").first().click();
+  // A middle crumb: its folder among its siblings, highlighted; → goes into it.
+  await page.locator("#lx-breadcrumbs .crumb").nth(3).click();
   await expect(cc.filter).toBeFocused();
-  // Filter, then Enter on a folder: in it, still open.
+  await expect(cc.where).toHaveText("vault / work / alpha");
+  await expect(cc.names).toHaveText(["notes", "plans", "README.md"]);
+  await expect(cc.chosen).toHaveText("plans");
+  await expect(cc.marked).toHaveText("plans");
+  await page.keyboard.press("ArrowRight");
+  await expect(cc.where).toHaveText("vault / work / alpha / plans");
+  await expect(cc.names).toHaveText(["2026-01-01-big-plan.md"]);
+  // ← and Backspace go up, choosing the folder just left, as far as the roots and no further.
+  await page.keyboard.press("ArrowLeft");
+  await expect(cc.where).toHaveText("vault / work / alpha");
+  await expect(cc.chosen).toHaveText("plans");
+  await page.keyboard.press("Backspace");
+  await expect(cc.where).toHaveText("vault / work");
+  await expect(cc.chosen).toHaveText("alpha");
+  await page.keyboard.press("ArrowLeft");
+  await expect(cc.where).toHaveText("vault");
+  await expect(cc.chosen).toHaveText("work");
+  await expect(cc.up).toBeEnabled();
+  await page.keyboard.press("Backspace");
+  await expect(cc.where).toHaveText("Studio");
+  await expect(cc.chosen).toHaveText("vault");
+  await expect(cc.up).toBeDisabled();
+  await page.keyboard.press("ArrowLeft");
+  await expect(cc.where).toHaveText("Studio");
+  // Enter goes into the root; filter, then Enter on a folder: in it, still open.
+  await page.keyboard.press("Enter");
+  await expect(cc.where).toHaveText("vault");
   await page.keyboard.type("WOR");
   await expect(cc.names).toHaveText(["work"]);
   await page.keyboard.press("Enter");
   await expect(cc.panel).toBeVisible();
   await expect(cc.where).toHaveText("vault / work");
   await expect(cc.filter).toHaveValue("");
-  // → goes in; ← and Backspace go up, choosing the folder just left.
-  await page.keyboard.press("ArrowRight");
-  await expect(cc.where).toHaveText("vault / work / alpha");
-  await expect(cc.names).toHaveText(["notes", "plans", "README.md"]);
-  await page.keyboard.press("ArrowLeft");
-  await expect(cc.where).toHaveText("vault / work");
-  await expect(cc.chosen).toHaveText("alpha");
-  await page.keyboard.press("Backspace");
-  await expect(cc.where).toHaveText("vault");
-  await expect(cc.chosen).toHaveText("work");
-  await expect(up).toBeDisabled();
   // The mouse: a folder goes in, Up goes up, and the filter keeps the keyboard.
-  await cc.names.filter({ hasText: "work" }).click();
   await cc.names.filter({ hasText: "alpha" }).click();
   await expect(cc.where).toHaveText("vault / work / alpha");
-  await up.click();
+  await cc.up.click();
   await expect(cc.where).toHaveText("vault / work");
   await expect(cc.filter).toBeFocused();
   await cc.names.filter({ hasText: "alpha" }).click();
@@ -230,9 +257,9 @@ test("Esc or a click outside closes the breadcrumb chooser, and the library is l
   const crumb = page.locator("#lx-breadcrumbs .crumb").nth(3);
   const cc = chooser(page);
   await crumb.click();
-  await expect(cc.names).toHaveText(["2026-01-01-big-plan.md"]);
+  await expect(cc.names).toHaveText(["notes", "plans", "README.md"]);
   await page.keyboard.press("ArrowLeft");
-  await expect(cc.where).toHaveText("vault / work / alpha");
+  await expect(cc.where).toHaveText("vault / work");
   await page.keyboard.press("Escape");
   await expect(cc.panel).toBeHidden();
   await expect(crumb).toBeFocused();

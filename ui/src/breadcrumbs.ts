@@ -1,7 +1,8 @@
 // The header's breadcrumbs (spec §6): root › folders › file, from the document's `breadcrumbs`.
-// Each crumb is a button that opens the chooser (crumb-chooser.ts) on its folder, as the library's
-// tree has it; the file's own crumb opens it on the file's folder. A document outside every library
-// root has no tree, so its crumbs are plain text.
+// Each crumb is a button that opens the chooser (crumb-chooser.ts) on the folder above it, as the
+// library's tree has it, with the crumb marked among its siblings; the root's crumb opens it on the
+// workspace's roots. A document outside every library root has no tree, so its crumbs are plain
+// text.
 import { h } from "./dom";
 import type { Crumb } from "./generated/Crumb";
 import type { RootView } from "./generated/RootView";
