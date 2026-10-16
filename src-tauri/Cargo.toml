@@ -28,6 +28,10 @@ tauri-plugin-updater = { version = "2.13.1", default-features = false, features 
   "system-proxy",
 ] }
 
+[dev-dependencies]
+# The updater's own HTTP client, for a real timeout error in `updater.rs`'s tests: no new crates.
+reqwest = { version = "0.13", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 # WebView2's own API, for the keys pressed inside a frame (`accelerators.rs`): the version Tauri's
 # webview uses, so it adds no crate.

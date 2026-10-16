@@ -27,6 +27,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_workspace_manifest() {
-        assert_eq!(version(), "0.4.2");
+        assert_eq!(version(), "0.4.3");
     }
 }
