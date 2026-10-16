@@ -84,6 +84,10 @@ pub struct ReviewPayload {
     pub unreadable: Vec<UnreadableView>,
     /// The comments whose effective status is still open.
     pub open_count: u32,
+    /// The comment the operation that answered with this changed (or added); none for a load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub changed: Option<u32>,
 }
 
 /// What [`build_payload`] builds from.
@@ -163,6 +167,7 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
         comments,
         unreadable,
         open_count: review.map_or(0, Review::open_count),
+        changed: None,
     }
 }
 

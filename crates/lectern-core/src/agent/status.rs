@@ -12,6 +12,7 @@ use crate::ipc::{AgentFocus, AgentOpens, PathForms};
 use crate::library::pathmap::PathMapper;
 use crate::library::{doc_kind, DocKind};
 use crate::review::text::PageBlock;
+use crate::review::CommentStatus;
 
 /// The most characters of the reader's selection `status` gives.
 pub const SELECTION_MAX: usize = 2000;
@@ -74,6 +75,9 @@ pub enum AgentReply {
     },
     /// `highlight`: how many of the agent's highlights the window shows now.
     Highlighted { count: u32 },
+    /// `comment`, `reply` or `resolve` in an HTML page: the thread the window saved the agent's
+    /// entry to, and its status now.
+    Commented { id: u32, status: CommentStatus },
     /// `read` of an HTML page: its blocks, as its bridge last reported them, and whether it stopped
     /// them short, at its limit on the text it reports.
     PageText {

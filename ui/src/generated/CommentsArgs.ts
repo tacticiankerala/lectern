@@ -2,6 +2,6 @@
 import type { ThreadFilter } from "./ThreadFilter";
 
 /**
- * `comments`: the threads of `path` with `status`.
+ * `comments`: the threads of `path` with `status`, from the thread at `from` in that list.
  */
-export type CommentsArgs = { path: string, status?: ThreadFilter, };
+export type CommentsArgs = { path: string, status?: ThreadFilter, from?: number, };

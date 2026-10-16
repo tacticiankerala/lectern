@@ -116,7 +116,7 @@ pub struct CommentArgs {
     pub kind: Option<EntryKind>,
 }
 
-/// `comments`: the threads of `path` with `status`.
+/// `comments`: the threads of `path` with `status`, from the thread at `from` in that list.
 #[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -125,6 +125,9 @@ pub struct CommentsArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub status: Option<ThreadFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub from: Option<u32>,
 }
 
 /// `reply`: add `text`, of `kind`, to the thread `id` of `path`.

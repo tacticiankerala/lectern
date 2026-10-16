@@ -222,9 +222,10 @@ fn definition(name: &str) -> Option<Value> {
         ),
         "comments" => (
             "List comments",
-            "Lists a file's review comment threads as Lectern's Comments tab shows them: each \
-             thread's id, status, where it is anchored now, its quote and its entries. By \
-             default it leaves out resolved and dismissed threads.",
+            "Lists a file's review comment threads as Lectern's Comments tab shows them, each \
+             with its id, status, where it is anchored now, its quote and its entries, leaving \
+             out resolved and dismissed threads by default. A long list comes in parts: when the \
+             answer has `next`, call again with `from` set to it.",
             json!({
                 "path": path_schema("The file whose threads to list."),
                 "status": {
@@ -232,6 +233,12 @@ fn definition(name: &str) -> Option<Value> {
                     "enum": ["open", "question", "pushback", "resolved", "all"],
                     "description": "Which threads to list; by default every thread that isn't \
                                     resolved or dismissed.",
+                },
+                "from": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The thread to start from, by its place in the list: 0, the \
+                                    default, or the `next` of an answer that stopped short.",
                 },
             }),
             &["path"][..],
@@ -438,6 +445,7 @@ impl Args<'_> {
                     "status",
                     &["open", "question", "pushback", "resolved", "all"],
                 )?,
+                from: self.number("from", 0, u32::MAX)?,
             }),
             "reply" => AgentRequest::Reply(ReplyArgs {
                 path: self.need("path", self.path("path")?)?,

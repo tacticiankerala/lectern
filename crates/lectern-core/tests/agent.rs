@@ -943,8 +943,19 @@ fn the_review_tools_take_their_threads_and_text() {
         Ok(AgentRequest::Comments(CommentsArgs {
             path: PLAN.to_owned(),
             status: Some(ThreadFilter::Resolved),
+            from: None,
         }))
     );
+    // A later part of a long list.
+    assert_eq!(
+        call("comments", json!({"path": PLAN, "from": 12})),
+        Ok(AgentRequest::Comments(CommentsArgs {
+            path: PLAN.to_owned(),
+            status: None,
+            from: Some(12),
+        }))
+    );
+    assert!(invalid("comments", json!({"path": PLAN, "from": -1})).contains("from"));
     assert_eq!(
         call("reply", json!({"path": PLAN, "id": "C2", "text": "Done."})),
         Ok(AgentRequest::Reply(ReplyArgs {

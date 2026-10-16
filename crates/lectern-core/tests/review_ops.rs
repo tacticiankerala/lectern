@@ -2,7 +2,7 @@
 
 use lectern_core::review::{
     fingerprint, format,
-    ops::{self, NewAnchor, OpContext, OpError, ReviewOp, StatusChange},
+    ops::{self, AgentAuthor, NewAnchor, OpContext, OpError, ReviewOp, StatusChange},
     text::TextMap,
     ClaudeKind, CommentStatus, EntryAuthor, Item, Review, MAX_COMMENT_CHARS,
 };
@@ -34,6 +34,7 @@ fn new_anchor(line: u32, quote: &str) -> NewAnchor {
         end_line: line,
         quote: quote.into(),
         prefix: String::new(),
+        text_start: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn add_op(line: u32, quote: &str, text: &str) -> ReviewOp {
     ReviewOp::Add {
         anchor: new_anchor(line, quote),
         text: text.into(),
+        author: None,
     }
 }
 
@@ -48,7 +50,16 @@ fn reply(id: u32, text: &str) -> ReviewOp {
     ReviewOp::Reply {
         id,
         text: text.into(),
+        author: None,
     }
+}
+
+/// The agent `name`, writing entries of `kind`.
+fn agent(name: &str, kind: ClaudeKind) -> Option<AgentAuthor> {
+    Some(AgentAuthor {
+        name: name.into(),
+        kind,
+    })
 }
 
 fn set_status(id: u32, change: StatusChange) -> ReviewOp {
@@ -274,4 +285,148 @@ fn ops_on_a_missing_comment_error() {
         OpError::NotYourEntry.to_string(),
         "Only your own replies can be edited."
     );
+}
+
+/// An agent's comment is written as the agent writes one by hand: its entry `**Claude
+/// (question):**`, never `**You:**`, the header left `open` and the entry not yet counted (`n=0`),
+/// so the status comes from the entry. Your reply afterwards continues the thread as yours.
+#[test]
+fn an_agent_starts_a_comment_under_its_own_name() {
+    let mut r = format::new_review("tide.md");
+    let add = ReviewOp::Add {
+        anchor: new_anchor(5, "batches of at most 50"),
+        text: "Why 50?".into(),
+        author: agent("Claude", ClaudeKind::Question),
+    };
+    assert_eq!(apply(&mut r, add), Ok(1));
+    let c = comment(&r, 1);
+    let first = &c.entries[0];
+    assert_eq!(
+        (first.author, first.name.as_str(), first.kind),
+        (EntryAuthor::Agent, "Claude", Some(ClaudeKind::Question))
+    );
+    assert_eq!(c.status, CommentStatus::Open);
+    assert_eq!(c.anchor.as_ref().unwrap().n, 0);
+    assert_eq!(c.effective_status(), CommentStatus::Question);
+    let saved = format::serialize(&r);
+    assert!(
+        saved.contains("\n## C1 · open · L5 · Tide sync › Batching\n"),
+        "{saved}"
+    );
+    assert!(
+        saved.contains("\n> batches of at most 50\n\n**Claude (question):** Why 50?\n"),
+        "{saved}"
+    );
+    assert!(!saved.contains("**You:**"), "{saved}");
+    let back = format::parse(&saved);
+    let c = comment(&back, 1);
+    assert_eq!(c.entries[0].author, EntryAuthor::Agent);
+    assert_eq!(c.effective_status(), CommentStatus::Question);
+
+    assert_eq!(apply(&mut r, reply(1, "Per station.")), Ok(1));
+    let c = comment(&r, 1);
+    let yours = &c.entries[1];
+    assert_eq!(
+        (yours.author, yours.name.as_str(), yours.kind),
+        (EntryAuthor::You, "You", None)
+    );
+    assert_eq!(c.effective_status(), CommentStatus::Open);
+    let saved = format::serialize(&r);
+    assert!(
+        saved.contains("**Claude (question):** Why 50?\n\n**You:** Per station.\n"),
+        "{saved}"
+    );
+}
+
+/// An agent's reply and resolve are entries of its own, which give the status as the `n=` rule
+/// has it: newer than Lectern's count, they set it. A later entry of yours opens it again, and an
+/// entry the agent appends by hand afterwards counts as before.
+#[test]
+fn an_agents_reply_and_resolve_set_the_status_by_the_n_rule() {
+    let mut r = one_comment();
+    let answer = |text: &str, kind| ReviewOp::Reply {
+        id: 1,
+        text: text.into(),
+        author: agent("Claude", kind),
+    };
+    assert_eq!(
+        apply(&mut r, answer("Per station.", ClaudeKind::Reply)),
+        Ok(1)
+    );
+    let c = comment(&r, 1);
+    let last = c.entries.last().unwrap();
+    assert_eq!(
+        (
+            last.author,
+            last.name.as_str(),
+            last.kind,
+            last.text.as_str()
+        ),
+        (
+            EntryAuthor::Agent,
+            "Claude",
+            Some(ClaudeKind::Reply),
+            "Per station."
+        )
+    );
+    assert_eq!(c.status, CommentStatus::Open, "the header is yours");
+    assert_eq!(c.anchor.as_ref().unwrap().n, 1, "the agent's entry is new");
+    assert_eq!(c.effective_status(), CommentStatus::Replied);
+
+    apply(&mut r, answer("Resolved.", ClaudeKind::Resolved)).unwrap();
+    let c = comment(&r, 1);
+    assert_eq!(
+        c.status,
+        CommentStatus::Replied,
+        "the reply before is settled"
+    );
+    assert_eq!(c.anchor.as_ref().unwrap().n, 2);
+    assert_eq!(c.effective_status(), CommentStatus::Resolved);
+    let saved = format::serialize(&r);
+    assert!(
+        saved.contains("**Claude (reply):** Per station.\n\n**Claude (resolved):** Resolved.\n"),
+        "{saved}"
+    );
+    assert_eq!(
+        comment(&format::parse(&saved), 1).effective_status(),
+        CommentStatus::Resolved
+    );
+
+    apply(&mut r, reply(1, "Not quite.")).unwrap();
+    assert_eq!(comment(&r, 1).effective_status(), CommentStatus::Open);
+    let by_hand = format::serialize(&r) + "\n**Codex (pushback):** Still 50.\n";
+    assert_eq!(
+        comment(&format::parse(&by_hand), 1).effective_status(),
+        CommentStatus::Pushback
+    );
+}
+
+/// An agent's name goes into the sidecar only as one it reads back as an agent's: "You", or a
+/// name the entry line can't hold, is written as "An agent".
+#[test]
+fn an_agent_never_writes_as_you() {
+    for (given, written) in [
+        ("Claude", "Claude"),
+        ("Gemini 2.5", "Gemini 2.5"),
+        ("An agent", "An agent"),
+        ("You", "An agent"),
+        ("yOU", "An agent"),
+        ("42bot", "An agent"),
+        ("", "An agent"),
+    ] {
+        let mut r = format::new_review("tide.md");
+        let add = ReviewOp::Add {
+            anchor: new_anchor(5, "batches of at most 50"),
+            text: "Why 50?".into(),
+            author: agent(given, ClaudeKind::Question),
+        };
+        apply(&mut r, add).unwrap();
+        let back = format::parse(&format::serialize(&r));
+        let first = &comment(&back, 1).entries[0];
+        assert_eq!(
+            (first.author, first.name.as_str()),
+            (EntryAuthor::Agent, written),
+            "{given:?}"
+        );
+    }
 }

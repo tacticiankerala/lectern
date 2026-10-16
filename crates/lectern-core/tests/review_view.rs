@@ -35,12 +35,14 @@ fn add(r: &mut Review, line: u32, quote: &str, text: &str) -> u32 {
         end_line: line,
         quote: quote.into(),
         prefix: String::new(),
+        text_start: None,
     };
     apply(
         r,
         ReviewOp::Add {
             anchor,
             text: text.into(),
+            author: None,
         },
     )
 }
@@ -280,10 +282,12 @@ fn added(src: &str, prefix: &str, quotes: &[&str], line: u32) -> Review {
             end_line: line,
             quote: (*quote).into(),
             prefix: prefix.into(),
+            text_start: None,
         };
         let op = ReviewOp::Add {
             anchor,
             text: "Why?".into(),
+            author: None,
         };
         ops::apply(&mut r, &op, &ctx).unwrap();
     }
@@ -417,6 +421,7 @@ fn entry_html_is_sanitised() {
         ReviewOp::Reply {
             id,
             text: paragraphs.into(),
+            author: None,
         },
     );
     let tm = TextMap::build(NOTE);

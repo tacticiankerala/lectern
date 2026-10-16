@@ -44,6 +44,7 @@ import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
 import { DOCUMENT_PATH } from "../src/dom";
+import type { AgentAuthor } from "../src/generated/AgentAuthor";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
 import type { ClaudeKind } from "../src/generated/ClaudeKind";
@@ -531,6 +532,14 @@ function yours(text: string): EntryView {
   return entry("you", "You", null, text);
 }
 
+/** As core: an agent's entry, under its name when the sidecar reads it back, else "An agent". */
+function agents(author: AgentAuthor, text: string): EntryView {
+  const readable =
+    /^\p{L}(?:[\p{L}\p{Nd} ._-]{0,30}[\p{L}\p{Nd}._-])?$/u.test(author.name) &&
+    author.name.toLowerCase() !== "you";
+  return entry("agent", readable ? author.name : "An agent", author.kind, text);
+}
+
 /** As core: the id for a new comment, one more than any in the sidecar, unreadable ones too. */
 function nextId(review: StoredReview): number {
   const ids = [
@@ -910,18 +919,19 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.reviewPayload(path));
   }
 
-  /** The five operations, on the store, as core applies them. */
+  /** The five operations, on the store, as core applies them: the review, with what changed. */
   reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload> {
     this.reviewCount++;
+    let changed: number;
     try {
       this.takePage(path, page);
-      this.applyOp(path, op);
+      changed = this.applyOp(path, op);
     } catch (e) {
       // Rust's commands fail with a message.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       return Promise.reject(e instanceof Error ? e.message : String(e));
     }
-    return Promise.resolve(this.reviewPayload(path));
+    return Promise.resolve({ ...this.reviewPayload(path), changed });
   }
 
   setReview(path: string, payload: ReviewPayload | null): void {
@@ -1049,7 +1059,11 @@ export class FakeBackend implements Backend, FakeControl {
     c.jumpLine = c.startLine;
   }
 
-  private applyOp(path: string, op: ReviewOp): void {
+  /**
+   * Applies `op` as core does, and gives the comment it changed. An agent's entry (`author`) is
+   * added after the comment's count of seen entries, so its kind gives the status.
+   */
+  private applyOp(path: string, op: ReviewOp): number {
     const failure = this.reviewFailure;
     this.reviewFailure = null;
     if (failure !== null) {
@@ -1068,7 +1082,7 @@ export class FakeBackend implements Backend, FakeControl {
       const added: StoredComment = {
         id: nextId(review),
         status: "open",
-        seen: 1,
+        seen: op.author ? 0 : 1,
         startLine: op.anchor.startLine,
         endLine: op.anchor.endLine,
         headingPath: [],
@@ -1076,7 +1090,7 @@ export class FakeBackend implements Backend, FakeControl {
         prefix: op.anchor.prefix,
         textStart: null,
         textEnd: null,
-        entries: [yours(text)],
+        entries: [op.author ? agents(op.author, text) : yours(text)],
         state: "anchored",
         movedTo: null,
         jumpLine: op.anchor.startLine,
@@ -1086,7 +1100,7 @@ export class FakeBackend implements Backend, FakeControl {
       this.placeOnPage(path, added);
       review.comments.push(added);
       this.reviews.set(key(path), review);
-      return;
+      return added.id;
     }
     const c = review.comments.find((x) => x.id === op.id);
     if (!c) {
@@ -1096,6 +1110,12 @@ export class FakeBackend implements Backend, FakeControl {
     c.status = effectiveStatus(c);
     switch (op.op) {
       case "reply":
+        if (op.author) {
+          const text = cleanText(op.text);
+          c.seen = c.entries.length;
+          c.entries.push(agents(op.author, text));
+          return c.id;
+        }
         c.entries.push(yours(cleanText(op.text)));
         c.status = "open";
         break;
@@ -1127,6 +1147,7 @@ export class FakeBackend implements Backend, FakeControl {
       }
     }
     c.seen = c.entries.length;
+    return c.id;
   }
 
   /** A sidecar with no comments yet, as the first comment on `path` creates. */

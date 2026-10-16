@@ -105,9 +105,11 @@ pub struct AnchorParts {
 
 /// Anchors a new comment, or a reattached one, to the text the UI sent.
 ///
-/// The whole selection is found in the note's text, preferring an occurrence within the given
-/// lines and, among those, the one after the text the UI saw before the selection; it gives the
-/// lines, prefix and suffix. Only its first [`QUOTE_CAP`] characters are stored as the quote. A
+/// A selection sent with where it starts (`text_start`, an agent's) is anchored there, when the
+/// text there is the selection. Otherwise the whole selection is found in the note's text,
+/// preferring an occurrence within the given lines and, among those, the one after the text the
+/// UI saw before the selection; it gives the lines, prefix and suffix. Only its first
+/// [`QUOTE_CAP`] characters are stored as the quote. A
 /// selection that isn't there whole is looked for by that excerpt. If neither is there (the UI
 /// and core disagree, or the note changed under the reader), the given lines are kept with an
 /// empty fingerprint, so they are never trusted. An anchor that came with no lines (line 0: a
@@ -125,11 +127,13 @@ pub fn make_anchor(
     let quote = cap_quote(&selection);
     let excerpt = needle(&quote);
     let (start, end) = (a.start_line, a.end_line.max(a.start_line));
-    let found = occurrence_near(text, &selection, &a.prefix, start, end).or_else(|| {
-        (excerpt != selection)
-            .then(|| occurrence_near(text, &excerpt, &a.prefix, start, end))
-            .flatten()
-    });
+    let found = exact_place(text, a.text_start, &selection)
+        .or_else(|| occurrence_near(text, &selection, (&a.prefix, ""), start, end))
+        .or_else(|| {
+            (excerpt != selection)
+                .then(|| occurrence_near(text, &excerpt, (&a.prefix, ""), start, end))
+                .flatten()
+        });
     let meta = |prefix, suffix, fp: &str| AnchorMeta {
         prefix,
         suffix,
@@ -175,13 +179,32 @@ pub fn make_anchor(
     }
 }
 
+/// The span of `selection` at UTF-16 offset `at` of `text`, when the text there is the selection.
+fn exact_place(text: &TextMap, at: Option<u32>, selection: &str) -> Option<(usize, usize)> {
+    let t = text.text();
+    let wanted = usize::try_from(at?).ok()?;
+    let mut units = 0;
+    let mut byte = None;
+    for (i, c) in t.char_indices().chain(std::iter::once((t.len(), ' '))) {
+        if units >= wanted {
+            byte = (units == wanted).then_some(i);
+            break;
+        }
+        units += c.len_utf16();
+    }
+    let byte = byte?;
+    (!selection.is_empty() && t[byte..].starts_with(selection))
+        .then(|| (byte, byte + selection.len()))
+}
+
 /// The occurrence of `needle` to anchor on: one whose lines lie within `start..=end`, else one
-/// overlapping them, else any; of those, the one whose text before it agrees most with `prefix`
-/// (as [`best_by_context`] scores it), then the one starting nearest `start`, then the earliest.
+/// overlapping them, else any; of those, the one whose text before and after it agrees most with
+/// `prefix` and `suffix` (as [`best_by_context`] scores it), then the one starting nearest
+/// `start`, then the earliest.
 fn occurrence_near(
     text: &TextMap,
     needle: &str,
-    prefix: &str,
+    (prefix, suffix): (&str, &str),
     start: u32,
     end: u32,
 ) -> Option<(usize, usize)> {
@@ -197,7 +220,7 @@ fn occurrence_near(
             } else {
                 2
             };
-            let agreement = common_suffix(&t[..s], prefix);
+            let agreement = common_suffix(&t[..s], prefix) + common_prefix(&t[span.1..], suffix);
             ((fit, Reverse(agreement), first.abs_diff(start)), span)
         })
         .min_by_key(|&(key, _)| key)
@@ -233,12 +256,17 @@ pub(crate) fn occurrences<'h>(
 
 /// Where the quote of a comment found at its stored place (the note unchanged since it was
 /// anchored, so [`resolve_all`] didn't look for it) is in the text: its occurrence in the stored
-/// lines, told apart from others there by the stored prefix, as when it was anchored. `None` when
-/// the quote isn't in the text.
+/// lines, told apart from others there by the stored prefix and suffix (a capped quote's suffix
+/// follows the whole passage, so only its prefix), as when it was anchored. `None` when the quote
+/// isn't in the text.
 pub fn stored_span(c: &Comment, text: &TextMap) -> Option<(usize, usize)> {
-    let prefix = c.anchor.as_ref().map_or("", |a| a.prefix.as_str());
+    let context = match &c.anchor {
+        Some(a) if is_capped(&c.quote) => (a.prefix.as_str(), ""),
+        Some(a) => (a.prefix.as_str(), a.suffix.as_str()),
+        None => ("", ""),
+    };
     let end = c.end_line.max(c.start_line);
-    occurrence_near(text, &needle(&c.quote), prefix, c.start_line, end)
+    occurrence_near(text, &needle(&c.quote), context, c.start_line, end)
 }
 
 /// Finds every comment's quote in the note: one result per comment, in file order.

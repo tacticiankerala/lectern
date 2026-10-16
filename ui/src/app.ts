@@ -30,7 +30,11 @@
 //   switch; asked about first, the bar over the document waits for the reader, and is dismissed
 //   as the window leaves: before its page reloads into another workspace, or before it closes. A
 //   show within the file on screen marks where the reader was on the history first. A window that
-//   started for an agent (`agentTarget` in the startup payload) opens at its target.
+//   started for an agent (`agentTarget` in the startup payload) opens at its target. A comment
+//   thread as the target shows its card in the Comments tab, and its passage, once the comments
+//   have started and loaded and, in an HTML page, the page is ready; not once another navigation
+//   or a newer show has come (comments.ts `PendingReveal`). An agent's comment, reply or resolve in
+//   an HTML page is saved by the window's comments, with the page's text, as the reader's are.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -46,7 +50,7 @@
 import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
-import type { CommentsController } from "./comments";
+import type { CommentsController, PendingReveal } from "./comments";
 import { DocView } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import { trackFrameFocus } from "./frame-view";
@@ -63,6 +67,8 @@ import type { OpenRequest } from "./generated/OpenRequest";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OutlineItem } from "./generated/OutlineItem";
 import type { PageLoads } from "./generated/PageLoads";
+import type { ReviewOp } from "./generated/ReviewOp";
+import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { ShowAt } from "./generated/ShowAt";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { SavedPosition } from "./generated/SavedPosition";
@@ -254,6 +260,13 @@ export class App {
   readonly checkFrameFocus: () => void;
   /** This window's part in answering agents, once the first request has loaded it. */
   private agent: Agent | null = null;
+  /** A thread an agent asked to show before the comments started: handed to them once they have. */
+  private threadToShow: PendingReveal | null = null;
+  /**
+   * Bumped by every agent show request and landing: a thread asked for by an older one is stale
+   * (`PendingReveal`).
+   */
+  private agentLandings = 0;
 
   constructor(
     readonly backend: Backend,
@@ -1078,6 +1091,10 @@ export class App {
       aimPage: (aim) => {
         this.view.aimPage(aim);
       },
+      review: (path, op) => this.reviewForAgent(path, op),
+      forgetThreads: () => {
+        this.agentLanded();
+      },
       answered: (id, answer, message) =>
         this.backend
           .replyToAgent(id, {
@@ -1105,7 +1122,12 @@ export class App {
   private async agentLanding(at: ShowAt, path: string): Promise<OpenOptions> {
     try {
       const agent = await this.agentHere();
-      return agent.startedWith(at, path, this.navigation) ?? {};
+      const landing = agent.startedWith(at, path, this.navigation);
+      if (landing !== null && "comment" in landing) {
+        void this.showThread(path, landing.comment, this.agentLanded(), this.navigation);
+        return {};
+      }
+      return landing ?? {};
     } catch (e) {
       warn(e);
       return {};
@@ -1117,9 +1139,18 @@ export class App {
    * when it is on screen, else why it isn't.
    */
   private async openForAgent(path: string, landing: Landing | null): Promise<string | null> {
-    await this.open(path, { push: true, ...landing });
+    const landed = this.agentLanded();
+    const thread = landing !== null && "comment" in landing ? landing.comment : null;
+    const at: OpenOptions = landing === null || "comment" in landing ? {} : landing;
+    // The navigation this open starts, taken before it awaits (it is assigned synchronously): a
+    // reader's navigation that overtakes it leaves the thread's reveal carrying this stale number,
+    // so it never jumps back here once the reader's file has taken the screen.
+    const opening = this.open(path, { push: true, ...at });
+    const navigation = this.navigation;
+    await opening;
     const { doc, error } = this.state;
     if (doc && samePath(doc.path, path)) {
+      if (thread !== null) void this.showThread(doc.path, thread, landed, navigation);
       return null;
     }
     return error && samePath(error.path, path) ? error.message : "Another file opened first.";
@@ -1161,6 +1192,16 @@ export class App {
    * HTML page on screen, ready, hasn't got.
    */
   private moveForAgent(landing: Landing): boolean {
+    const landed = this.agentLanded();
+    if ("comment" in landing) {
+      const path = this.state.doc?.path;
+      if (path === undefined) {
+        return false;
+      }
+      this.nav.markHere();
+      void this.showThread(path, landing.comment, landed, this.navigation);
+      return true;
+    }
     const page = this.view.page;
     const found = "aim" in landing && page?.ready === true ? landing.aim(page) : undefined;
     if (found === null) {
@@ -1178,6 +1219,52 @@ export class App {
       this.view.aimPage(landing.aim);
     }
     return true;
+  }
+
+  /**
+   * An agent's show comes, or lands: its number, which a thread it asks for carries. A thread an
+   * older one asked for that hasn't shown yet is stale from here on, so it never takes the reader
+   * back there.
+   */
+  private agentLanded(): number {
+    return ++this.agentLandings;
+  }
+
+  /**
+   * Shows comment thread `id` of `path` for an agent, asked for by the show request or landing
+   * `landing` in the navigation `navigation` (its own open's, taken before that open awaited): its
+   * card in the Comments tab, and its passage, once the comments have started (after the first
+   * paint) and everything the thread waits for is there (comments.ts `PendingReveal`).
+   */
+  private async showThread(
+    path: string,
+    id: number,
+    landing: number,
+    navigation: number,
+  ): Promise<void> {
+    const reveal: PendingReveal = { path, id, navigation, landing };
+    if (this.commentsLoading) {
+      await this.commentsLoading;
+    }
+    if (this.comments) {
+      this.comments.showThread(reveal);
+    } else {
+      this.threadToShow = reveal;
+    }
+  }
+
+  /**
+   * Saves an agent's `op` to the comments of `path`, the HTML page on screen, with its text, as
+   * the reader's operations are: the review as saved, or why it wasn't.
+   */
+  private async reviewForAgent(path: string, op: ReviewOp): Promise<ReviewPayload> {
+    if (this.commentsLoading) {
+      await this.commentsLoading;
+    }
+    if (!this.comments || !this.state.settings.reviewComments) {
+      throw new Error("Review comments are turned off in Preferences.");
+    }
+    return this.comments.agentOp(path, op);
   }
 
   /** The text selected in the HTML page on screen changed: the Comment button follows it. */
@@ -1280,6 +1367,8 @@ export class App {
           isPage: () => this.state.doc?.kind === "html",
           page: () => this.view.page,
           onPage: (cb) => this.on("page", cb),
+          navigation: () => this.navigation,
+          agentLanding: () => this.agentLandings,
           visible: () => this.commentsShown(),
           panelOpen: () => this.rightPanelOpen(),
           openPanel: () => {
@@ -1296,6 +1385,9 @@ export class App {
           },
         });
         quietly(this.comments.load());
+        const thread = this.threadToShow;
+        this.threadToShow = null;
+        if (thread) this.comments.showThread(thread);
       }
     } catch (e) {
       console.warn(e);

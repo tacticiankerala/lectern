@@ -28,8 +28,10 @@ fn add_after(src: &str, prefix: &str, quote: &str, start: u32, end: u32) -> Revi
                 end_line: end,
                 quote: quote.into(),
                 prefix: prefix.into(),
+                text_start: None,
             },
             text: "why?".into(),
+            author: None,
         },
         &OpContext {
             text: &tm,
@@ -144,8 +146,10 @@ fn a_whole_document_rewrite_detaches_every_comment_and_loses_none() {
                 end_line: 25,
                 quote: "Retry with jitter".into(),
                 prefix: String::new(),
+                text_start: None,
             },
             text: "formula?".into(),
+            author: None,
         },
         &ctx,
     )
@@ -365,10 +369,12 @@ fn refresh_leaves_moved_detached_and_unchanged_comments_alone() {
             end_line: line,
             quote: quote.into(),
             prefix: String::new(),
+            text_start: None,
         };
         let op = ReviewOp::Add {
             anchor,
             text: "x".into(),
+            author: None,
         };
         ops::apply(&mut r, &op, &ctx).unwrap();
     }
@@ -643,5 +649,51 @@ fn a_long_selection_of_repeated_text_anchors_without_a_quadratic_search() {
     assert!(
         took < std::time::Duration::from_secs(2),
         "anchoring took {took:?}"
+    );
+}
+
+/// A comment sent with where its quote starts (an agent's) is anchored there, of two that agree
+/// with its prefix; where the text there isn't the quote, the quote is looked for as any other.
+#[test]
+fn a_quote_sent_with_where_it_starts_is_anchored_there() {
+    let src = "# Twice\n\nThe same words. The same words, again.\n";
+    let tm = TextMap::build(src);
+    let second = u32::try_from(tm.text().rfind("same words").unwrap()).unwrap();
+    let anchored = |text_start| {
+        let mut r = format::new_review("tide.md");
+        let anchor = NewAnchor {
+            start_line: 3,
+            end_line: 3,
+            quote: "same words".into(),
+            prefix: "The ".into(),
+            text_start,
+        };
+        let op = ReviewOp::Add {
+            anchor,
+            text: "why?".into(),
+            author: None,
+        };
+        let fp = fingerprint(src);
+        let ctx = OpContext {
+            text: &tm,
+            fingerprint: &fp,
+            now: "2026-10-06T10:00:00Z",
+        };
+        ops::apply(&mut r, &op, &ctx).unwrap();
+        let Item::Comment(c) = &r.items[0] else {
+            panic!("no comment");
+        };
+        c.anchor.clone().unwrap().suffix
+    };
+    assert_eq!(anchored(Some(second)), ", again.");
+    assert_eq!(
+        anchored(None),
+        ". The same words, again.",
+        "the first, as before"
+    );
+    assert_eq!(
+        anchored(Some(1)),
+        ". The same words, again.",
+        "not there: looked for"
     );
 }

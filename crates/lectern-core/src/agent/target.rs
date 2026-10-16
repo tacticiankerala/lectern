@@ -99,6 +99,50 @@ pub fn resolve_target(
     file: &str,
     target: &Target,
 ) -> Result<TextPlace, String> {
+    find_target(text, source, file, target).map(|found| found.place(text))
+}
+
+/// Where a target is in a note or a text file: its source lines, and where it is in the text as
+/// shown, in bytes, when that is known.
+pub(crate) struct Found {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub span: Option<(usize, usize)>,
+}
+
+impl Found {
+    /// The passage from byte `start` to byte `end` of `text`, on the lines that hold it.
+    fn at(text: &TextMap, start: usize, end: usize) -> Self {
+        let (start_line, end_line) = text.lines_of(start, end);
+        Self {
+            start_line,
+            end_line,
+            span: Some((start, end)),
+        }
+    }
+
+    /// As the window's UI is sent it: its offsets in UTF-16 code units.
+    fn place(&self, text: &TextMap) -> TextPlace {
+        let units = self
+            .span
+            .map(|(start, end)| utf16_offsets(text.text(), &[start, end]))
+            .unwrap_or_default();
+        TextPlace {
+            start_line: self.start_line,
+            end_line: self.end_line,
+            text_start: units.first().copied(),
+            text_end: units.get(1).copied(),
+        }
+    }
+}
+
+/// Where `target` is, as [`resolve_target`] finds it, in bytes of the text.
+pub(crate) fn find_target(
+    text: &TextMap,
+    source: &str,
+    file: &str,
+    target: &Target,
+) -> Result<Found, String> {
     match target {
         Target::Heading { heading } => find_heading(text, heading)
             .ok_or_else(|| format!("There's no heading “{}” in {file}.", heading.trim())),
@@ -128,18 +172,6 @@ pub fn resolve_target(
     }
 }
 
-/// The place of the text from byte `start` to byte `end` of `text`.
-fn text_place(text: &TextMap, start: usize, end: usize) -> TextPlace {
-    let (start_line, end_line) = text.lines_of(start, end);
-    let units = utf16_offsets(text.text(), &[start, end]);
-    TextPlace {
-        start_line,
-        end_line,
-        text_start: units.first().copied(),
-        text_end: units.get(1).copied(),
-    }
-}
-
 /// A heading's text as a target is matched against it: without Markdown's marks for emphasis and
 /// code or a leading `#`, its whitespace normalised, in lower case.
 fn heading_key(heading: &str) -> String {
@@ -153,7 +185,7 @@ fn heading_key(heading: &str) -> String {
 }
 
 /// The heading `wanted` names (see [`resolve_target`]), as the place of its own block.
-fn find_heading(text: &TextMap, wanted: &str) -> Option<TextPlace> {
+fn find_heading(text: &TextMap, wanted: &str) -> Option<Found> {
     let segments: Vec<String> = wanted
         .split('›')
         .map(heading_key)
@@ -178,9 +210,10 @@ fn find_heading(text: &TextMap, wanted: &str) -> Option<TextPlace> {
         .iter()
         .filter(|b| b.heading == Some(found))
         .min_by_key(|b| b.start_line != line)?;
-    let mut place = text_place(text, own.start, own.end);
-    place.start_line = line;
-    Some(place)
+    Some(Found {
+        start_line: line,
+        ..Found::at(text, own.start, own.end)
+    })
 }
 
 /// Whether each of `wanted` is in `path`, in the same order, others between them or not.
@@ -191,7 +224,7 @@ fn under_in_order(wanted: &[String], path: &[String]) -> bool {
 
 /// Line `line` of `source`: its block's place in `text` when a block holds it, else the line
 /// alone; none past the source's last line.
-fn find_line(text: &TextMap, source: &str, line: u32) -> Option<TextPlace> {
+fn find_line(text: &TextMap, source: &str, line: u32) -> Option<Found> {
     if line == 0 || line as usize > source.lines().count() {
         return None;
     }
@@ -199,18 +232,10 @@ fn find_line(text: &TextMap, source: &str, line: u32) -> Option<TextPlace> {
         .blocks()
         .iter()
         .find(|b| (b.start_line..=b.end_line).contains(&line));
-    Some(match held {
-        Some(block) => TextPlace {
-            start_line: line,
-            end_line: line,
-            ..text_place(text, block.start, block.end)
-        },
-        None => TextPlace {
-            start_line: line,
-            end_line: line,
-            text_start: None,
-            text_end: None,
-        },
+    Some(Found {
+        start_line: line,
+        end_line: line,
+        span: held.map(|block| (block.start, block.end)),
     })
 }
 
@@ -238,19 +263,18 @@ impl Context {
 }
 
 /// The quote in the text as shown; else in the source, by its lines.
-fn find_quote(text: &TextMap, source: &str, wanted: &Context) -> Option<TextPlace> {
+fn find_quote(text: &TextMap, source: &str, wanted: &Context) -> Option<Found> {
     if let Some((start, end)) = wanted.best_in(text.text()) {
-        return Some(text_place(text, start, end));
+        return Some(Found::at(text, start, end));
     }
     let (normalized, starts) = normalized_lines(source);
     let (start, end) = wanted.best_in(&normalized)?;
     let line_at =
         |at: usize| u32::try_from(starts.partition_point(|&s| s <= at)).unwrap_or(u32::MAX);
-    Some(TextPlace {
+    Some(Found {
         start_line: line_at(start),
         end_line: line_at(end.saturating_sub(1).max(start)),
-        text_start: None,
-        text_end: None,
+        span: None,
     })
 }
 

@@ -149,6 +149,17 @@ pub enum FocusStep {
     Flashed,
 }
 
+/// How the comments show in the window a `show` of a comment thread went to, when they don't: the
+/// reader has hidden them there (the header's toggle).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentsShown {
+    Hidden,
+}
+
+/// The note on a `show` of a comment thread in a window whose comments are hidden.
+pub const COMMENTS_HIDDEN: &str = "Comments are hidden in that window; the passage is shown.";
+
 /// `show`'s answer.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +176,23 @@ pub struct ShowAnswer {
     /// Where the target stands, when it isn't found yet; none once the window is there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetState>,
+    /// For a comment thread shown where the comments are hidden: `hidden`, with `note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments: Option<CommentsShown>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ShowAnswer {
+    /// The answer for a comment thread shown in a window whose comments are hidden: the window
+    /// went to its passage, and the answer says the comments are hidden ([`COMMENTS_HIDDEN`]).
+    pub fn comments_hidden(self) -> Self {
+        Self {
+            comments: Some(CommentsShown::Hidden),
+            note: Some(COMMENTS_HIDDEN.to_owned()),
+            ..self
+        }
+    }
 }
 
 /// `workspace`'s answer.

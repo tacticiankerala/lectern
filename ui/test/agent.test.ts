@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeBackend, type FakeOptions, type FakeWorkspace } from "../dev/backend-fake";
 import {
   Agent,
-  NOT_YET,
+  NOT_HERE,
   pageSpan,
   view,
   type AgentHost,
@@ -21,9 +21,11 @@ import {
 import { App } from "../src/app";
 import type { AgentOpens } from "../src/generated/AgentOpens";
 import type { AgentRequest } from "../src/generated/AgentRequest";
+import type { CommentStatus } from "../src/generated/CommentStatus";
 import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
 import type { OutlineItem } from "../src/generated/OutlineItem";
+import type { ReviewPayload } from "../src/generated/ReviewPayload";
 import type { SavedPosition } from "../src/generated/SavedPosition";
 import type { Target } from "../src/generated/Target";
 import type { TextPlace } from "../src/generated/TextPlace";
@@ -309,9 +311,10 @@ describe("an agent's request through the app", () => {
       ask: null,
       answers: [],
     });
+    // Rust answers `comments` itself.
     expect(await fake.agentRequest({ tool: "comments", path: A })).toEqual({
       kind: "failed",
-      message: NOT_YET,
+      message: NOT_HERE,
     });
   });
 });
@@ -889,8 +892,16 @@ describe("a target in an HTML page", () => {
   });
 });
 
-/** A window showing `doc` (with `page`, its session, for an HTML page), as `Agent` sees it. */
-function agentHost(kind: DocKind, path: string, page: PageText | null = null) {
+/**
+ * A window showing `doc` (with `page`, its session, for an HTML page), as `Agent` sees it. Its
+ * comments save an operation as `review` does.
+ */
+function agentHost(
+  kind: DocKind,
+  path: string,
+  page: PageText | null = null,
+  review: AgentHost["review"] = () => Promise.reject(new Error("no comments here")),
+) {
   const doc: DocPayload = { ...docPayload(null), path, kind };
   const move = vi.fn<AgentHost["move"]>(() => true);
   const host: AgentHost = {
@@ -907,6 +918,8 @@ function agentHost(kind: DocKind, path: string, page: PageText | null = null) {
     places: () => Promise.resolve([]),
     aimPage: () => undefined,
     answered: () => Promise.resolve(),
+    review,
+    forgetThreads: () => undefined,
     bar: document.createElement("div"),
   };
   return { host, move };
@@ -1012,6 +1025,8 @@ function opening(page: PageText, ready: boolean, opens: AgentOpens = "switch") {
     places: () => Promise.resolve([]),
     aimPage,
     answered,
+    review: () => Promise.reject(new Error("no comments here")),
+    forgetThreads: () => undefined,
     bar: document.createElement("div"),
   };
   const leave = (): void => {
@@ -1276,5 +1291,469 @@ describe("a target a window started with", () => {
     // A newer show, of a note the reader is asked about.
     expect(await fake.agentRequest(show(A))).toEqual({ kind: "asked" });
     expect(aim?.(page)).toBeNull();
+  });
+});
+
+/** What the window's comments answer an operation with: the review as saved, `changed` its thread. */
+function saved(changed: number, status: CommentStatus): ReviewPayload {
+  return {
+    notePath: REPORT,
+    sidecarPath: `${REPORT}.review.md`,
+    noteWslPath: null,
+    sidecarWslPath: null,
+    exists: true,
+    readOnly: null,
+    comments: [
+      {
+        id: changed,
+        status,
+        state: "anchored",
+        startLine: 1,
+        endLine: 1,
+        headingPath: [],
+        jumpLine: 1,
+        pinnedHeading: null,
+        pinnedAt: null,
+        quote: "Results",
+        textStart: null,
+        textEnd: null,
+        currentText: null,
+        entries: [],
+      },
+    ],
+    unreadable: [],
+    openCount: 1,
+    changed,
+  };
+}
+
+describe("an agent's review threads in an HTML page", () => {
+  it("start with the agent's comment on a passage found in the page's text", async () => {
+    const review = vi.fn<AgentHost["review"]>(() => Promise.resolve(saved(7, "question")));
+    const agent = new Agent(agentHost("html", REPORT, reportPage(), review).host);
+    const request: AgentRequest = {
+      tool: "comment",
+      path: REPORT.toUpperCase(),
+      target: { quote: "Results", prefix: "Archive" },
+      text: "Why twice?",
+    };
+    expect(await agent.answer(call(request))).toEqual({
+      kind: "commented",
+      id: 7,
+      status: "question",
+    });
+    // On the page's own path, the agent its author: a selection's anchor carries no lines, and
+    // where the window found it, so core anchors it on that "Results" of the two.
+    expect(review).toHaveBeenCalledWith(REPORT, {
+      op: "add",
+      anchor: {
+        startLine: 0,
+        endLine: 0,
+        quote: "Results",
+        prefix: "ults Rendered by script Archive ",
+        textStart: 49,
+      },
+      text: "Why twice?",
+      author: { name: "Claude", kind: "question" },
+    });
+    // A heading, as the agent asks for it.
+    await agent.answer({
+      id: 2,
+      agent: "Codex",
+      request: {
+        tool: "comment",
+        path: REPORT,
+        target: { heading: "Archive" },
+        text: "Too old.",
+        kind: "pushback",
+      },
+    });
+    expect(review).toHaveBeenLastCalledWith(REPORT, {
+      op: "add",
+      anchor: {
+        startLine: 0,
+        endLine: 0,
+        quote: "Archive",
+        prefix: "port Results Rendered by script ",
+        textStart: 41,
+      },
+      text: "Too old.",
+      author: { name: "Codex", kind: "pushback" },
+    });
+  });
+
+  it("refuse a passage that isn't there, a page still loading, and a file not on screen, saving nothing", async () => {
+    const review = vi.fn<AgentHost["review"]>(() => Promise.resolve(saved(1, "question")));
+    const comment = (path: string, quote: string): AgentRequest => ({
+      tool: "comment",
+      path,
+      target: { quote },
+      text: "Why?",
+    });
+    const agent = new Agent(agentHost("html", REPORT, reportPage(), review).host);
+    expect(await agent.answer(call(comment(REPORT, "rolled back")))).toEqual({
+      kind: "failed",
+      message: "That passage isn't in report.html.",
+    });
+    expect(await agent.answer(call(comment(A, "Results")))).toEqual({
+      kind: "failed",
+      message: "a.md isn't shown in Lectern. Show it first.",
+    });
+    const loading = new Agent(
+      agentHost("html", REPORT, { ...reportPage(), ready: false }, review).host,
+    );
+    expect(await loading.answer(call(comment(REPORT, "Results")))).toEqual({
+      kind: "failed",
+      message: "The page hasn't loaded yet; try again in a moment.",
+    });
+    // A note's comments are Rust's to write.
+    const note = new Agent(agentHost("markdown", A, null, review).host);
+    expect(await note.answer(call(comment(A, "Aye")))).toEqual({
+      kind: "failed",
+      message: "Only an HTML page's comments go through its window.",
+    });
+    expect(review).not.toHaveBeenCalled();
+    // Refused by the store: the agent hears why.
+    const refused = new Agent(
+      agentHost("html", REPORT, reportPage(), () =>
+        Promise.reject(new Error("Couldn't save the comment: the file kept changing.")),
+      ).host,
+    );
+    expect(await refused.answer(call(comment(REPORT, "Results")))).toEqual({
+      kind: "failed",
+      message: "Couldn't save the comment: the file kept changing.",
+    });
+  });
+
+  it("reply and resolve with the agent's entries, of the kind asked for", async () => {
+    const review = vi.fn<AgentHost["review"]>(() => Promise.resolve(saved(3, "pushback")));
+    const agent = new Agent(agentHost("html", REPORT, reportPage(), review).host);
+    expect(
+      await agent.answer({
+        id: 1,
+        agent: "Codex",
+        request: { tool: "reply", path: REPORT, id: "C3", text: "Not yet.", kind: "pushback" },
+      }),
+    ).toEqual({ kind: "commented", id: 3, status: "pushback" });
+    expect(review).toHaveBeenLastCalledWith(REPORT, {
+      op: "reply",
+      id: 3,
+      text: "Not yet.",
+      author: { name: "Codex", kind: "pushback" },
+    });
+    await agent.answer(call({ tool: "reply", path: REPORT, id: "C3", text: "Weekly." }));
+    expect(review).toHaveBeenLastCalledWith(REPORT, {
+      op: "reply",
+      id: 3,
+      text: "Weekly.",
+      author: { name: "Claude", kind: "reply" },
+    });
+    await agent.answer(call({ tool: "resolve", path: REPORT, id: "C3" }));
+    expect(review).toHaveBeenLastCalledWith(REPORT, {
+      op: "reply",
+      id: 3,
+      text: "Resolved.",
+      author: { name: "Claude", kind: "resolved" },
+    });
+    await agent.answer(call({ tool: "resolve", path: REPORT, id: "C3", text: "Fixed." }));
+    expect(review).toHaveBeenLastCalledWith(REPORT, {
+      op: "reply",
+      id: 3,
+      text: "Fixed.",
+      author: { name: "Claude", kind: "resolved" },
+    });
+  });
+});
+
+describe("an agent's show at a comment thread", () => {
+  it("goes to the thread on screen, or opens its file at it", async () => {
+    const { host, move } = agentHost("markdown", A);
+    const opened = vi.spyOn(host, "open");
+    const agent = new Agent(host);
+    expect(await agent.answer(call(show(A, { comment: "C12" })))).toEqual({ kind: "shown" });
+    expect(move).toHaveBeenCalledWith({ comment: 12 });
+    const blank = agentHost("markdown", A);
+    blank.host.shownPath = () => null;
+    blank.host.doc = () => null;
+    const opens = vi.spyOn(blank.host, "open");
+    expect(await new Agent(blank.host).answer(call(show(B, { comment: "C2" })))).toEqual({
+      kind: "shown",
+    });
+    expect(opens).toHaveBeenCalledWith(B, { comment: 2 });
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("opens the Comments tab on the thread and goes to its passage, through the app", async () => {
+    const { fake, app } = await launched(B);
+    fake.agentComment(B, {
+      startLine: 3,
+      endLine: 3,
+      quote: "Buzz.",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why buzz?",
+    });
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+      ).toBe(true);
+    });
+    expect(document.getElementById("lx-tab-comments")?.getAttribute("aria-selected")).toBe("true");
+    expect(scrolled).toHaveBeenCalledWith(3);
+  });
+});
+
+describe("an agent's show at a thread whose review is still loading", () => {
+  it("is dropped when a newer show goes elsewhere in the file meanwhile", async () => {
+    const { fake, app } = await launched(B);
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    fake.agentComment(B, {
+      startLine: 1,
+      endLine: 1,
+      quote: "Bee",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why bee?",
+    });
+    // The review the thread's show loads again is held until the newer show has landed.
+    const held = deferred();
+    const load = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await held.promise;
+      return load(path, page);
+    });
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    expect(
+      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8])]),
+    ).toEqual({ kind: "shown" });
+    expect(scrolled).toHaveBeenLastCalledWith(3);
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    await settle();
+    expect(scrolled.mock.calls).toEqual([[3]]);
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+  });
+});
+
+/**
+ * B on screen with its comments loaded, then a thread C1 on "Bee" (line 1) written to its sidecar,
+ * whose review loads again only once `held` is resolved.
+ */
+async function threadStillLoading() {
+  const { fake, app } = await launched(B);
+  await vi.waitFor(() => {
+    expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+      false,
+    );
+  });
+  fake.agentComment(B, {
+    startLine: 1,
+    endLine: 1,
+    quote: "Bee",
+    headingPath: ["Bee"],
+    name: "Claude",
+    kind: "question",
+    text: "Why bee?",
+  });
+  const held = deferred();
+  const load = fake.loadReview.bind(fake);
+  vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+    await held.promise;
+    return load(path, page);
+  });
+  return { fake, app, held };
+}
+
+describe("a thread still loading for an agent's show", () => {
+  it("is dropped when a newer show asks the reader first", async () => {
+    const { fake, app, held } = await threadStillLoading();
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    expect(await fake.agentRequest(show(C))).toEqual({ kind: "asked" });
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    await settle();
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(document.getElementById("lx-tab-comments")?.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("is dropped when a newer show of the file on screen has no target", async () => {
+    const { fake, app, held } = await threadStillLoading();
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    expect(await fake.agentRequest(show(B))).toEqual({ kind: "shown" });
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    await settle();
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+  });
+
+  it("is dropped when the reader opens the same file at a line meanwhile", async () => {
+    const { fake, app, held } = await threadStillLoading();
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    // The reader's own navigation within the file: a link to line 3, quick open, Back.
+    await app.open(B, { line: 3 });
+    expect(scrolled).toHaveBeenLastCalledWith(3);
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    await settle();
+    expect(scrolled.mock.calls).toEqual([[3]]);
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+  });
+});
+
+describe("an agent's open at a thread, overtaken by the reader", () => {
+  it("drops the reveal when the reader opens the same file before the agent's open lands", async () => {
+    const { fake, app } = await launched(A);
+    fake.agentComment(B, {
+      startLine: 1,
+      endLine: 1,
+      quote: "Bee",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why bee?",
+    });
+    // The agent's open switches at once, so it goes through `openForAgent`.
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    // Hold the agent's own open of B, so the reader can overtake it before it lands.
+    const held = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+      await held.promise;
+      return open(path);
+    });
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const request = fake.agentRequest(show(B, { comment: "C1" }));
+    await settle();
+    // The reader opens the same file at line 3: a newer navigation that lands first.
+    await app.open(B, { line: 3 });
+    expect(scrolled).toHaveBeenLastCalledWith(3);
+    held.resolve();
+    expect(await request).toEqual({ kind: "shown" });
+    await settle();
+    // The agent's open was superseded; its reveal carries that open's navigation, not the
+    // reader's, so it never jumps back to C1.
+    expect(scrolled.mock.calls).toEqual([[3]]);
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+  });
+});
+
+describe("two overlapping agent opens of the same file at threads", () => {
+  it("shows the newer thread once the comments load, the older open landing late", async () => {
+    const { fake, app } = await launched(A);
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    for (const [line, quote, text] of [
+      [1, "Bee", "Why bee?"],
+      [3, "Buzz.", "Why buzz?"],
+    ] as const) {
+      fake.agentComment(B, {
+        startLine: line,
+        endLine: line,
+        quote,
+        headingPath: ["Bee"],
+        name: "Claude",
+        kind: "question",
+        text,
+      });
+    }
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    // The older show's open of B is held; the newer one's goes through and lands first.
+    const heldOpen = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+      await heldOpen.promise;
+      return open(path);
+    });
+    // B's review is held, so the newer thread waits for the comments.
+    const heldReview = deferred();
+    const load = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await heldReview.promise;
+      return load(path, page);
+    });
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const older = fake.agentRequest(show(B, { comment: "C1" }));
+    await settle();
+    expect(await fake.agentRequest(show(B, { comment: "C2" }))).toEqual({ kind: "shown" });
+    // The older open completes, superseded: its stale reveal must not displace the newer one.
+    heldOpen.resolve();
+    expect(await older).toEqual({ kind: "shown" });
+    await settle();
+    heldReview.resolve();
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('.comment-card[data-id="2"]')?.classList.contains("selected"),
+      ).toBe(true);
+    });
+    expect(scrolled).toHaveBeenCalledWith(3);
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+  });
+});
+
+describe("an agent's show at a thread in focus mode", () => {
+  it("goes to its passage alone, and changes none of the reader's settings", async () => {
+    const { fake, app } = await launched(B);
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    fake.agentComment(B, {
+      startLine: 3,
+      endLine: 3,
+      quote: "Buzz.",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why buzz?",
+    });
+    expect(app.state.settings.outlineVisible).toBe(true);
+    app.actions.run("focus");
+    expect(app.actions.inFocusMode).toBe(true);
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    await vi.waitFor(() => {
+      expect(scrolled).toHaveBeenCalledWith(3);
+    });
+    await settle();
+    expect(app.state.settings.outlineVisible).toBe(true);
+    expect(document.getElementById("lx-tab-comments")?.getAttribute("aria-selected")).toBe("false");
+    app.actions.run("focus");
+    expect(app.actions.inFocusMode).toBe(false);
+    expect(app.state.settings.outlineVisible).toBe(true);
   });
 });

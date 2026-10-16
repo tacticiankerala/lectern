@@ -2,7 +2,9 @@
 // outline marks as being read, which a navigation lands a little below the pane's top; `show` asks
 // with a bar over the document, and an agent's switch keeps a half-written comment. A target lands
 // at the top, with Back to where the reader was; an agent's highlights paint on their own layer in
-// a note, and through its bridge in an HTML page, whose text `read` takes from the page.
+// a note, and through its bridge in an HTML page, whose text `read` takes from the page. An agent's
+// comment on a page on screen is its own card, painted in the page, and `show` at a thread opens
+// the Comments tab on it.
 import { expect, test, type Page } from "@playwright/test";
 import { expectLandedOn, fixturePath, headingOffset, openFixture } from "./util";
 
@@ -295,4 +297,82 @@ test("an agent's highlights in a note are found again as it changes, and go when
   }, path);
   await expect(page.locator("#lx-doc p", { hasText: "Waiting, still" })).toBeVisible();
   await expect.poll(() => agentPainted(page)).toEqual(["platform team"]);
+});
+
+/** The text of each range the page's bridge paints in the comments' layer, in the page. */
+function pageComments(page: Page) {
+  return page
+    .frameLocator("#lx-doc-pane > iframe.lx-frame")
+    .locator("body")
+    .evaluate(() => {
+      const highlight = CSS.highlights.get("lx-comment");
+      return highlight ? [...highlight].map((range) => (range as Range).toString()) : [];
+    });
+}
+
+test("an agent's comment on a page on screen is its own card, painted there; your reply is yours", async ({
+  page,
+}) => {
+  await openFixture(page, REPORT);
+  await expect.poll(() => page.evaluate(() => window.__lxPage()?.ready ?? false)).toBe(true);
+  const path = fixturePath(REPORT);
+  const commented = await page.evaluate(
+    (path) =>
+      window.__fake.agentRequest({
+        tool: "comment",
+        path,
+        target: { quote: "conversion dipped\n in week 3" },
+        text: "Weekly, not daily?",
+      }),
+    path,
+  );
+  expect(commented).toEqual({ kind: "commented", id: 1, status: "question" });
+  const card = page.locator(".comment-card[data-id='1']");
+  await expect(card.locator(".comment-quote")).toHaveText("conversion dipped in week 3");
+  await expect(card.locator(".comment-entry.agent .comment-author")).toHaveText("Claude question");
+  await expect(card.locator("[data-action='edit']")).toHaveCount(0);
+  await expect.poll(() => pageComments(page)).toEqual(["conversion dipped in week 3"]);
+
+  await page.locator("#lx-tab-comments").click();
+  await card.locator("[data-action='reply']").click();
+  await card.locator("textarea").fill("Daily.");
+  await page.keyboard.press("Control+Enter");
+  await expect(card.locator(".comment-author")).toHaveText(["Claude question", "You"]);
+  await expect(card).toHaveAttribute("data-status", "open");
+  const resolved = await page.evaluate(
+    (path) => window.__fake.agentRequest({ tool: "resolve", path, id: "C1" }),
+    path,
+  );
+  expect(resolved).toEqual({ kind: "commented", id: 1, status: "resolved" });
+  await expect(card).toHaveCount(0);
+});
+
+test("show at a comment thread opens the Comments tab on its card", async ({ page }) => {
+  await openFixture(page, BIG_PLAN);
+  const path = fixturePath(BIG_PLAN);
+  await page.evaluate((path) => {
+    window.__fake.agentComment(path, {
+      startLine: 1,
+      endLine: 1,
+      quote: "Big Plan",
+      headingPath: ["Big Plan"],
+      name: "Claude",
+      kind: "question",
+      text: "Is the title right?",
+    });
+  }, path);
+  const shown = await page.evaluate(
+    (path) =>
+      window.__fake.agentRequest({
+        tool: "show",
+        path,
+        target: { comment: "C1" },
+        newWindow: false,
+        wait: 0,
+      }),
+    path,
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await expect(page.locator("#lx-tab-comments")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".comment-card[data-id='1']")).toHaveClass(/selected/);
 });

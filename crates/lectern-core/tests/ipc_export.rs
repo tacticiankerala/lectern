@@ -18,8 +18,9 @@ use lectern_core::page::{
     inject_script, page_policy, prepare_page, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS,
 };
 use lectern_core::review::anchor::AnchorState;
-use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
+use lectern_core::review::ops::{AgentAuthor, NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::text::PageBlock;
+use lectern_core::review::view::ReviewPayload;
 use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
@@ -69,6 +70,7 @@ fn ts_bindings_exported() {
         "AnchorState",
         "NewAnchor",
         "ReviewOp",
+        "AgentAuthor",
         "StatusChange",
         "ReviewPayload",
         "CommentView",
@@ -487,14 +489,20 @@ fn ts_unions_follow_the_serde_tags() {
             " * Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,\n",
             " * which tell apart a phrase found more than once in its lines; empty for a whole block.\n",
             " */\n",
-            "prefix: string, };",
+            "prefix: string, \n",
+            "/**\n",
+            " * Where the quote starts in the note's visible text, in UTF-16 code units (as\n",
+            " * `CommentView::text_start` counts), when the sender knows exactly: an agent's target, which\n",
+            " * may have been told apart by the text after it. The quote found there is anchored there.\n",
+            " */\n",
+            "textStart?: number, };",
         )
     );
     assert_eq!(
         decl::<ReviewOp>(),
         concat!(
-            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, } | "#,
-            r#"{ "op": "reply", id: number, text: string, } | "#,
+            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, author?: AgentAuthor, } | "#,
+            r#"{ "op": "reply", id: number, text: string, author?: AgentAuthor, } | "#,
             r#"{ "op": "setStatus", id: number, change: StatusChange, } | "#,
             r#"{ "op": "reattach", id: number, anchor: NewAnchor, } | "#,
             r#"{ "op": "edit", id: number, entry: number, text: string, };"#,
@@ -519,8 +527,10 @@ fn review_ops_are_tagged_by_op() {
             end_line: 6,
             quote: "batches of at most 50".to_owned(),
             prefix: String::new(),
+            text_start: None,
         },
         text: "Why 50?".to_owned(),
+        author: None,
     };
     assert_eq!(
         serde_json::to_value(&add).unwrap(),
@@ -532,6 +542,33 @@ fn review_ops_are_tagged_by_op() {
     )
     .unwrap();
     assert_eq!(without, add);
+    // An agent's, written under its name: the UI sends it for a page.
+    let agents: ReviewOp = serde_json::from_value(json!({
+        "op": "reply",
+        "id": 2,
+        "text": "Per station.",
+        "author": {"name": "Claude", "kind": "reply"},
+    }))
+    .unwrap();
+    assert_eq!(
+        agents,
+        ReviewOp::Reply {
+            id: 2,
+            text: "Per station.".to_owned(),
+            author: Some(AgentAuthor {
+                name: "Claude".to_owned(),
+                kind: ClaudeKind::Reply,
+            }),
+        }
+    );
+    assert_eq!(
+        decl::<AgentAuthor>(),
+        "type AgentAuthor = { name: string, kind: ClaudeKind, };"
+    );
+    // The comment an operation changed rides on its answer, for the agent a page's window adds it
+    // for.
+    let payload = decl::<ReviewPayload>();
+    assert!(payload.contains("changed?: number, "), "{payload}");
 }
 
 #[test]

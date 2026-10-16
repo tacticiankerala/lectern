@@ -38,8 +38,10 @@
 //! a library's, a path mapping's, WSL's, or one the user opened a file from (`agent_location`).
 //! An agent's open never adds one. That differs from the user's own opens (a launch, Explorer, the
 //! file dialog), which make the host trusted for the session: an agent's path may come from text a
-//! note fed it, and reaching a new host would hand that host the user's credentials. The review
-//! tools are not available yet.
+//! note fed it, and reaching a new host would hand that host the user's credentials.
+//!
+//! The review tools (`comment`, `comments`, `reply`, `resolve`) and `show`'s comment target are
+//! in `review`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -83,6 +85,8 @@ use super::windows::is_folder;
 use super::{App, WindowState};
 use crate::events::UiEvent;
 
+mod review;
+
 /// How long `status` waits for the windows' UIs to say what they show. A window that hasn't
 /// answered by then is reported from what Rust knows of it: its workspace and its file.
 const VIEW_WAIT: Duration = Duration::from_secs(3);
@@ -100,9 +104,6 @@ const CLOSED: &str = "That window has closed.";
 /// The tool error for an agent's `show` while the window it goes to starts with a file the user
 /// launched.
 const OPENING_FOR_USER: &str = "Lectern is opening a file for the user; try again in a moment.";
-
-/// The answer to a tool Lectern doesn't offer yet.
-pub const NOT_YET: &str = "Not yet available.";
 
 /// The tool error when a window's UI answers with something else than what was asked.
 const UNEXPECTED: &str = "The window gave an answer Lectern didn't expect.";
@@ -216,8 +217,8 @@ enum Placed {
 }
 
 impl App {
-    /// The answer to the request of the agent `agent` (its name as the reader sees it): `status`,
-    /// `show`, `workspace`, `highlight` and `read`, or a tool error for the tools not offered yet.
+    /// The answer to the request of the agent `agent` (its name as the reader sees it) for one of
+    /// the nine tools; a tool error is a sentence for the agent.
     pub fn agent_answer(
         self: &Arc<Self>,
         request: AgentRequest,
@@ -231,9 +232,20 @@ impl App {
                 to_value(&self.agent_highlight(args, agent, Budget::new())?)
             }
             AgentRequest::Read(args) => to_value(&self.agent_read(args, agent, Budget::new())?),
+            AgentRequest::Comment(args) => {
+                to_value(&self.agent_comment(args, agent, Budget::new())?)
+            }
+            AgentRequest::Comments(args) => {
+                to_value(&self.agent_comments(args, agent, Budget::new())?)
+            }
+            AgentRequest::Reply(args) => {
+                to_value(&self.agent_reply_to(args, agent, Budget::new())?)
+            }
+            AgentRequest::Resolve(args) => {
+                to_value(&self.agent_resolve(args, agent, Budget::new())?)
+            }
             // The connection answers it; nothing reaches here.
             AgentRequest::Hello { .. } => Ok(json!({})),
-            _ => Err(NOT_YET.to_owned()),
         }
     }
 
@@ -307,7 +319,9 @@ impl App {
     /// `show`: the file `args.path` (a Windows or WSL path) in the window `route_show` picks, at
     /// its target (the path's own `:12` when no target is given), within `budget`. It must be a
     /// file, on a share only when Lectern already trusts its host, which is checked first, and its
-    /// target must be there (`show_at`) before anything opens or asks.
+    /// target must be there (`show_at`) before anything opens or asks. A comment thread shown in a
+    /// window whose comments are hidden is answered as such (`ShowAnswer::comments_hidden`): the
+    /// window went to its passage alone.
     fn agent_show(
         self: &Arc<Self>,
         args: ShowArgs,
@@ -321,6 +335,13 @@ impl App {
             Some(target) => Some(self.show_at(&file, target, budget)?),
             None => None,
         };
+        let thread = matches!(
+            at,
+            Some(ShowAt {
+                target: Target::Comment { .. },
+                ..
+            })
+        );
         // An HTML page's passage, which its window finds once the page has loaded.
         let found_by_page = at.as_ref().is_some_and(|at| {
             at.place.is_none() && matches!(at.target, Target::Heading { .. } | Target::Quote { .. })
@@ -386,14 +407,26 @@ impl App {
                 (label, state, target, focus)
             }
         };
-        let workspace = self.window(&label).and_then(|w| self.workspace_name(&w));
-        Ok(ShowAnswer {
+        let window = self.window(&label);
+        let workspace = window.as_ref().and_then(|w| self.workspace_name(w));
+        // A thread's passage is shown in a window whose comments are hidden: the answer says so.
+        let hidden = thread
+            && state == ShowState::Shown
+            && window.is_some_and(|w| !w.settings().comments_visible);
+        let answer = ShowAnswer {
             state,
             file: path.forms(),
             window: label,
             workspace,
             focus,
             target,
+            comments: None,
+            note: None,
+        };
+        Ok(if hidden {
+            answer.comments_hidden()
+        } else {
+            answer
         })
     }
 
@@ -487,13 +520,18 @@ impl App {
     /// Where a `show` of `file` goes in it, `target`, which the file must take (`check_target`).
     /// In a note or a text file, core finds it in the file as it is on disk, read within `budget`:
     /// one that isn't there is an error, a sentence for the agent. An HTML page's target is the
-    /// window's to find, and a PDF's is its page. A comment thread's comes with the review tools.
+    /// window's to find, and a PDF's is its page. A comment thread must be there (it is the
+    /// window's to show).
     fn show_at(&self, file: &Path, target: Target, budget: Budget) -> Result<ShowAt, String> {
         let kind = opened_kind(file);
         let name = file_name(file);
         check_target(kind, &target, &name)?;
-        if matches!(target, Target::Comment { .. }) {
-            return Err(NOT_YET.to_owned());
+        if let Target::Comment { comment } = &target {
+            self.check_comment_target(file, comment)?;
+            return Ok(ShowAt {
+                target,
+                place: None,
+            });
         }
         let place = match kind {
             DocKind::Markdown | DocKind::Text => {
@@ -948,7 +986,7 @@ mod tests {
     use lectern_core::review::text::PageBlock;
 
     /// The `agent-request`s sent, in order, with the window each went to.
-    fn agent_requests(host: &FakeHost) -> Vec<(Target, AgentCall)> {
+    pub(super) fn agent_requests(host: &FakeHost) -> Vec<(Target, AgentCall)> {
         lock(&host.events)
             .iter()
             .filter_map(|(target, e)| match e {
@@ -1036,25 +1074,12 @@ mod tests {
         assert!(!f.app.agent_reply("main", id, view));
     }
 
-    #[test]
-    fn the_review_tools_are_not_available_yet() {
-        let f = fixture(profile(&[]), FakeHost::default());
-        let comments = AgentRequest::Comments(lectern_core::agent::request::CommentsArgs {
-            path: r"S:\Notes\My Vault\plan.md".to_owned(),
-            status: None,
-        });
-        assert_eq!(
-            f.app.agent_answer(comments, "Claude"),
-            Err(NOT_YET.to_owned())
-        );
-    }
-
     // show
 
     /// Answers the next `agent-request` the window `label` is sent with `replies`, in order, from
     /// a thread of its own, which gives back the request it answered. Called before the request
     /// is sent.
-    fn ui_answers(
+    pub(super) fn ui_answers(
         f: &Fixture,
         label: &str,
         replies: Vec<AgentReply>,
@@ -1810,7 +1835,7 @@ mod tests {
     const ROLLOUT: &str = "# Plan\n\n## Rollout\n\nRoll back the migration first.\n";
 
     /// The vault, with plan.md (`ROLLOUT`) on screen in Main's window, whose UI is up.
-    fn shown_plan() -> (Fixture, PathBuf) {
+    pub(super) fn shown_plan() -> (Fixture, PathBuf) {
         let dir = TempDir::new();
         let root = dir.folder("vault");
         let plan = dir.file("vault/plan.md", ROLLOUT);
@@ -1821,7 +1846,7 @@ mod tests {
         (f, plan)
     }
 
-    fn quote(text: &str) -> AgentTarget {
+    pub(super) fn quote(text: &str) -> AgentTarget {
         AgentTarget::Quote {
             quote: text.to_owned(),
             prefix: None,
@@ -1844,7 +1869,7 @@ mod tests {
         }
     }
 
-    fn show_at(path: &Path, target: AgentTarget) -> AgentRequest {
+    pub(super) fn show_at(path: &Path, target: AgentTarget) -> AgentRequest {
         AgentRequest::Show(ShowArgs {
             path: path_string(path),
             workspace: None,
@@ -1931,11 +1956,14 @@ mod tests {
             error(&brief, quote("Brief")),
             Err("brief.pdf is a PDF: give a page target.".to_owned())
         );
-        // A comment thread's target comes with the review tools.
+        // A comment thread that isn't there.
         let comment = AgentTarget::Comment {
             comment: "C1".to_owned(),
         };
-        assert_eq!(error(&plan, comment), Err(NOT_YET.to_owned()));
+        assert_eq!(
+            error(&plan, comment),
+            Err("There's no thread C1 in plan.md: it has no comments yet.".to_owned())
+        );
         assert!(agent_requests(&f.host).is_empty());
         assert!(lock(&f.host.agent_focused).is_empty());
     }

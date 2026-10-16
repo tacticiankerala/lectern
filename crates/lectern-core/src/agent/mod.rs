@@ -14,12 +14,15 @@
 //! - A target (a heading, a line, a quote or a PDF's page) is found by core in a note or a text
 //!   file, and by the window in an HTML page ([`target`]); `read` gives the text as shown, a page
 //!   at a time ([`read`]).
+//! - The review tools work a file's review threads under the agent's own name ([`review`]): Lectern
+//!   writes a note's or a text file's sidecar itself, and an HTML page's window adds to its own.
 
 pub mod lines;
 pub mod mcp;
 pub mod paths;
 pub mod read;
 pub mod request;
+pub mod review;
 pub mod show;
 pub mod status;
 pub mod target;

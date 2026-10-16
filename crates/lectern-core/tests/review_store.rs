@@ -42,8 +42,10 @@ fn add_saying(text: &str) -> ReviewOp {
             end_line: 5,
             quote: "batches of at most 50".into(),
             prefix: String::new(),
+            text_start: None,
         },
         text: text.into(),
+        author: None,
     }
 }
 
@@ -51,6 +53,7 @@ fn reply(id: u32, text: &str) -> ReviewOp {
     ReviewOp::Reply {
         id,
         text: text.into(),
+        author: None,
     }
 }
 
@@ -565,8 +568,10 @@ fn a_text_files_comment_anchors_against_its_paragraphs() {
             end_line: 1,
             quote: "# Tide sync".into(),
             prefix: String::new(),
+            text_start: None,
         },
         text: "Rename it?".into(),
+        author: None,
     };
 
     let (review, _) = store::apply_op(&sidecar, "tide.txt", source, &op, NOW).unwrap();
@@ -632,8 +637,10 @@ fn add_on_page(quote: &str, prefix: &str) -> ReviewOp {
             end_line: 0,
             quote: quote.into(),
             prefix: prefix.into(),
+            text_start: None,
         },
         text: "Weekly, not daily.".into(),
+        author: None,
     }
 }
 
@@ -696,6 +703,7 @@ fn a_page_comment_whose_quote_isnt_there_is_never_on_line_0() {
             end_line: 0,
             quote: "gone from the page".into(),
             prefix: String::new(),
+            text_start: None,
         },
     };
     let (review, _) = save(&reattach).unwrap();

@@ -25,4 +25,8 @@ comments: Array<CommentView>, unreadable: Array<UnreadableView>,
 /**
  * The comments whose effective status is still open.
  */
-openCount: number, };
+openCount: number, 
+/**
+ * The comment the operation that answered with this changed (or added); none for a load.
+ */
+changed?: number, };

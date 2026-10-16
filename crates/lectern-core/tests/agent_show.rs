@@ -328,8 +328,37 @@ fn a_window_says_when_a_pages_target_is_still_pending() {
         workspace: None,
         focus: None,
         target: Some(TargetState::Pending),
+        comments: None,
+        note: None,
     };
     assert_eq!(serde_json::to_value(&answer).unwrap()["target"], "pending");
+}
+
+/// A comment thread shown in a window whose comments are hidden: its passage is, and the answer
+/// says the comments aren't.
+#[test]
+fn a_thread_shown_where_comments_are_hidden_says_so() {
+    let answer = ShowAnswer {
+        state: ShowState::Shown,
+        file: PathForms {
+            windows: Some(PLAN.to_owned()),
+            wsl: None,
+        },
+        window: "main".to_owned(),
+        workspace: None,
+        focus: None,
+        target: None,
+        comments: None,
+        note: None,
+    };
+    let json = serde_json::to_value(answer.clone().comments_hidden()).unwrap();
+    assert_eq!(json["comments"], "hidden");
+    assert_eq!(
+        json["note"],
+        "Comments are hidden in that window; the passage is shown."
+    );
+    let plain = serde_json::to_value(answer).unwrap();
+    assert_eq!((plain.get("comments"), plain.get("note")), (None, None));
 }
 
 #[test]
@@ -460,6 +489,8 @@ fn show_answers_its_state_the_file_in_both_forms_the_window_and_the_focus() {
         workspace: Some("Studio".to_owned()),
         focus: Some(FocusStep::Foreground),
         target: None,
+        comments: None,
+        note: None,
     };
     assert_eq!(
         serde_json::to_value(&answer).unwrap(),

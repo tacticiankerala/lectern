@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeBackend } from "../dev/backend-fake";
 import { CommentsController, type CommentsHost } from "../src/comments";
+import type { PageSurface } from "../src/comments-page";
 import type { CommentView } from "../src/generated/CommentView";
 import type { EntryView } from "../src/generated/EntryView";
 import type { ReviewPayload } from "../src/generated/ReviewPayload";
@@ -97,7 +98,13 @@ function review(path: string): ReviewPayload {
 }
 
 function setup(
-  opts: { visible?: boolean; panelOpen?: boolean; focusMode?: boolean; html?: string } = {},
+  opts: {
+    visible?: boolean;
+    panelOpen?: boolean;
+    focusMode?: boolean;
+    html?: string;
+    page?: PageSurface;
+  } = {},
 ) {
   const html = opts.html ?? HTML;
   document.body.innerHTML = `<main id="pane"><article class="doc">${html}</article></main><aside id="side"></aside>`;
@@ -108,8 +115,14 @@ function setup(
   const fake = new FakeBackend(fixtures());
   fake.setReview(A, review(A));
   const panel = new RightPanel(aside);
-  const state = { path: A as string | null, visible: opts.visible ?? true };
+  const state = {
+    path: A as string | null,
+    visible: opts.visible ?? true,
+    navigation: 1,
+    landing: 1,
+  };
   const docListeners = new Set<() => void>();
+  const pageListeners = new Set<() => void>();
   const host = {
     backend: fake,
     doc: () => docEl,
@@ -126,9 +139,16 @@ function setup(
         docListeners.delete(cb);
       };
     },
-    isPage: () => false,
-    page: () => null,
-    onPage: () => () => undefined,
+    isPage: () => opts.page !== undefined,
+    page: () => opts.page ?? null,
+    onPage: (cb: () => void) => {
+      pageListeners.add(cb);
+      return () => {
+        pageListeners.delete(cb);
+      };
+    },
+    navigation: () => state.navigation,
+    agentLanding: () => state.landing,
     visible: () => state.visible,
     panelOpen: () => opts.panelOpen ?? true,
     openPanel: vi.fn<() => void>(),
@@ -144,7 +164,50 @@ function setup(
     docEl.innerHTML = html;
     for (const cb of [...docListeners]) cb();
   };
-  return { fake, panel, host, state, controller, docEl, rerender };
+  /** The HTML page on screen reported its text. */
+  const pageReported = () => {
+    for (const cb of [...pageListeners]) cb();
+  };
+  /** A thread an agent asks to show now, of the navigation and landing current. */
+  const thread = (path: string, id: number) => ({
+    path,
+    id,
+    navigation: state.navigation,
+    landing: state.landing,
+  });
+  return { fake, panel, host, state, controller, docEl, rerender, pageReported, thread };
+}
+
+/**
+ * An HTML page as the review comments see it, with the note's text as its bridge reports it,
+ * `ready` or not yet.
+ */
+function pageWithText(ready: boolean) {
+  const blocks = [
+    { text: "Tide sync", headingLevel: 1 },
+    { text: "The client sends at most fifty changes per batch to the hub." },
+    { text: "Retry with a short backoff" },
+    { text: "Log every failure" },
+  ];
+  const starts: number[] = [];
+  let at = 0;
+  for (const block of blocks) {
+    starts.push(at);
+    at += block.text.length + 1;
+  }
+  return {
+    ready,
+    text: blocks.map((b) => b.text).join(" "),
+    blocks,
+    starts,
+    top: 0,
+    selection: null,
+    frameBox: () => new DOMRect(),
+    paint: vi.fn(),
+    clear: vi.fn(),
+    reveal: vi.fn<(offset: number) => void>(),
+    scrollTo: vi.fn<(offset: number) => void>(),
+  } satisfies PageSurface;
 }
 
 function cards(panel: RightPanel): HTMLElement[] {
@@ -465,6 +528,310 @@ describe("CommentsController", () => {
       card(panel, 2).querySelector(".comment-entry:last-child .comment-author")?.textContent,
     ).toBe("Claude");
     expect(card(panel, 2).dataset.status).toBe("replied");
+  });
+
+  it("saves an agent's comment under its name and shows it; your reply goes on as yours", async () => {
+    const { panel, host, controller } = setup();
+    await controller.load();
+    const added = await controller.agentOp(A, {
+      op: "add",
+      anchor: { startLine: 3, endLine: 3, quote: "to the hub", prefix: "" },
+      text: "Which hub?",
+      author: { name: "Claude", kind: "question" },
+    });
+    expect(added.changed).toBe(5);
+    const started = card(panel, 5);
+    expect(started.dataset.status).toBe("question");
+    const first = started.querySelector(".comment-entry");
+    expect(first?.className).toBe("comment-entry agent");
+    expect(first?.querySelector(".comment-author")?.textContent).toBe("Claude question");
+    expect(started.querySelector('[data-action="edit"]')).toBeNull();
+
+    action(panel, 5, "reply").click();
+    ctrlEnter(typeReply(panel, 5, "The station's."));
+    await vi.waitFor(() => {
+      expect(card(panel, 5).querySelectorAll(".comment-entry")).toHaveLength(2);
+    });
+    const authors = () =>
+      [...card(panel, 5).querySelectorAll(".comment-author")].map((a) => a.textContent);
+    expect(authors()).toEqual(["Claude question", "You"]);
+    expect(card(panel, 5).dataset.status).toBe("open");
+
+    const resolved = await controller.agentOp(A, {
+      op: "reply",
+      id: 5,
+      text: "Resolved.",
+      author: { name: "Claude", kind: "resolved" },
+    });
+    expect(resolved.changed).toBe(5);
+    expect(resolved.comments.find((c) => c.id === 5)?.status).toBe("resolved");
+    // Resolved, it leaves the open ones.
+    expect(cards(panel).map((c) => c.dataset.id)).not.toContain("5");
+    expect(host.toast).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent's operation with why, toasting nothing, and sends none for another note", async () => {
+    const { fake, host, state, controller } = setup();
+    await controller.load();
+    const op = {
+      op: "reply",
+      id: 1,
+      text: "Fifty per station.",
+      author: { name: "Claude", kind: "reply" },
+    } as const;
+    fake.failNextReviewOp("Couldn't save the comment: the file kept changing.");
+    await expect(controller.agentOp(A, op)).rejects.toThrow(
+      "Couldn't save the comment: the file kept changing.",
+    );
+    const calls = fake.reviewCalls();
+    state.path = B;
+    await expect(controller.agentOp(A, op)).rejects.toThrow("That file isn't on screen any more.");
+    expect(fake.reviewCalls()).toBe(calls);
+    expect(host.toast).not.toHaveBeenCalled();
+  });
+
+  it("shows a thread for an agent: at once once loaded, else when its note's review loads", async () => {
+    const { fake, panel, host, controller, thread } = setup({ panelOpen: false });
+    controller.showThread(thread(A, 2));
+    expect(panel.tab).toBe("outline");
+    await controller.load();
+    expect(panel.tab).toBe("comments");
+    expect(host.openPanel).toHaveBeenCalledTimes(1);
+    expect(card(panel, 2).classList.contains("selected")).toBe(true);
+    expect(host.jumpToLine).toHaveBeenLastCalledWith(5);
+    controller.showThread(thread(A, 1));
+    expect(card(panel, 1).classList.contains("selected")).toBe(true);
+    expect(host.jumpToLine).toHaveBeenLastCalledWith(3);
+    // A thread written since the review loaded: it loads again, and shows it.
+    fake.agentComment(A, {
+      startLine: 3,
+      endLine: 3,
+      quote: "to the hub",
+      headingPath: ["Tide sync"],
+      name: "Claude",
+      kind: "question",
+      text: "Which hub?",
+    });
+    controller.showThread(thread(A, 5));
+    await vi.waitFor(() => {
+      expect(card(panel, 5).classList.contains("selected")).toBe(true);
+    });
+    // For a note no longer on screen, nothing.
+    controller.showThread(thread(B, 2));
+    await controller.load();
+    expect(card(panel, 5).classList.contains("selected")).toBe(true);
+  });
+
+  it("shows a thread where comments are hidden by going to its passage alone", async () => {
+    const { panel, host, controller, thread } = setup({ visible: false, panelOpen: false });
+    await controller.load();
+    controller.showThread(thread(A, 2));
+    expect(host.jumpToLine).toHaveBeenLastCalledWith(5);
+    expect(panel.tab).toBe("outline");
+    expect(host.openPanel).not.toHaveBeenCalled();
+    expect(host.showComments).not.toHaveBeenCalled();
+    // In an HTML page, which scrolls to where core found the thread's text.
+    const scrollTo = vi.fn<(offset: number) => void>();
+    const page: PageSurface = {
+      ready: true,
+      text: "",
+      blocks: [],
+      starts: [],
+      top: 0,
+      selection: null,
+      frameBox: () => new DOMRect(),
+      paint: vi.fn(),
+      clear: vi.fn(),
+      reveal: vi.fn(),
+      scrollTo,
+    };
+    const inPage = setup({ visible: false, panelOpen: false, page });
+    const placed = review(A);
+    placed.comments = placed.comments.map((c) =>
+      c.id === 2 ? { ...c, textStart: 30, textEnd: 56 } : c,
+    );
+    inPage.fake.setReview(A, placed);
+    await inPage.controller.load();
+    inPage.controller.showThread(inPage.thread(A, 2));
+    expect(scrollTo).toHaveBeenCalledWith(30);
+    expect(inPage.panel.tab).toBe("outline");
+    expect(inPage.host.openPanel).not.toHaveBeenCalled();
+  });
+
+  it("shows a closed thread an agent asks for by switching the list to All", async () => {
+    const { panel, controller, thread } = setup();
+    await controller.load();
+    expect(cards(panel).map((c) => c.dataset.id)).not.toContain("3");
+    controller.showThread(thread(A, 3));
+    expect(card(panel, 3).classList.contains("selected")).toBe(true);
+    const all = panel.commentsPane.querySelector('.comments-filter-btn[data-filter="all"]');
+    expect(all?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("takes an HTML page to where a detached thread an agent asks for was pinned", async () => {
+    const scrollTo = vi.fn<(offset: number) => void>();
+    const page: PageSurface = {
+      ready: true,
+      text: "",
+      blocks: [],
+      starts: [],
+      top: 0,
+      selection: null,
+      frameBox: () => new DOMRect(),
+      paint: vi.fn(),
+      clear: vi.fn(),
+      reveal: vi.fn(),
+      scrollTo,
+    };
+    const { fake, panel, controller, thread } = setup({ page });
+    const pinned = review(A);
+    pinned.comments = pinned.comments.map((c) =>
+      c.id === 4 ? { ...c, pinnedHeading: "Tide sync", pinnedAt: 40 } : c,
+    );
+    fake.setReview(A, pinned);
+    await controller.load();
+    controller.showThread(thread(A, 4));
+    expect(card(panel, 4).classList.contains("selected")).toBe(true);
+    expect(scrollTo).toHaveBeenCalledWith(40);
+  });
+
+  it("never opens the panel in focus mode, which hides it whatever its setting", async () => {
+    const { panel, host, controller, docEl, thread } = setup({
+      focusMode: true,
+      panelOpen: false,
+    });
+    await controller.load();
+    // The reader's own comment, saved in focus mode: its card is selected, the panel left alone.
+    selectBetween(docEl, "Log every", "failure");
+    expect(controller.addFromSelection()).toBe(true);
+    const area = editorText();
+    area.value = "Too quiet?";
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    ctrlEnter(area);
+    await vi.waitFor(() => {
+      expect(card(panel, 5).classList.contains("selected")).toBe(true);
+    });
+    expect(host.openPanel).not.toHaveBeenCalled();
+    // An agent's thread: its passage alone.
+    controller.showThread(thread(A, 2));
+    expect(host.jumpToLine).toHaveBeenLastCalledWith(5);
+    expect(host.openPanel).not.toHaveBeenCalled();
+  });
+
+  it("drops a thread waiting for its review once the reader navigates, within the note too", async () => {
+    const { fake, panel, host, controller, state, rerender, thread } = setup({ panelOpen: false });
+    const held = deferred();
+    const load = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await held.promise;
+      return load(path, page);
+    });
+    controller.showThread(thread(A, 2));
+    // The reader opens the same note at another line: another navigation.
+    state.navigation += 1;
+    rerender();
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(cards(panel).length).toBeGreaterThan(0);
+    });
+    await settle();
+    expect(panel.tab).toBe("outline");
+    expect(host.jumpToLine).not.toHaveBeenCalled();
+    expect(host.openPanel).not.toHaveBeenCalled();
+  });
+
+  it("ignores an older show's stale reveal, keeping the newer one waiting", async () => {
+    const { fake, panel, host, controller, state, thread } = setup({ panelOpen: false });
+    const held = deferred();
+    const load = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await held.promise;
+      return load(path, page);
+    });
+    // The newer show landed (navigation 2, landing 2); its thread waits for the review.
+    state.navigation = 2;
+    state.landing = 2;
+    controller.showThread(thread(A, 2));
+    // The older show's open completes late, with its own numbers: already stale.
+    controller.showThread({ path: A, id: 1, navigation: 1, landing: 1 });
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(card(panel, 2).classList.contains("selected")).toBe(true);
+    });
+    expect(host.jumpToLine).toHaveBeenLastCalledWith(5);
+    expect(card(panel, 1).classList.contains("selected")).toBe(false);
+  });
+
+  it("shows a thread asked for while its HTML page reloads once the page is ready", async () => {
+    const page = pageWithText(true);
+    const { panel, host, controller, rerender, pageReported, thread } = setup({
+      page,
+      panelOpen: false,
+    });
+    await controller.load();
+    // The page loads again (a change on disk): a new frame, not ready yet; its review is kept.
+    page.ready = false;
+    rerender();
+    controller.showThread(thread(A, 2));
+    await settle(10);
+    expect(page.reveal).not.toHaveBeenCalled();
+    expect(host.jumpToLine).not.toHaveBeenCalled();
+    expect(panel.tab).toBe("outline");
+    // Ready: once the review is re-resolved against the page's current text, its card and passage.
+    page.ready = true;
+    pageReported();
+    await vi.waitFor(() => {
+      expect(page.reveal).toHaveBeenCalledWith(page.text.indexOf("Retry with a short backoff"));
+    });
+    expect(panel.tab).toBe("comments");
+    expect(card(panel, 2).classList.contains("selected")).toBe(true);
+    expect(host.jumpToLine).not.toHaveBeenCalled();
+  });
+
+  it("waits for an HTML page's refreshed anchors before a reveal fires, landing on the pin", async () => {
+    const page = pageWithText(true);
+    const { fake, panel, controller, pageReported, thread } = setup({ page, panelOpen: false });
+    await controller.load();
+    // A reveal is requested while the page is reloading (not ready yet): it waits.
+    page.ready = false;
+    controller.showThread(thread(A, 2));
+    // The page comes back with changed text where C2's quoted passage is gone, so the refreshed
+    // review detaches it to a pinned spot.
+    page.blocks = [
+      { text: "Preamble" },
+      { text: "Tide sync", headingLevel: 1 },
+      { text: "Rewritten entirely." },
+    ];
+    const starts: number[] = [];
+    let at = 0;
+    for (const b of page.blocks) {
+      starts.push(at);
+      at += b.text.length + 1;
+    }
+    page.starts = starts;
+    page.text = page.blocks.map((b) => b.text).join(" ");
+    const refreshed = review(A);
+    refreshed.comments = refreshed.comments.map((c) =>
+      c.id === 2
+        ? {
+            ...c,
+            state: "detached" as const,
+            jumpLine: null,
+            pinnedHeading: "Tide sync",
+            pinnedAt: 9,
+          }
+        : c,
+    );
+    fake.setReview(A, refreshed);
+    page.ready = true;
+    pageReported();
+    // Nothing fires against the stale anchors (the passage is gone from the new text); the reveal
+    // lands on the pin only once the review is re-resolved against the page's current text.
+    await vi.waitFor(() => {
+      expect(page.scrollTo).toHaveBeenCalledWith(9);
+    });
+    expect(card(panel, 2).classList.contains("selected")).toBe(true);
+    expect(page.reveal).not.toHaveBeenCalled();
   });
 
   it("hidden removes highlights and dots", async () => {

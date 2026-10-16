@@ -35,11 +35,21 @@
 //   the agent clears them. A PDF can't be painted: that fails.
 // - `read` of an HTML page: its blocks, as its bridge reported them, and whether it stopped them
 //   short at its limit (Rust reads any other file, and reads a page cut short as incomplete).
-// The review tools aren't offered yet. Loaded on the first request.
+// - The review tools in an HTML page (Rust writes any other file's sidecar itself): `comment` on a
+//   passage found in what the page reported, as `highlight` finds one, its anchor the passage and
+//   the text before it, as a selection's; `reply` and `resolve` on a thread Rust found. Each is an
+//   operation of the window's comments (comments.ts), saved with the page's text after those before
+//   it, the agent its author, so its entry is the agent's (`**Claude (question):**`), never yours.
+//   The answer is the thread and its status now.
+// - A comment thread as `show`'s target: the Comments tab opens on its card, and the document goes
+//   to its passage, once the comments of the file have loaded (`{comment}` landing); with comments
+//   hidden in the window, the document goes to its passage alone.
+// Loaded on the first request.
 import {
   blockLines,
   blocksOnLines,
   buildTextIndex,
+  charsBefore,
   leafBlockOf,
   normalize,
   quoteFromRange,
@@ -54,9 +64,13 @@ import type { AgentOpens } from "./generated/AgentOpens";
 import type { AgentReply } from "./generated/AgentReply";
 import type { AskAnswer } from "./generated/AskAnswer";
 import type { AskOutcome } from "./generated/AskOutcome";
+import type { ClaudeKind } from "./generated/ClaudeKind";
+import type { CommentArgs } from "./generated/CommentArgs";
 import type { DocPayload } from "./generated/DocPayload";
 import type { HighlightArgs } from "./generated/HighlightArgs";
 import type { ReadArgs } from "./generated/ReadArgs";
+import type { ReviewOp } from "./generated/ReviewOp";
+import type { ReviewPayload } from "./generated/ReviewPayload";
 import type { ShowArgs } from "./generated/ShowArgs";
 import type { ShowAt } from "./generated/ShowAt";
 import type { Target } from "./generated/Target";
@@ -66,8 +80,8 @@ import type { WindowView } from "./generated/WindowView";
 import { READING_BAND_PERCENT } from "./outline";
 import type { PageFrame } from "./page-frame";
 
-/** The answer to a tool this window doesn't take part in yet. */
-export const NOT_YET = "Not yet available.";
+/** The answer to a request a window never gets: Rust answers it. */
+export const NOT_HERE = "That request isn't one a window answers.";
 
 /** How many of the reader's answers the window keeps for `status`, the latest: as Rust keeps. */
 const ANSWERS_KEPT = 10;
@@ -83,6 +97,12 @@ const PAGE_LOADING = "The page hasn't loaded yet; try again in a moment.";
 
 /** The answer to a highlight in a PDF, which can't be painted. */
 const NO_PDF_HIGHLIGHT = "PDFs can't be highlighted; use show with a page target.";
+
+/** The answer to a review tool for a file whose sidecar Rust writes itself. */
+const NOT_A_PAGE = "Only an HTML page's comments go through its window.";
+
+/** The closing note of a `resolve` that gives none, as core writes it. */
+const RESOLVED = "Resolved.";
 
 /** How long the window has to answer when Rust doesn't say, in milliseconds: as Rust waits. */
 const ANSWER_WITHIN_MS = 5000;
@@ -107,22 +127,29 @@ export type PageText = Pick<
 
 /**
  * Where an open lands in its file, or a move within it goes: a source line, where Rust's core found
- * the target in a note or a text file; a PDF's page; or a passage of an HTML page, found once the
- * page has reported its text.
+ * the target in a note or a text file; a PDF's page; a passage of an HTML page, found once the
+ * page has reported its text; or a comment thread, by its number, whose card and passage show once
+ * the file's comments have loaded.
  */
 export type Landing =
-  { line: number } | { page: number } | { aim: (page: PageText) => number | null };
+  | { line: number }
+  | { page: number }
+  | { aim: (page: PageText) => number | null }
+  | { comment: number };
 
 /**
- * Where `target` takes the reader, found by core at `place` in a note or a text file; null for none
- * (a comment thread's, which comes later).
+ * Where `target` takes the reader, found by core at `place` in a note or a text file; null for
+ * none.
  */
 export function landing(target: Target | undefined, place: TextPlace | undefined): Landing | null {
   if (place !== undefined) {
     return { line: place.startLine };
   }
-  if (target === undefined || "comment" in target) {
+  if (target === undefined) {
     return null;
+  }
+  if ("comment" in target) {
+    return { comment: threadNumber(target.comment) };
   }
   if ("line" in target) {
     return { line: target.line };
@@ -220,6 +247,16 @@ export interface AgentHost extends DocHost {
   answered(id: number, answer: AskAnswer, message?: string): Promise<void>;
   /** Aims the HTML page on screen at a passage, found once it has loaded (a reload's frame too). */
   aimPage(aim: (page: PageText) => number | null): void;
+  /**
+   * A newer `show` has come: a comment thread an older one asked to show, still waiting to, is
+   * dropped, so it never takes the reader back there.
+   */
+  forgetThreads(): void;
+  /**
+   * Saves an agent's `op` to the comments of `path`, the HTML page on screen, with its text, after
+   * the operations before it, and shows it: the review as saved, or why it wasn't, as an error.
+   */
+  review(path: string, op: ReviewOp): Promise<ReviewPayload>;
   /** Where the bar that asks the reader goes. */
   readonly bar: HTMLElement;
 }
@@ -272,8 +309,20 @@ export class Agent {
         return this.highlight(request, places);
       case "read":
         return this.read(request);
+      case "comment":
+        return this.comment(call.agent, request);
+      case "reply":
+        return this.onThread(request.path, request.id, {
+          text: request.text,
+          author: { name: call.agent, kind: request.kind ?? "reply" },
+        });
+      case "resolve":
+        return this.onThread(request.path, request.id, {
+          text: request.text ?? RESOLVED,
+          author: { name: call.agent, kind: "resolved" },
+        });
       default:
-        return { kind: "failed", message: NOT_YET };
+        return { kind: "failed", message: NOT_HERE };
     }
   }
 
@@ -408,7 +457,9 @@ export class Agent {
     places: TextPlace[],
     by: number,
   ): Promise<AgentReply> {
+    // A newer request: an older one's page target, or thread, goes nowhere.
     this.lastShow = id;
+    this.host.forgetThreads();
     const target = args.target;
     const showing: Showing = { id, navigation: null };
     const inPage =
@@ -588,6 +639,79 @@ export class Agent {
     return { kind: "highlighted", count: this.marks.length };
   }
 
+  /**
+   * `comment` from the agent `agent` in the HTML page on screen: a thread on its passage, found in
+   * what the page reported, anchored as a selection of it is, the agent's entry first.
+   */
+  private comment(agent: string, args: CommentArgs): Promise<AgentReply> {
+    const shown = this.pageOnScreen(args.path);
+    if ("kind" in shown) {
+      return Promise.resolve(shown);
+    }
+    const { path, page } = shown;
+    const span = pageSpan(page, args.target);
+    if (span === null) {
+      return Promise.resolve({ kind: "failed", message: notThere(path) });
+    }
+    // Where it was found too, so core anchors it on that occurrence, whatever the text before it
+    // shares with another.
+    const anchor = {
+      startLine: 0,
+      endLine: 0,
+      quote: normalize(page.text.slice(span.start, span.end)),
+      prefix: charsBefore(page.text, span.start),
+      textStart: span.start,
+    };
+    const author = { name: agent, kind: args.kind ?? "question" };
+    return this.saved(path, { op: "add", anchor, text: args.text, author });
+  }
+
+  /** `reply` or `resolve` in the HTML page on screen: `entry`, the agent's, on thread `id` (`C3`). */
+  private onThread(
+    path: string,
+    id: string,
+    entry: { text: string; author: { name: string; kind: ClaudeKind } },
+  ): Promise<AgentReply> {
+    const shown = this.pageOnScreen(path);
+    if ("kind" in shown) {
+      return Promise.resolve(shown);
+    }
+    return this.saved(shown.path, { op: "reply", id: threadNumber(id), ...entry });
+  }
+
+  /**
+   * The HTML page `path` on screen, once it has reported its text, with its path as the window
+   * opened it; else why an agent's review tool can't work on it.
+   */
+  private pageOnScreen(path: string): { path: string; page: PageText } | AgentReply {
+    const doc = this.host.doc();
+    if (!doc || !samePath(doc.path, path)) {
+      return { kind: "failed", message: notShown(path) };
+    }
+    if (doc.kind !== "html") {
+      return { kind: "failed", message: NOT_A_PAGE };
+    }
+    const page = this.host.page();
+    if (!page?.ready) {
+      return { kind: "failed", message: PAGE_LOADING };
+    }
+    return { path: doc.path, page };
+  }
+
+  /** Saves the agent's `op` to the comments of the page `path`: the thread, and its status now. */
+  private async saved(path: string, op: ReviewOp): Promise<AgentReply> {
+    let review: ReviewPayload;
+    try {
+      review = await this.host.review(path, op);
+    } catch (e) {
+      return { kind: "failed", message: e instanceof Error ? e.message : String(e) };
+    }
+    const thread = review.comments.find((c) => c.id === review.changed);
+    return thread
+      ? { kind: "commented", id: thread.id, status: thread.status }
+      : { kind: "failed", message: "The comment wasn't saved." };
+  }
+
   /** `read` of the HTML page on screen: its blocks, once it has reported them. */
   private read(args: ReadArgs): AgentReply {
     const doc = this.host.doc();
@@ -732,6 +856,11 @@ export class Agent {
       ),
     );
   }
+}
+
+/** The number of the comment thread `id` names: `C3` is 3. */
+function threadNumber(id: string): number {
+  return Number(id.slice(1));
 }
 
 /** A path's file name. */

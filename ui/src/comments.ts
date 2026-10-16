@@ -37,6 +37,13 @@
 //   loading until then), and again when its text changes while it has comments to find in it.
 //   Its bridge paints the highlights inside its frame, says when marked text is clicked, and
 //   scrolls to a comment's text.
+// - An agent's operations on an HTML page (agent.ts) queue with the reader's and show the same
+//   way, but tell the agent why one wasn't saved rather than toasting it. An agent's `show` of a
+//   thread shows its card and passage as a dot's click does, once its note's review has loaded
+//   and, in an HTML page, the page is ready and that review was resolved against the page's current
+//   text; with comments hidden, only its passage (Rust tells the agent they're hidden). One still
+//   waiting is dropped by another navigation, a newer show request or landing, or the document
+//   being left (`PendingReveal`).
 import type { Backend } from "./backend";
 import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
 import { pageSpan, type PageSurface } from "./comments-page";
@@ -94,6 +101,10 @@ export interface CommentsHost {
   page: () => PageSurface | null;
   /** Calls `cb` whenever the HTML page on screen reports its text; returns the unsubscribe. */
   onPage: (cb: () => void) => () => void;
+  /** The current navigation's number: another one opened another document, or this one again. */
+  navigation: () => number;
+  /** The latest agent show request's or landing's number (app.ts). */
+  agentLanding: () => number;
   /** Whether comments show (the feature on, and not hidden by the header toggle). */
   visible: () => boolean;
   /** Whether the right panel shows. */
@@ -108,10 +119,28 @@ export interface CommentsHost {
   showComments: () => void;
 }
 
+/**
+ * A thread an agent's show asked for, waiting to be shown: its note and id, and what the show was
+ * part of, so it is dropped once that has passed. Shown once the review on screen is its note's and
+ * has it and, in an HTML page, the page is ready and that review was resolved against the page's
+ * current text; dropped by another navigation than `navigation`, a newer show request or landing
+ * than `landing`, or the document being left.
+ */
+export interface PendingReveal {
+  path: string;
+  id: number;
+  /** The navigation the show landed in (`CommentsHost.navigation`). */
+  navigation: number;
+  /** The show's number among the agent's show requests and landings (`CommentsHost.agentLanding`). */
+  landing: number;
+}
+
 const EMPTY = "No comments yet. Select text in the note, or hover a paragraph and press +.";
 const EMPTY_PAGE = "No comments yet. Select text in the page to comment on it.";
 /** What a page's Comments tab says until the page has reported its text. */
 const LOADING = "Loading comments…";
+/** Why an agent's operation wasn't sent: its note went off screen before its turn. */
+const GONE = "That file isn't on screen any more.";
 /** Where a card scrolled to lands below the pane's top, in pixels. */
 const CARD_GAP = 12;
 /** How long the blocks a card went to stay flashed, in ms: its animation's (comments.css). */
@@ -136,6 +165,12 @@ export class CommentsController {
    * goes again.
    */
   private pageRevision = 0;
+  /**
+   * The page revision (`pageRevision`) the review on screen was resolved against. An HTML page's
+   * reveal waits until this matches the current one, so it never fires against anchors core found
+   * in page text that has since changed.
+   */
+  private reviewRevision = 0;
   /** The visible text of the note on screen, built when first needed after its render. */
   private index: TextIndex | null = null;
   private focused: number | null = null;
@@ -161,6 +196,8 @@ export class CommentsController {
   private readonly menu: HTMLElement;
   /** The entry being edited, kept across renders. */
   private edit: EditBox | null = null;
+  /** A thread an agent asked to show, not shown yet (`tryReveal`). */
+  private revealing: PendingReveal | null = null;
   /** The selection button, the block "+", the editor and re-attach mode. */
   private readonly adding: CommentAdding;
   private readonly stops: (() => void)[] = [];
@@ -326,6 +363,8 @@ export class CommentsController {
       return;
     }
     if (gen === this.gen && this.showing(path)) {
+      // This review was resolved against the page text of `revision`.
+      this.reviewRevision = revision;
       this.apply(payload);
       // The page's text changed while they loaded: they're found in its newest text.
       if (page !== null && revision !== this.pageRevision) {
@@ -357,6 +396,94 @@ export class CommentsController {
     this.host.panel.setCount(payload.openCount);
     this.render();
     this.decorate();
+    this.tryReveal();
+  }
+
+  /**
+   * Shows a thread for an agent, as a click on its dot does: the Comments tab on its card, and its
+   * text; with comments hidden, its text alone. At once when everything it waits for is there,
+   * else once it is, or never (`tryReveal`). The note's review loads again when the one on screen
+   * lacks the thread: Rust found it in the sidecar, so what's on screen may be older. One already
+   * stale when it arrives (an older show's open landing after a newer one's) is ignored, so it
+   * never displaces the newer thread waiting.
+   */
+  showThread(reveal: PendingReveal): void {
+    if (this.stale(reveal)) {
+      return;
+    }
+    this.revealing = reveal;
+    if (this.tryReveal() && !this.hasThread(reveal.path, reveal.id)) {
+      void this.load();
+    }
+  }
+
+  /**
+   * The thread waiting to show, if any (`revealing`), under the one rule for it: dropped once it
+   * is stale, which is another navigation than its show's, a newer show request or landing, or the
+   * document on screen not being its note; shown once the review on screen has it and, in an HTML
+   * page, the page is ready and the review was resolved against the page's current text
+   * (`reviewRevision`); left waiting otherwise. Run whenever any of that may have changed: a
+   * document shown, a review applied, a page's text reported. True while one is left waiting.
+   */
+  private tryReveal(): boolean {
+    const reveal = this.revealing;
+    if (reveal === null) {
+      return false;
+    }
+    if (this.stale(reveal)) {
+      this.revealing = null;
+      return false;
+    }
+    if (
+      !this.hasThread(reveal.path, reveal.id) ||
+      (this.host.isPage() &&
+        (this.readyPage() === null || this.reviewRevision !== this.pageRevision))
+    ) {
+      return true;
+    }
+    this.revealing = null;
+    this.showFor(reveal.id);
+    return false;
+  }
+
+  /**
+   * Whether `reveal` has gone stale: another navigation than its show's, a newer show request or
+   * landing, or the document on screen not being its note.
+   */
+  private stale(reveal: PendingReveal): boolean {
+    const path = this.host.docPath();
+    return (
+      path === null ||
+      !samePath(path, reveal.path) ||
+      this.host.navigation() !== reveal.navigation ||
+      this.host.agentLanding() !== reveal.landing
+    );
+  }
+
+  /** Whether the review on screen is the note `path`'s and has thread `id`. */
+  private hasThread(path: string, id: number): boolean {
+    const review = this.review;
+    return (
+      review !== null && samePath(review.notePath, path) && review.comments.some((c) => c.id === id)
+    );
+  }
+
+  /**
+   * Shows thread `id` for an agent: its card and text as `reveal` does; with comments hidden, or in
+   * focus mode, the reader's choice is kept, and the document goes to its text alone. A closed
+   * thread the Open filter leaves out has the list show All first, which the reader can switch
+   * back.
+   */
+  private showFor(id: number): void {
+    const c = this.review?.comments.find((x) => x.id === id);
+    if (c && this.filter === "open" && !isOpen(c)) {
+      this.setFilter("all");
+    }
+    if (this.shown && !this.host.focusMode()) {
+      this.reveal(id);
+    } else {
+      this.select(id, true);
+    }
   }
 
   /** Shows or hides the marks in the note; hidden, nothing offers to add a comment. */
@@ -444,7 +571,36 @@ export class CommentsController {
     if (path === null || this.disposed) {
       return Promise.resolve("skipped");
     }
-    const done = this.enqueue(() => this.send(path, op));
+    return this.write(() => this.send(path, op));
+  }
+
+  /**
+   * An agent's operation on the note at `path`, on screen (an HTML page, with its text), after the
+   * loads and operations before it, as the reader's are, and shown: the review as saved. Rejects
+   * with why it wasn't saved, which the agent hears; nothing is toasted.
+   */
+  agentOp(path: string, op: ReviewOp): Promise<ReviewPayload> {
+    if (this.disposed) {
+      return Promise.reject(new Error(GONE));
+    }
+    return this.write(async () => {
+      let payload: ReviewPayload | null;
+      try {
+        payload = await this.save(path, op);
+      } catch (e) {
+        // Rust's commands fail with a message.
+        throw e instanceof Error ? e : new Error(String(e));
+      }
+      if (payload === null) {
+        throw new Error(GONE);
+      }
+      return payload;
+    });
+  }
+
+  /** Runs the operation `task` after everything asked for before it; `settled` waits for it. */
+  private write<T>(task: () => Promise<T>): Promise<T> {
+    const done = this.enqueue(task);
     const write: Promise<unknown> = done
       .catch(() => undefined)
       .finally(() => {
@@ -487,25 +643,37 @@ export class CommentsController {
   }
 
   private async send(path: string, op: ReviewOp): Promise<Outcome> {
-    if (!this.showing(path)) {
-      return "skipped";
-    }
-    // A page that hasn't reported its text sends none, and Rust says why it can't be saved.
-    const page = this.pageText() ?? null;
-    let payload: ReviewPayload;
+    let payload: ReviewPayload | null;
     try {
-      payload =
-        page === null
-          ? await this.host.backend.reviewOp(path, op)
-          : await this.host.backend.reviewOp(path, op, page);
+      payload = await this.save(path, op);
     } catch (e) {
       this.host.toast(String(e));
       return "failed";
     }
+    return payload === null ? "skipped" : "applied";
+  }
+
+  /**
+   * Saves `op` to the note at `path`, if it is still on screen, and shows the review it leaves:
+   * that review, or null when the note isn't on screen any more. Throws why Rust refused it.
+   */
+  private async save(path: string, op: ReviewOp): Promise<ReviewPayload | null> {
+    if (!this.showing(path)) {
+      return null;
+    }
+    // A page that hasn't reported its text sends none, and Rust says why it can't be saved.
+    const page = this.pageText() ?? null;
+    const revision = this.pageRevision;
+    const payload =
+      page === null
+        ? await this.host.backend.reviewOp(path, op)
+        : await this.host.backend.reviewOp(path, op, page);
     if (this.showing(path)) {
+      // The review it leaves was resolved against the page text of `revision`.
+      this.reviewRevision = revision;
       this.apply(payload);
     }
-    return "applied";
+    return payload;
   }
 
   /** Removes everything the comments added: the marks, the cards, the badge, the listeners. */
@@ -568,6 +736,7 @@ export class CommentsController {
     }
     this.pageRevision++;
     this.decorate();
+    this.tryReveal();
     if (this.pageWaiting || (this.review?.comments.length ?? 0) > 0) {
       void this.load();
     }
@@ -592,6 +761,7 @@ export class CommentsController {
       this.render();
     }
     this.decorate();
+    this.tryReveal();
     void this.load();
   }
 
@@ -1170,10 +1340,14 @@ export class CommentsController {
     }
   }
 
-  /** Shows a comment's card: the Comments tab, the panel opened if it was closed. */
+  /**
+   * Shows a comment's card: the Comments tab, the panel opened if it was closed. Never in focus
+   * mode, which hides the panel whatever its setting: opening it there would only flip the
+   * reader's setting for after.
+   */
   private reveal(id: number): void {
     this.host.panel.show("comments");
-    if (!this.host.panelOpen()) {
+    if (!this.host.panelOpen() && !this.host.focusMode()) {
       this.host.openPanel();
     }
     this.select(id, false);
@@ -1213,16 +1387,16 @@ export class CommentsController {
 
   /**
    * Takes the HTML page on screen to a comment's text: to the top when `jump` (its card asked),
-   * else into view when it's out of sight. One the page doesn't mark goes, when asked, where core
-   * placed it: the heading it is pinned to (that one, of any with its text), else where it found
-   * the text, else the page's top.
+   * else into view when it's out of sight. One the page doesn't mark goes, when asked or when it
+   * is detached (as a note's goes to its line), where core placed it: the heading it is pinned to
+   * (that one, of any with its text), else where it found the text, else the page's top.
    */
   private goOnPage(page: PageSurface, c: CommentView, jump: boolean): void {
     const span = this.spans.get(c.id);
     if (span) {
       if (jump) page.scrollTo(span.start);
       else page.reveal(span.start);
-    } else if (jump) {
+    } else if (jump || c.state === "detached") {
       page.scrollTo(c.pinnedAt ?? c.textStart ?? 0);
     }
   }

@@ -8,4 +8,10 @@ export type NewAnchor = { startLine: number, endLine: number, quote: string,
  * Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,
  * which tell apart a phrase found more than once in its lines; empty for a whole block.
  */
-prefix: string, };
+prefix: string, 
+/**
+ * Where the quote starts in the note's visible text, in UTF-16 code units (as
+ * `CommentView::text_start` counts), when the sender knows exactly: an agent's target, which
+ * may have been told apart by the text after it. The quote found there is anchored there.
+ */
+textStart?: number, };
