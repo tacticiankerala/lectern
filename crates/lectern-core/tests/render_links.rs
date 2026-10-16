@@ -113,7 +113,7 @@ fn render_marks_links() {
     assert_has(
         &notes,
         &format!(
-            r##"<a data-written="plans/2026-01-01-big-plan.md" href="#" class="code-link" data-kind="doc" data-target="{}"><code data-sourcepos="5:34-5:63">plans/2026-01-01-big-plan.md</code></a>"##,
+            r##"<a href="#" class="code-link" data-kind="doc" data-target="{}"><code data-sourcepos="5:34-5:63">plans/2026-01-01-big-plan.md</code></a>"##,
             v.abs("work/alpha/plans/2026-01-01-big-plan.md")
         ),
     );
@@ -327,56 +327,6 @@ fn links_to_text_html_and_pdf_files_open_in_lectern() {
             v.abs("artifacts/new.htm")
         ),
     );
-}
-
-/// A Markdown link or a path in inline code keeps its destination as written, decoded and
-/// without its `?query`, `#fragment` or `:line`, for copying it as written: `data-target` is
-/// where it resolved to.
-#[test]
-fn local_links_keep_the_path_as_written() {
-    let v = Vault::new();
-    let html = v.render_fixture("notes/résumé notes.md").html;
-    assert_has(
-        &html,
-        &format!(
-            r##"data-written="../artifacts/report.html" href="#" class="link-doc" data-kind="doc" data-target="{}">report</a>"##,
-            v.abs("artifacts/report.html")
-        ),
-    );
-    let html = v
-        .render_with(
-            "work/alpha/notes/x.md",
-            concat!(
-                "[a](../plans/2026-01-01-big-plan.md#Section%202) [b](sub%20dir/x.md?plain=1) ",
-                "[c](/home/dev/app/k.rb:17) [d](C:\\Notes\\plan.md#L4) ",
-                "`plans/2026-01-01-big-plan.md:40` `/home/dev/app/k.rb:17:3`\n",
-            ),
-            Some(&v.ix),
-            &wsl_mapper(),
-        )
-        .html;
-    for written in [
-        "../plans/2026-01-01-big-plan.md",
-        "sub dir/x.md",
-        "/home/dev/app/k.rb",
-        r"C:\Notes\plan.md",
-    ] {
-        assert_has(&html, &format!(r##"data-written="{written}" href="#""##));
-    }
-    for written in ["plans/2026-01-01-big-plan.md", "/home/dev/app/k.rb"] {
-        assert_has(
-            &html,
-            &format!(r##"<a data-written="{written}" href="#" class="code-link""##),
-        );
-    }
-    // A wikilink, a web link and an in-page link have no path written.
-    let html = v
-        .render(
-            "memory/index.md",
-            "[[README]] [[missing-note]] [w](https://example.com/a/b) [s](#top)\n",
-        )
-        .html;
-    assert_lacks(&html, "data-written");
 }
 
 #[test]
@@ -606,7 +556,7 @@ fn inline_code_files_and_absolute_paths() {
     assert_has(
         &html,
         &format!(
-            r##"<a data-written="img/logo.png" href="#" class="code-link" data-kind="file" data-target="{}"><code"##,
+            r##"<a href="#" class="code-link" data-kind="file" data-target="{}"><code"##,
             v.abs("friends/img/logo.png")
         ),
     );

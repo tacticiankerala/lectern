@@ -100,32 +100,6 @@ describe("TauriBackend", () => {
     ]);
   });
 
-  it("asks for a path's forms with the path as written, and whether it is an exact path", async () => {
-    const backend = new TauriBackend();
-    await backend.pathForms("`/home/me/a.md:12`", false);
-    await backend.pathForms("C:\\Users\\me\\v1.0#archive", true);
-    expect(tauri.invoke.mock.calls).toEqual([
-      ["path_forms", { raw: "`/home/me/a.md:12`", literal: false }],
-      ["path_forms", { raw: "C:\\Users\\me\\v1.0#archive", literal: true }],
-    ]);
-  });
-
-  it("asks for the forms of a link's path as written", async () => {
-    const backend = new TauriBackend();
-    await backend.writtenForms("../notes/v1.0#archive.md");
-    expect(tauri.invoke.mock.calls).toEqual([
-      ["written_forms", { raw: "../notes/v1.0#archive.md" }],
-    ]);
-  });
-
-  it("asks for a selection's paths in one form", async () => {
-    const backend = new TauriBackend();
-    await backend.convertPaths("rubocop app/x spec/x", "windows");
-    expect(tauri.invoke.mock.calls).toEqual([
-      ["convert_paths", { text: "rubocop app/x spec/x", form: "windows" }],
-    ]);
-  });
-
   it("stops every listener before the page reloads, each once", async () => {
     const backend = new TauriBackend();
     const off = backend.on("doc-changed", () => undefined);

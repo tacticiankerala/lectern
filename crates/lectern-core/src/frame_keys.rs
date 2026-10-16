@@ -66,9 +66,7 @@ const CHORDS: &[(&str, u8)] = &[
     ("T", C | S),
     ("b", C),
     ("e", C),
-    // Copying a path, or the paths in a selection: the WSL form, and the Windows form.
     ("C", C | S),
-    ("W", C | S),
     ("r", C),
     (",", C),
     ("M", C | S),

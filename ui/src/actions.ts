@@ -1,37 +1,18 @@
 // What the user asks for: shortcuts, the header's buttons and menus (the recent files menu among
-// them, recent-files.ts), the sidebar's, links' and selected paths' context menus, copying paths
-// as they are or in Windows or WSL form, quick open, Preferences, find in page, full-text search,
-// update checks, About and the breadcrumb chooser (all loaded on first use), focus mode, the
-// sidebars' visibility and widths, showing or hiding the review comments, a new window and
-// quitting.
+// them, recent-files.ts), the sidebar's context menu, quick open, Preferences, find in page,
+// full-text search, update checks, About and the breadcrumb chooser (all loaded on first use),
+// focus mode, the sidebars' visibility and widths, showing or hiding the review comments, a new
+// window and quitting.
 import type { About } from "./about";
 import type { App } from "./app";
-import {
-  COPIED,
-  COPY_KEYS,
-  FORM_NAME,
-  NO_FORM,
-  SELECTION_TOO_LONG,
-  TOAST_PATH_CHARS,
-  copiedWith,
-  inNoteOrComment,
-  linkPaths,
-  middleTruncate,
-  selectedPaths,
-  shortcutPath,
-  type PathForm,
-  type PathToCopy,
-} from "./copy-path";
 import type { CrumbChooser } from "./crumb-chooser";
 import { h, quietly, samePath } from "./dom";
 import type { FindBar } from "./find";
-import type { ConvertedPaths } from "./generated/ConvertedPaths";
 import type { DocPayload } from "./generated/DocPayload";
-import type { PathForms } from "./generated/PathForms";
 import { iconButton, ICONS } from "./icons";
 import type { Action } from "./keymap";
 import { NARROW } from "./library-controller";
-import type { Menu, MenuEntry, MenuItem } from "./menu";
+import type { Menu, MenuEntry } from "./menu";
 import { blockAt } from "./position";
 import type { Preferences } from "./preferences";
 import type { QuickOpen } from "./quick-open";
@@ -143,9 +124,6 @@ export class Actions {
     app.on("doc", () => {
       if (this.onPdf()) this.find?.close();
     });
-    app.layout.app.addEventListener("contextmenu", (e) => {
-      this.pathMenu(e);
-    });
     for (const handle of app.layout.app.querySelectorAll<HTMLElement>(".resizer")) {
       const side = handle.dataset.for;
       if (side === "library" || side === "outline") {
@@ -207,17 +185,8 @@ export class Actions {
         return true;
       case "open-editor":
         return this.openInEditor();
-      case "copy-windows-path":
-      case "copy-wsl-path": {
-        const target = shortcutPath(this.app.layout.doc, this.app.nav.currentPath());
-        if (target === null) return false;
-        if (target === "too-long") {
-          this.app.toast(SELECTION_TOO_LONG);
-          return true;
-        }
-        void this.copyAs(target, action === "copy-wsl-path" ? "wsl" : "windows");
-        return true;
-      }
+      case "copy-path":
+        return this.copyPath();
       case "reload":
         // Handled either way: WebView2 would reload the whole page.
         this.reload();
@@ -640,15 +609,12 @@ export class Actions {
             if (path !== null) void this.app.reveal(path);
           },
         },
-        // The open file, though the keys shown also copy a selected path or a focused link.
-        ...this.copyItems(
-          path ?? "",
-          { kind: "exact", path: path ?? "" },
-          {
-            keys: true,
-            disabled: path === null,
-          },
-        ),
+        {
+          label: "Copy path",
+          keys: "Ctrl+Shift+C",
+          disabled: path === null,
+          run: () => this.copyPath(),
+        },
         {
           label: "Reload",
           keys: "F5",
@@ -683,7 +649,7 @@ export class Actions {
   async contextMenu(e: MouseEvent, path: string, isRoot: boolean): Promise<void> {
     const entries: MenuEntry[] = [
       { label: "Reveal in Explorer", run: () => void this.app.reveal(path) },
-      ...this.copyItems(path, { kind: "exact", path }),
+      { label: "Copy path", run: () => void this.copyText(path) },
     ];
     if (isRoot) {
       entries.push("separator", {
@@ -692,76 +658,6 @@ export class Actions {
       });
     }
     await this.openMenu(entries, { x: e.clientX, y: e.clientY });
-  }
-
-  /**
-   * The menu for a right-click in a note or a comment. On a selection holding a path, it copies
-   * the selection as it is, or with its paths in either form. On a link that leads somewhere, it
-   * opens, copies the link's text or its path in either form, or reveals; on a broken one written
-   * as a path, it copies. Anywhere else, and in a field, the default menu stays.
-   */
-  private pathMenu(e: MouseEvent): void {
-    const target = e.target instanceof Element ? e.target : null;
-    if (!target || target.closest("input, textarea, [contenteditable]")) {
-      return;
-    }
-    const doc = this.app.layout.doc;
-    const selected = selectedPaths(doc);
-    if (selected?.range.intersectsNode(target)) {
-      e.preventDefault();
-      void this.openMenu(this.copyItems(selected.text, selected.path), {
-        x: e.clientX,
-        y: e.clientY,
-      });
-      return;
-    }
-    const link = target.closest("a");
-    const found = link && inNoteOrComment(link, doc) ? linkPaths(link) : null;
-    if (!link || !found) {
-      return;
-    }
-    e.preventDefault();
-    const leadsTo = found.target;
-    const entries: MenuEntry[] =
-      leadsTo === null
-        ? this.copyItems(found.text, found.path)
-        : [
-            {
-              label: "Open",
-              run: () => {
-                this.app.view.follow(link);
-              },
-            },
-            ...this.copyItems(found.text, found.path),
-            { label: "Reveal in Explorer", run: () => void this.app.reveal(leadsTo) },
-          ];
-    void this.openMenu(entries, { x: e.clientX, y: e.clientY });
-  }
-
-  /**
-   * The menu items that copy `text` as it is, and `target` in Windows and in WSL form: "as … path"
-   * for one path, "with … paths" for text holding paths. `keys` shows the shortcuts (the ⋯ menu).
-   */
-  private copyItems(
-    text: string,
-    target: PathToCopy,
-    opts: { keys?: boolean; disabled?: boolean } = {},
-  ): MenuEntry[] {
-    const disabled = opts.disabled === true;
-    const convert = (form: PathForm): MenuItem => ({
-      label:
-        target.kind === "paths"
-          ? `Copy with ${FORM_NAME[form]} paths`
-          : `Copy as ${FORM_NAME[form]} path`,
-      ...(opts.keys ? { keys: COPY_KEYS[form] } : {}),
-      disabled,
-      run: () => void this.copyAs(target, form),
-    });
-    return [
-      { label: "Copy", disabled, run: () => void this.copyText(text) },
-      convert("windows"),
-      convert("wsl"),
-    ];
   }
 
   /**
@@ -842,57 +738,23 @@ export class Actions {
     return true;
   }
 
-  /**
-   * Copies `target` in `form`, as Rust works it out, and says so in a toast. One path with no such
-   * form copies nothing, and the toast says so; text holding paths is copied with those that have
-   * one converted, and the toast counts both.
-   */
-  private async copyAs(target: PathToCopy, form: PathForm): Promise<void> {
-    if (target.kind === "paths") {
-      let result: ConvertedPaths;
-      try {
-        result = await this.app.backend.convertPaths(target.text, form);
-      } catch (e) {
-        this.app.toast(String(e));
-        return;
-      }
-      await this.copyText(result.text, copiedWith(form, result.converted, result.unconverted));
-      return;
-    }
-    let forms: PathForms;
-    try {
-      forms =
-        target.kind === "written"
-          ? await this.app.backend.writtenForms(target.path)
-          : await this.app.backend.pathForms(target.path, target.kind === "exact");
-    } catch (e) {
-      this.app.toast(String(e));
-      return;
-    }
-    const path = forms[form];
+  /** Copies the path on screen; false when there is none. */
+  private copyPath(): boolean {
+    const path = this.app.nav.currentPath();
     if (path === null) {
-      this.app.toast(NO_FORM[form]);
-      return;
+      return false;
     }
-    await this.copyText(path, COPIED[form]);
+    void this.copyText(path);
+    return true;
   }
 
-  /** Copies `text` as it is, with `message` in a toast and the text, on one line, below it. */
-  private async copyText(text: string, message = "Copied"): Promise<void> {
+  private async copyText(text: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text);
+      this.app.toast("Copied the path");
     } catch {
       this.app.toast("Couldn't copy to the clipboard");
-      return;
     }
-    let line = text.replace(/\s+/gu, " ").trim();
-    // Only its ends show, so a long text (a whole selected note) is cut to them before its
-    // characters are counted.
-    const ends = 2 * TOAST_PATH_CHARS;
-    if (line.length > 2 * ends) {
-      line = `${line.slice(0, ends)}…${line.slice(-ends)}`;
-    }
-    this.app.toast(message, middleTruncate(line, TOAST_PATH_CHARS));
   }
 
   /** Whether the document is a PDF, which the find bar can't search: its viewer does. */

@@ -18,8 +18,7 @@ Lectern opens your Markdown the way you meant it to look: tables that wrap, high
 - **Your notes as a library.** Add folders and browse them in the sidebar, or collapse it to give the page the room. Click any breadcrumb to pick a nearby file or folder from a list that goes away once you've chosen. A folder with a README shows that README's `status:` as a badge.
 - **Faithful rendering.** GitHub-flavoured Markdown: tables, task lists, footnotes, alerts, raw HTML (made safe), and highlighted code. Frontmatter shows as a tidy properties strip, with a count of done tasks.
 - **HTML pages, PDFs and text files too.** HTML pages, such as the reports and dashboards an AI agent writes, run in a sandbox, take comments, and have an outline and find. PDFs open in the built-in viewer. Text files take comments like notes. **Open in default app**, in the ⋯ menu, hands any of them to its usual app.
-- **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations.
-- **Paths ready for a terminal.** Right-click a link, a selected path or a selected command to copy it as it is, or with its paths in Windows or WSL form. An absolute path maps to the other side (`/mnt/s/Notes` and `S:\Notes`); a relative one keeps its place and only changes its slashes (`app/models/user.rb` and `app\models\user.rb`). Only a real Linux path, under a folder such as `/home` or `/usr`, becomes a path in WSL (`\\wsl.localhost\Ubuntu\home\me\x.rb`); a route such as `/api/v1/users` only changes its slashes. Linux paths open from and copy into Windows' default WSL distribution, unless you pick another under **WSL distribution** in Preferences. The library's and the ⋯ menu's copies work the same on a file's own path.
+- **Links that work.** Obsidian-style wikilinks by file name, `name:` or path, with `#headings`. Relative links. File paths in your notes are clickable, including WSL and Linux paths, which Lectern maps to their Windows locations. Linux paths open from Windows' default WSL distribution, unless you pick another under **WSL distribution** in Preferences.
 - **Find anything.** Quick open by name, search across the whole library, and find in the page.
 - **Made for reading.** Eight themes, five bundled fonts or any font you have, and control over size, line height and width. An outline, a reading-progress line, and a focus mode.
 - **Keeps your place.** Lectern remembers where you were in every document. When a file changes on disk it reloads in place, and back and forward work the way they do in a browser.
@@ -168,9 +167,7 @@ status: active
 | Ctrl+Alt+M | Comment on the selected text, or on the block at the top of the view |
 | F11 | Focus mode |
 | Ctrl+E | Open the document in your editor |
-| Ctrl+C | Copy the selection as it is |
-| Ctrl+Shift+C | Copy as WSL path: a selected path, relative or absolute; every path in a selected command or block; else the focused link or the document |
-| Ctrl+Shift+W | Copy as Windows path: the same, in Windows form |
+| Ctrl+Shift+C | Copy the document's path |
 | F5 or Ctrl+R | Reload |
 | Ctrl+, | Preferences |
 | Ctrl+N | New window, which lists the workspaces |
@@ -178,8 +175,6 @@ status: active
 | Esc | Close a panel, or leave focus mode |
 
 You can also drop a file on the window to open it.
-
-Up to v0.4.0, Ctrl+Shift+C copied the Windows path and Ctrl+Shift+L the WSL path. WSL comes first now, and Ctrl+Shift+L does nothing.
 
 ## Themes and fonts
 

@@ -5,21 +5,15 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use lectern_core::ipc::{
-    ConvertedPaths, EditorPref, FollowKind, FollowResult, FollowTarget, PathForm, PathForms,
-};
+use lectern_core::ipc::{EditorPref, FollowKind, FollowResult, FollowTarget};
 use lectern_core::library::doc_kind;
-use lectern_core::library::pathmap::{Mapped, CONVERT_LIMIT};
+use lectern_core::library::pathmap::Mapped;
 use lectern_core::library::scan::probe_with;
 
 use super::paths::path_string;
 use super::sync::read;
 use super::{trust, WindowState};
 use crate::shell::{self, FileKind};
-
-/// Why a selection's paths weren't converted: it is past `CONVERT_LIMIT`. The UI, which refuses
-/// such a selection itself (`ui/src/copy-path.ts`), and the fake backend say the same.
-const TOO_LONG: &str = "The selection is too long to convert.";
 
 /// What following a link comes to, before anything is launched.
 #[derive(Debug, PartialEq, Eq)]
@@ -139,41 +133,6 @@ impl WindowState {
         }
     }
 
-    /// The Windows and WSL forms of a path the user is copying: `literal`, an exact path (the open
-    /// file, a tree row, where a wikilink leads), taken as it is; else text written as a path (a
-    /// selected path, a broken link's text), its path mapped as a link is, with this window's
-    /// index, or, when relative, with its separators changed, and what surrounds the path (quotes,
-    /// a `:line`) kept. A link's own path goes through `written_forms`. Never touches the disk, so
-    /// a stalled share can't hold it up.
-    pub fn path_forms(&self, raw: &str, literal: bool) -> PathForms {
-        let mapper = self.mapper();
-        if literal {
-            return mapper.literal_forms(raw);
-        }
-        let index = self.index();
-        let index = (!index.roots.is_empty()).then_some(&*index);
-        mapper.forms(raw, index)
-    }
-
-    /// The Windows and WSL forms of the path a link was written with (`data-written`), taken as it
-    /// is: an absolute one mapped with this window's index, as the link itself is, so it is the
-    /// file the link opens; a relative one with its separators changed. Never touches the disk.
-    pub fn written_forms(&self, raw: &str) -> PathForms {
-        let index = self.index();
-        let index = (!index.roots.is_empty()).then_some(&*index);
-        self.mapper().written_forms(raw, index)
-    }
-
-    /// `text` (a selected command or block) with each path in it in `form`, mapped as
-    /// `path_forms` maps text but without the index, so its paths cost no look through the
-    /// library each; refused past `CONVERT_LIMIT`. Never touches the disk.
-    pub fn convert_paths(&self, text: &str, form: PathForm) -> Result<ConvertedPaths, String> {
-        if text.len() > CONVERT_LIMIT {
-            return Err(TOO_LONG.to_owned());
-        }
-        Ok(self.mapper().convert_paths(text, form))
-    }
-
     /// Opens a local file in the editor (VS Code, a custom command, or else Explorer), at `line`
     /// or line 1.
     pub fn open_in_editor(&self, path: &str, line: Option<u32>) -> Result<(), String> {
@@ -207,13 +166,6 @@ pub(super) fn exists_within(path: &Path, timeout: Duration) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    use lectern_core::library::{FileEntry, LibraryIndex, RootIndex};
-
-    use crate::state::sync::lock;
-    use crate::state::test_support::{fixture, profile, FakeHost};
 
     fn target(
         kind: FollowKind,
@@ -521,51 +473,5 @@ mod tests {
             plan_follow(&t, unmapped, trust_all, unchecked),
             FollowPlan::NotFound("Couldn't resolve Missing Note".to_owned())
         );
-    }
-    /// A selection's paths convert without the library: 10,000 of them, with a 50,000-file index
-    /// in the window, take no scan of it each, as moved-file recovery would.
-    #[test]
-    fn converting_a_selection_never_scans_the_library() {
-        let f = fixture(profile(&[]), FakeHost::default());
-        let files = (0..50_000)
-            .map(|i| FileEntry {
-                rel: format!("notes/n{i}/README.md"),
-                is_md: true,
-                mtime_ms: 0,
-                size: 0,
-                fm_name: None,
-                fm_status: None,
-                review_of: None,
-                review_open: None,
-                is_sidecar: false,
-            })
-            .collect();
-        let root = RootIndex::new(PathBuf::from(r"S:\Notes"), files, 0);
-        lock(&f.state.library).index = Arc::new(LibraryIndex { roots: vec![root] });
-        // Short enough to fit under the limit; absolute, so mapping one with the index would look
-        // for a moved file among all 50,000.
-        let text = vec![r"C:\a"; 10_000].join(" ");
-        assert!(text.len() <= CONVERT_LIMIT);
-        let started = Instant::now();
-        let converted = f.state.convert_paths(&text, PathForm::Wsl).unwrap();
-        let elapsed = started.elapsed();
-        assert_eq!(converted.converted, 10_000);
-        assert!(converted.text.starts_with("/mnt/c/a /mnt/c/a "));
-        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-    }
-
-    /// Past the limit, a selection is refused with the words the UI uses.
-    #[test]
-    fn a_selection_past_the_limit_is_refused() {
-        let f = fixture(profile(&[]), FakeHost::default());
-        let text = "a/b ".repeat(CONVERT_LIMIT / 4 + 1);
-        assert_eq!(
-            f.state.convert_paths(&text, PathForm::Wsl),
-            Err("The selection is too long to convert.".to_owned())
-        );
-        assert!(f
-            .state
-            .convert_paths(&text[..CONVERT_LIMIT], PathForm::Wsl)
-            .is_ok());
     }
 }

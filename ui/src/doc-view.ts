@@ -27,8 +27,7 @@ import { renderNavigatingAway } from "./welcome";
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
 const COPIED_MS = 1200;
-/** Links to a local place: a note, a file the index holds, or a path checked when followed. */
-export const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
+const LOCAL_KINDS = new Set<string>(["doc", "file", "path"] satisfies FollowKind[]);
 /** The toast when a page navigates its own frame. */
 const NAVIGATED_AWAY = "This page tried to open another page; open it from Lectern instead.";
 

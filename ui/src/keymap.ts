@@ -28,8 +28,7 @@ export type Action =
   | "toggle-outline"
   | "focus"
   | "open-editor"
-  | "copy-windows-path"
-  | "copy-wsl-path"
+  | "copy-path"
   | "reload"
   | "preferences"
   | "toggle-comments"
@@ -49,10 +48,7 @@ const CTRL: Record<string, [Action | null, Action | null]> = {
   t: [null, "toggle-theme"],
   b: ["toggle-library", null],
   e: ["open-editor", null],
-  // Ctrl+C is the browser's own copy. WSL first, as the common case: up to v0.4.0, Ctrl+Shift+C
-  // copied the Windows path and Ctrl+Shift+L the WSL path.
-  c: [null, "copy-wsl-path"],
-  w: [null, "copy-windows-path"],
+  c: [null, "copy-path"],
   // F5's twin: WebView2 would otherwise reload the whole page.
   r: ["reload", null],
   ",": ["preferences", null],
