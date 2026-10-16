@@ -48,6 +48,12 @@ impl PathMapper {
     /// that the index doesn't hold still gives way to steps 3–4, so a link written before
     /// `work/x` moved to `archive/x` finds the file behind a user mapping too.
     pub fn map(&self, raw: &str, index: Option<&LibraryIndex>) -> Mapped {
+        self.map_with(raw, index, true)
+    }
+
+    /// [`PathMapper::map`]; without `any_linux_path`, step 5 takes only a real Linux path (see
+    /// `is_linux_system_path`), as a copy does, so a URL route never becomes a path in WSL.
+    fn map_with(&self, raw: &str, index: Option<&LibraryIndex>, any_linux_path: bool) -> Mapped {
         if !is_absolute(raw) {
             return Mapped::Unresolved;
         }
@@ -68,6 +74,9 @@ impl PathMapper {
         }
         if let Some(candidate) = candidate {
             return Mapped::Unverified(candidate);
+        }
+        if !any_linux_path && !is_linux_system_path(raw) {
+            return Mapped::Unresolved;
         }
         match self.wsl_path(raw) {
             Some(path) if index.is_some_and(|ix| ix.contains(&path)) => Mapped::Verified(path),
@@ -152,10 +161,13 @@ impl PathMapper {
     ///
     /// For an absolute path, the Windows form is where [`PathMapper::map`] puts it, verified or
     /// not, so it may be the file a moved note's link finds; the WSL form is
-    /// [`PathMapper::to_wsl`] of that. A relative path (see `is_relative`) only changes its
-    /// separators: `\` in the Windows form, `/` in the WSL form. It is never resolved, since
-    /// paths in notes are often relative to somewhere else, such as a repository. Anything else,
-    /// such as a bare file name or a URL, has neither form.
+    /// [`PathMapper::to_wsl`] of that. Only a real Linux path (see `is_linux_system_path`) goes
+    /// into the WSL distribution, though: any other path starting with `/` that no mapping,
+    /// `/mnt/<x>` or the index places, such as a URL route (`/r/reports/x`), only changes its
+    /// separators, as a relative path (see `is_relative`) and a path from no drive's root
+    /// (`\api\v1`) do: `\` in the Windows form, `/` in the WSL form. Such a path is never
+    /// resolved, since paths in notes are often relative to somewhere else, such as a repository.
+    /// Anything else, such as a bare file name or a URL, has neither form.
     pub fn forms(&self, raw: &str, index: Option<&LibraryIndex>) -> PathForms {
         let span = bare_span(raw);
         let forms = self.bare_forms(&raw[span.clone()], index);
@@ -169,9 +181,9 @@ impl PathMapper {
     /// Both forms of `path` as a link was written with it (`data-written`). The renderer has
     /// already decoded it and dropped its query, fragment and line, so nothing more is trimmed: a
     /// `#` or a quote in it is part of a name. An absolute one maps as [`PathMapper::forms`] maps
-    /// it, with the index, so it is the file the link opens; a relative one only changes its
-    /// separators, and a bare file name, which has none, is the same in both forms. It is never
-    /// resolved against the note.
+    /// it, with the index, so it is the file the link opens; a relative one, a route and one from
+    /// no drive's root only change their separators, and a bare file name, which has none, is the
+    /// same in both forms. It is never resolved against the note.
     pub fn written_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
         if !path.is_empty() && !path.contains(['/', '\\']) {
             return PathForms {
@@ -182,20 +194,22 @@ impl PathMapper {
         self.bare_forms(path, index)
     }
 
-    /// The forms of a path with nothing around it: a relative one with its separators changed, an
-    /// absolute one where [`PathMapper::map`] puts it.
+    /// The forms of a path with nothing around it: an absolute one where [`PathMapper::map`] puts
+    /// it, though only a real Linux path goes into the WSL distribution; a relative one, one from
+    /// no drive's root, and a route nothing maps with their separators changed.
     fn bare_forms(&self, path: &str, index: Option<&LibraryIndex>) -> PathForms {
-        if is_relative(path) {
-            return PathForms {
-                windows: Some(path.replace('/', "\\")),
-                wsl: Some(path.replace('\\', "/")),
-            };
-        }
-        let windows = match self.map(path, index) {
-            Mapped::Verified(path) | Mapped::Unverified(path) => Some(path),
-            Mapped::Unresolved => None,
+        let flipped = || PathForms {
+            windows: Some(path.replace('/', "\\")),
+            wsl: Some(path.replace('\\', "/")),
         };
-        self.both_forms(windows)
+        if is_relative(path) || is_from_root(path) {
+            return flipped();
+        }
+        match self.map_with(path, index, false) {
+            Mapped::Verified(path) | Mapped::Unverified(path) => self.both_forms(Some(path)),
+            Mapped::Unresolved if path.starts_with('/') && !is_linux_system_path(path) => flipped(),
+            Mapped::Unresolved => self.both_forms(None),
+        }
     }
 
     /// `text` with each of its path tokens (see [`path_tokens`]) in `form`, by the rules of
@@ -286,6 +300,27 @@ fn is_relative(path: &str) -> bool {
         && path
             .find(['/', '\\'])
             .is_some_and(|separator| !path[..separator].contains(':'))
+}
+
+/// A path from the root of no drive, `\api\v1\users`: one `\` first, not a UNC path's two.
+fn is_from_root(path: &str) -> bool {
+    path.starts_with('\\') && !path.starts_with(r"\\")
+}
+
+/// The top-level folders of a Linux system. Only a path under one of them is a real Linux path,
+/// which a copy places in the WSL distribution.
+const LINUX_TOP_FOLDERS: &[&str] = &[
+    "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt", "opt",
+    "proc", "root", "run", "sbin", "snap", "srv", "sys", "tmp", "usr", "var",
+];
+
+/// A real Linux path: absolute, under one of `LINUX_TOP_FOLDERS` (exactly, letter case and all).
+/// `/home/me/x.rb` is one; a URL route such as `/r/reports/x` is not.
+fn is_linux_system_path(path: &str) -> bool {
+    path.starts_with('/')
+        && components(path)
+            .next()
+            .is_some_and(|folder| LINUX_TOP_FOLDERS.contains(&folder))
 }
 
 /// The paths in `text`, as byte ranges, for converting them where they are (see

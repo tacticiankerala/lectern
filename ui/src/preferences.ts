@@ -2,11 +2,12 @@
 // libraries' folders (add, remove, retry) and its theme, the shared one ("Same as other windows")
 // or its own mode and light and dark themes. A blank window has no such part. All windows: folder
 // status badges, review comments on or off, how many recent files the header's menu lists (5 to
-// 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the
-// editor command, automatic update checks, and the workspaces, to rename or delete (not one open
-// in a window). Then the version. Settings changed elsewhere show at once in the switches, the
-// theme and the path mappings, unless the mappings were edited here: those are what closing
-// saves. Loaded on first use.
+// 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the WSL
+// distribution Linux paths go into (listed each time Preferences opens, and hidden without WSL),
+// the editor command, automatic update checks, and the workspaces, to rename or delete (not one
+// open in a window). Then the version. Settings changed elsewhere show at once in the switches,
+// the theme, the WSL distribution and the path mappings, unless the mappings were edited here:
+// those are what closing saves. Loaded on first use.
 import { h } from "./dom";
 import type { EditorPref } from "./generated/EditorPref";
 import type { HtmlPages } from "./generated/HtmlPages";
@@ -17,6 +18,7 @@ import type { SettingsPatch } from "./generated/SettingsPatch";
 import type { ThemeId } from "./generated/ThemeId";
 import type { ThemeMode } from "./generated/ThemeMode";
 import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
+import type { WslDistros } from "./generated/WslDistros";
 import { RECENT_IN_MENU } from "./recent-files";
 import { THEMES } from "./themes";
 
@@ -38,6 +40,8 @@ export interface PreferencesHost {
   deleteWorkspace(id: string): void;
   /** Gives this window's workspace a theme of its own, or has it follow the shared one. */
   setOwnTheme(own: boolean): void;
+  /** Windows' default WSL distribution and the installed ones; both empty without WSL. */
+  wslDistros(): Promise<WslDistros>;
 }
 
 const MODES: [ThemeMode, string][] = [
@@ -77,6 +81,11 @@ export class Preferences {
   private mappings: MappingRow[] = [];
   /** The mapping rows were edited here since they last matched the settings. */
   private mappingsEdited = false;
+  /** The WSL distribution section, shown once the distributions listed hold one. */
+  private readonly wslSection: HTMLElement;
+  private readonly wslDistro: HTMLSelectElement;
+  /** The WSL distributions as last listed; null until they are. */
+  private distros: WslDistros | null = null;
   private readonly auto: HTMLInputElement;
   private readonly custom: HTMLInputElement;
   private readonly command: HTMLInputElement;
@@ -156,6 +165,18 @@ export class Preferences {
       this.mappingsEdited = true;
       this.addMappingRow({ from: "", to: "" }).from.focus();
     });
+
+    this.wslDistro = h("select", { name: "lx-wsl-distro", "aria-label": "WSL distribution" });
+    // An empty value is Windows' default.
+    this.wslDistro.addEventListener("change", () => {
+      this.host.update({ wslDistro: this.wslDistro.value });
+    });
+    this.wslSection = section(
+      "WSL distribution",
+      "Linux paths in notes, such as /home/me/notes, open from and copy as paths in this distribution.",
+      select(this.wslDistro),
+    );
+    this.wslSection.hidden = true;
 
     this.auto = h("input", { type: "radio", name: "lx-editor", value: "auto" });
     this.custom = h("input", { type: "radio", name: "lx-editor", value: "custom" });
@@ -272,6 +293,7 @@ export class Preferences {
         this.mappingList,
         addMapping,
       ),
+      this.wslSection,
       section(
         "Editor",
         "Open in editor (Ctrl+E) uses VS Code when it is installed, else the file's default app.",
@@ -326,6 +348,7 @@ export class Preferences {
     this.syncSettings();
     this.syncWorkspaces();
     this.refresh();
+    void this.listDistros();
     this.backdrop.hidden = false;
     this.dialog.querySelector<HTMLElement>(".prefs-close")?.focus();
   }
@@ -366,6 +389,7 @@ export class Preferences {
     }
     this.lightTheme.value = s.lightTheme;
     this.darkTheme.value = s.darkTheme;
+    this.renderDistros();
     // Mappings changed elsewhere replace rows that weren't edited here.
     if (
       !this.mappingsEdited &&
@@ -527,6 +551,41 @@ export class Preferences {
         );
       }),
     );
+  }
+
+  /** Lists the WSL distributions afresh, as they may have changed since Preferences last opened. */
+  private async listDistros(): Promise<void> {
+    try {
+      this.distros = await this.host.wslDistros();
+    } catch {
+      this.distros = { default: null, installed: [] };
+    }
+    this.renderDistros();
+  }
+
+  /**
+   * The WSL distribution picker, from the distributions listed and the setting: Windows' default
+   * first, then each installed one, and the one chosen, should it be installed no longer. Hidden
+   * without WSL.
+   */
+  private renderDistros(): void {
+    if (this.distros === null) {
+      return;
+    }
+    const { default: windowsDefault, installed } = this.distros;
+    const chosen = this.host.settings().wslDistro ?? "";
+    const gone = chosen !== "" && !installed.includes(chosen);
+    this.wslDistro.replaceChildren(
+      h(
+        "option",
+        { value: "" },
+        windowsDefault === null ? "Windows default" : `Windows default (${windowsDefault})`,
+      ),
+      ...installed.map((name) => h("option", { value: name }, name)),
+      ...(gone ? [h("option", { value: chosen }, `${chosen} (not installed)`)] : []),
+    );
+    this.wslDistro.value = chosen;
+    this.wslSection.hidden = installed.length === 0;
   }
 
   /** The mapping rows for `mappings`, none of them edited. */

@@ -1,6 +1,6 @@
 //! Windows integrations: the process start time, the boot mutex that tells a second launch apart,
 //! title-bar colours through DWM, keeping a reopened window behind another, DirectWrite font
-//! families, the default WSL distribution and reading the current user's registry.
+//! families, the WSL distributions and reading the current user's registry.
 //! Handing files to the shell or an editor is in `shell.rs`.
 //!
 //! Lectern targets Windows only, so this module is compiled unconditionally.
@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use windows::core::{w, BOOL, HSTRING, PCWSTR};
+use windows::core::{w, BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL, E_INVALIDARG, FILETIME, HWND,
 };
@@ -19,7 +19,10 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
-use windows::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    RRF_RT_REG_SZ,
+};
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
 };
@@ -62,13 +65,89 @@ pub fn process_start_unix_ms() -> Option<f64> {
 /// The default WSL distribution's name, from `HKCU\…\Lxss`: `DefaultDistribution` holds a GUID
 /// whose subkey holds `DistributionName`. `None` when WSL isn't installed.
 pub fn wsl_default_distro() -> Option<String> {
-    let guid = registry_string(HKEY_CURRENT_USER, LXSS_KEY, "DefaultDistribution")?;
+    default_distro_under(LXSS_KEY)
+}
+
+/// Every installed WSL distribution's name, from the `DistributionName` of each subkey of
+/// `HKCU\…\Lxss`, sorted case-insensitively. Empty when WSL isn't installed.
+pub fn installed_wsl_distros() -> Vec<String> {
+    distros_under(LXSS_KEY)
+}
+
+/// `wsl_default_distro` of the registration key `lxss` under `HKEY_CURRENT_USER`.
+fn default_distro_under(lxss: &str) -> Option<String> {
+    let guid = registry_string(HKEY_CURRENT_USER, lxss, "DefaultDistribution")?;
+    distro_name(lxss, &guid)
+}
+
+/// `installed_wsl_distros` of the registration key `lxss` under `HKEY_CURRENT_USER`.
+fn distros_under(lxss: &str) -> Vec<String> {
+    let mut names: Vec<String> = subkey_names(lxss)
+        .iter()
+        .filter_map(|guid| distro_name(lxss, guid))
+        .collect();
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    names.dedup();
+    names
+}
+
+/// The name of the distribution registered under `lxss\<guid>`; `None` for a subkey without one.
+fn distro_name(lxss: &str, guid: &str) -> Option<String> {
     registry_string(
         HKEY_CURRENT_USER,
-        &format!(r"{LXSS_KEY}\{guid}"),
+        &format!(r"{lxss}\{guid}"),
         "DistributionName",
     )
     .filter(|name| !name.is_empty())
+}
+
+/// The names of the subkeys of `HKEY_CURRENT_USER\<subkey>`; none when it can't be opened.
+fn subkey_names(subkey: &str) -> Vec<String> {
+    let mut key = HKEY::default();
+    // SAFETY: the string outlives the call and `key` is a live local.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(subkey),
+            None,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    // A key's name is at most 255 characters.
+    let mut buf = [0u16; 256];
+    for index in 0u32.. {
+        let mut len = buf.len() as u32;
+        // SAFETY: `key` is open, and `len` is the size of `buf`, which the call fills.
+        let status = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                Some(PWSTR(buf.as_mut_ptr())),
+                &mut len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        // `ERROR_NO_MORE_ITEMS` once every subkey is listed.
+        if status != ERROR_SUCCESS {
+            break;
+        }
+        names.push(String::from_utf16_lossy(&buf[..len as usize]));
+    }
+    // SAFETY: `key` was opened above and is closed once.
+    let _ = unsafe { RegCloseKey(key) };
+    names
 }
 
 /// A `REG_SZ` value under `HKEY_CURRENT_USER`, or `None` when the key or value is missing or of
@@ -314,6 +393,9 @@ unsafe fn localized(strings: &IDWriteLocalizedStrings, locale: &[u16]) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Registry::{
+        RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
     #[test]
     fn colorref_is_0x00bbggrr() {
         assert_eq!(parse_colorref("#1e1f22"), Some(0x0022_1f1e));
@@ -349,6 +431,81 @@ mod tests {
             started <= now && now - started < 600_000.0,
             "{started} vs {now}"
         );
+    }
+
+    /// A key of its own under `HKEY_CURRENT_USER\Software` for a test, deleted with everything
+    /// under it when dropped.
+    struct TestKey(String);
+
+    impl TestKey {
+        fn new(name: &str) -> Self {
+            Self(format!(
+                r"Software\Lectern-tests-{name}-{}",
+                std::process::id()
+            ))
+        }
+
+        /// Sets the `REG_SZ` value `value` of the key's `subkey` (the key itself when empty).
+        fn set(&self, subkey: &str, value: &str, data: &str) {
+            let path = if subkey.is_empty() {
+                self.0.clone()
+            } else {
+                format!(r"{}\{subkey}", self.0)
+            };
+            let mut key = HKEY::default();
+            let bytes: Vec<u8> = data
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            // SAFETY: the strings outlive the calls, `key` is a live local, and the key is closed
+            // once its value is set.
+            unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    &HSTRING::from(path),
+                    None,
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_WRITE,
+                    None,
+                    &mut key,
+                    None,
+                )
+                .ok()
+                .unwrap();
+                RegSetValueExW(key, &HSTRING::from(value), None, REG_SZ, Some(&bytes))
+                    .ok()
+                    .unwrap();
+                let _ = RegCloseKey(key);
+            }
+        }
+    }
+
+    impl Drop for TestKey {
+        fn drop(&mut self) {
+            // SAFETY: a plain call with a string that outlives it.
+            let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(self.0.as_str())) };
+        }
+    }
+
+    /// Each subkey of `Lxss` registers a distribution under its `DistributionName`; the default
+    /// is the one whose subkey `DefaultDistribution` names.
+    #[test]
+    fn wsl_distros_are_the_lxss_subkeys_names() {
+        let lxss = TestKey::new("lxss");
+        lxss.set("{b0}", "DistributionName", "Ubuntu");
+        lxss.set("{a1}", "DistributionName", "debian-dev");
+        // A subkey with no name is no distribution.
+        lxss.set("{c2}", "BasePath", r"C:\Users\me\wsl");
+        lxss.set("", "DefaultDistribution", "{b0}");
+        assert_eq!(distros_under(&lxss.0), ["debian-dev", "Ubuntu"]);
+        assert_eq!(default_distro_under(&lxss.0).as_deref(), Some("Ubuntu"));
+        drop(lxss);
+        // Without WSL, there are none.
+        let missing = TestKey::new("no-lxss");
+        assert!(distros_under(&missing.0).is_empty());
+        assert_eq!(default_distro_under(&missing.0), None);
     }
 
     #[test]

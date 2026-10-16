@@ -9,7 +9,7 @@ use lectern_core::ipc::{
     ConvertedPaths, DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure,
     OpenError, OpenErrorKind, OpenResult, OpenWhere, PageLoads, PathForm, PathForms, RecentEntry,
     RootState, SettingsPatch, SettingsSnapshot, StartupPayload, UserOpen, WorkspaceOutcome,
-    WorkspaceSummary,
+    WorkspaceSummary, WslDistros,
 };
 use lectern_core::library::pathmap::{path_tokens, PathMapper, CONVERT_LIMIT};
 use lectern_core::library::{document_extensions, DocKind, MARKDOWN_EXTENSIONS};
@@ -86,6 +86,7 @@ fn ts_bindings_exported() {
         "FrameFocus",
         "FrameKey",
         "PageBlock",
+        "WslDistros",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -548,6 +549,25 @@ fn path_forms_are_two_optional_strings() {
     );
 }
 
+/// The *WSL distribution* setting is a name or null (Windows' default); the distributions to
+/// choose from are Windows' default and every installed one.
+#[test]
+fn wsl_distros_are_the_default_and_the_installed_names() {
+    assert!(decl::<SettingsPatch>().contains("wslDistro?: string | null,"));
+    let decl = decl::<WslDistros>();
+    assert!(decl.starts_with("type WslDistros = {"), "{decl}");
+    assert!(decl.contains("default: string | null,"), "{decl}");
+    assert!(decl.contains("installed: Array<string>,"), "{decl}");
+    assert_eq!(
+        serde_json::to_value(WslDistros {
+            default: Some("Ubuntu".to_owned()),
+            installed: vec!["Ubuntu".to_owned(), "Debian".to_owned()],
+        })
+        .unwrap(),
+        json!({"default": "Ubuntu", "installed": ["Ubuntu", "Debian"]})
+    );
+}
+
 #[test]
 fn converted_paths_are_the_text_and_two_counts_for_a_form() {
     assert_eq!(decl::<PathForm>(), r#"type PathForm = "windows" | "wsl";"#);
@@ -595,6 +615,9 @@ fn path_token_vectors_exported() {
         r#"see (https://example.com/a) and a/b, "S:\Notes\Meeting #3.md#agenda""#,
         "echo hello >/mnt/c/output.txt 2>/mnt/c/err.log",
         r#"cat <spec/a.txt |grep x &>/tmp/a.log >>logs/b.log ;(cd app/x && ls) >"/mnt/s/My Vault/x" ">/x" a|b/c 2>&1"#,
+        "curl localhost/r/a && cat /home/me/x",
+        "open /r/reports/admin/writing_benchmark /Home/me /mnt/data/x / //nas/share",
+        r"GET \api\v1\users",
         "",
     ];
     let mapper = PathMapper {

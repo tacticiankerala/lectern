@@ -168,6 +168,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::remove_recent,
             commands::set_chrome_colors,
             commands::list_system_fonts,
+            commands::list_wsl_distros,
             commands::perf_mark,
             commands::show_window,
             commands::check_update,

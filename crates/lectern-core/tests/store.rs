@@ -71,6 +71,8 @@ fn settings_defaults_match_spec() {
     assert!(matches!(s.html_pages, HtmlPages::Full));
     // The recent files menu lists 10.
     assert_eq!(s.recent_in_menu, 10);
+    // Linux paths go into Windows' default WSL distribution.
+    assert_eq!(s.wsl_distro, None);
 }
 
 #[test]
@@ -171,6 +173,34 @@ fn recent_in_menu_range_is_5_to_20() {
         },
     );
     assert_eq!(s.recent_in_menu, 5);
+}
+
+/// A distribution's name is kept as chosen; an empty one, which is how a change asks for Windows'
+/// default (a change's `null` leaves a setting as it is), means none, as does one in a file edited
+/// by hand.
+#[test]
+fn wsl_distro_is_a_name_or_windows_default() {
+    let (mut s, mut ws) = (Settings::default(), Workspace::default());
+    let choose = |s: &mut Settings, ws: &mut Workspace, name: Option<&str>| {
+        apply(
+            s,
+            ws,
+            SettingsPatch {
+                wsl_distro: name.map(str::to_owned),
+                ..Default::default()
+            },
+        );
+    };
+    choose(&mut s, &mut ws, Some("Debian"));
+    assert_eq!(s.wsl_distro.as_deref(), Some("Debian"));
+    // A change without it leaves it as it is.
+    choose(&mut s, &mut ws, None);
+    assert_eq!(s.wsl_distro.as_deref(), Some("Debian"));
+    choose(&mut s, &mut ws, Some(""));
+    assert_eq!(s.wsl_distro, None);
+    let mut edited: Settings = serde_json::from_str(r#"{"wslDistro": ""}"#).unwrap();
+    edited.clamp();
+    assert_eq!(edited.wsl_distro, None);
 }
 
 #[test]
@@ -291,6 +321,7 @@ fn settings_json_shape() {
     assert_eq!(j["commentsVisible"], true);
     assert_eq!(j["htmlPages"], "full");
     assert_eq!(j["recentInMenu"], 10);
+    assert_eq!(j["wslDistro"], serde_json::Value::Null);
     assert_eq!(j["libraryRoots"], serde_json::json!([]));
     // Exactly 1.65 both as a JSON value and as text (an f32 would widen to 1.649999976158142).
     assert_eq!(j["lineHeight"].as_f64(), Some(1.65));
@@ -338,6 +369,8 @@ fn settings_missing_fields_default_and_unknown_fields_are_ignored() {
     assert!(matches!(s.html_pages, HtmlPages::Full));
     // And lists 10 recent files in the menu.
     assert_eq!(s.recent_in_menu, 10);
+    // And maps Linux paths into Windows' default WSL distribution.
+    assert_eq!(s.wsl_distro, None);
 }
 
 #[test]
@@ -357,12 +390,13 @@ fn html_pages_round_trip_in_lowercase() {
 #[test]
 fn settings_patch_accepts_a_partial_object() {
     let p: SettingsPatch = serde_json::from_str(
-        r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null, "sidebarFontSize": 15, "recentInMenu": 7}"#,
+        r#"{"fontSize": 22, "lightTheme": "sepia", "codeWrap": null, "sidebarFontSize": 15, "recentInMenu": 7, "wslDistro": "Debian"}"#,
     )
     .unwrap();
     assert_eq!(p.font_size, Some(22));
     assert_eq!(p.sidebar_font_size, Some(15));
     assert_eq!(p.recent_in_menu, Some(7));
+    assert_eq!(p.wsl_distro.as_deref(), Some("Debian"));
     assert!(matches!(p.light_theme, Some(ThemeId::Sepia)));
     assert!(p.code_wrap.is_none());
     assert!(p.theme_mode.is_none());

@@ -199,7 +199,8 @@ pub(super) fn all_roots(workspaces: &Workspaces) -> Vec<String> {
         .collect()
 }
 
-/// The path mapper for `settings`: its prefix mappings, plus the WSL fallback.
+/// The path mapper for `settings`: its prefix mappings, plus the WSL fallback into the
+/// distribution the settings name, else into Windows' default, `wsl_distro`.
 pub fn mapper_for(settings: &Settings, wsl_distro: Option<String>) -> PathMapper {
     PathMapper {
         mappings: settings
@@ -207,13 +208,32 @@ pub fn mapper_for(settings: &Settings, wsl_distro: Option<String>) -> PathMapper
             .iter()
             .map(|m| (m.from.clone(), PathBuf::from(&m.to)))
             .collect(),
-        wsl_distro,
+        wsl_distro: settings.wsl_distro.clone().or(wsl_distro),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mapper goes into the WSL distribution the settings name, else into Windows' default.
+    #[test]
+    fn the_mapper_takes_the_chosen_distro_else_windows_default() {
+        let ubuntu = Some("Ubuntu".to_owned());
+        let debian = Settings {
+            wsl_distro: Some("Debian".to_owned()),
+            ..Settings::default()
+        };
+        let distro =
+            |settings: &Settings, default: Option<String>| mapper_for(settings, default).wsl_distro;
+        assert_eq!(distro(&debian, ubuntu.clone()).as_deref(), Some("Debian"));
+        assert_eq!(distro(&debian, None).as_deref(), Some("Debian"));
+        assert_eq!(
+            distro(&Settings::default(), ubuntu).as_deref(),
+            Some("Ubuntu")
+        );
+        assert_eq!(distro(&Settings::default(), None), None);
+    }
 
     #[test]
     fn state_json_keeps_the_core_fields_beside_the_window() {

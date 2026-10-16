@@ -210,6 +210,8 @@ pub struct App {
     /// The reading positions, shared by every window.
     state: Mutex<StateFile>,
     notice: Mutex<Option<String>>,
+    /// Windows' default WSL distribution, read at startup: the mapper's when the settings name
+    /// none.
     wsl_distro: Option<String>,
     mapper: RwLock<Arc<PathMapper>>,
     warm: Arc<StartupWarmUp>,
@@ -580,8 +582,8 @@ impl App {
         }
     }
 
-    /// The path mappings changed: a link or image any window resolved may point elsewhere now,
-    /// so every window's document is rendered again.
+    /// The path mappings or the WSL distribution changed: a link or image any window resolved may
+    /// point elsewhere now, so every window's document is rendered again.
     fn remap(&self) {
         let mapper = mapper_for(&read(&self.settings), self.wsl_distro.clone());
         *write(&self.mapper) = Arc::new(mapper);
@@ -590,6 +592,12 @@ impl App {
         for window in self.windows() {
             window.refresh_current_now();
         }
+    }
+
+    /// Windows' default WSL distribution, as read at startup: the one the mapper uses when the
+    /// settings name none.
+    pub fn wsl_default_distro(&self) -> Option<String> {
+        self.wsl_distro.clone()
     }
 
     pub fn perf_mark(&self, name: &str, ms: Option<f64>) {
@@ -862,16 +870,18 @@ impl WindowState {
 
     /// Applies a settings change made in this window: the libraries, the layout and (when the
     /// workspace has its own) the theme go to its workspace (a blank window keeps the layout for
-    /// itself), the rest to every window's settings. A change of the *HTML pages* setting has
-    /// every window load the page it shows again, under the new policy. Returns the window's
-    /// settings, with their revision. A retired state's UI is gone, and changes nothing.
+    /// itself), the rest to every window's settings. A change of the path mappings or the WSL
+    /// distribution rebuilds the mapper, and every window renders its document again. A change of
+    /// the *HTML pages* setting has every window load the page it shows again, under the new
+    /// policy. Returns the window's settings, with their revision. A retired state's UI is gone,
+    /// and changes nothing.
     pub fn set_settings(self: &Arc<Self>, patch: SettingsPatch) -> SettingsSnapshot {
         let roots_changed = patch.library_roots.is_some();
-        let mappings_changed = patch.path_mappings.is_some();
+        let mapper_changed = patch.path_mappings.is_some() || patch.wsl_distro.is_some();
         let Some((snapshot, html_pages)) = self.app.apply_settings(self, patch) else {
             return self.snapshot();
         };
-        if mappings_changed {
+        if mapper_changed {
             self.app.remap();
         }
         // A page keeps the policy it was served under: every window loads its page again.
@@ -1174,6 +1184,52 @@ mod tests {
             mapped.contains(r#"data-target="S:\Notes\My Vault\x.md""#),
             "{mapped}"
         );
+    }
+
+    /// Choosing a WSL distribution rebuilds the mapper at once, as a new mapping does: copies and
+    /// the open document's links go into it, and back into Windows' default when it's cleared.
+    #[test]
+    fn choosing_a_wsl_distro_remaps_at_once() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let doc = dir.file("vault/a.md", "[x](/home/me/x.md)\n");
+        let ubuntu_default = Profile {
+            wsl_distro: Some("Ubuntu".to_owned()),
+            ..profile(&[&root])
+        };
+        let f = fixture_in(dir, ubuntu_default, FakeHost::default());
+        f.state.window_shown();
+        wait_until("the root is indexed", || settled(&f, &root));
+        let html = |f: &Fixture| match f.state.open_document(&path_string(&doc)) {
+            OpenResult::Ok { doc } => doc.html,
+            OpenResult::Err { error } => panic!("{}", error.message),
+        };
+        let copied = |f: &Fixture| f.state.path_forms("/home/me/x.md", false).windows;
+        let ubuntu = r"\\wsl.localhost\Ubuntu\home\me\x.md";
+        let debian = r"\\wsl.localhost\Debian\home\me\x.md";
+        assert!(html(&f).contains(&format!(r#"data-target="{ubuntu}""#)));
+        assert_eq!(copied(&f).as_deref(), Some(ubuntu));
+        let choose = |f: &Fixture, name: &str| {
+            f.state.set_settings(SettingsPatch {
+                wsl_distro: Some(name.to_owned()),
+                ..SettingsPatch::default()
+            })
+        };
+        let before = f.host.doc_changes();
+        assert_eq!(
+            choose(&f, "Debian").settings.wsl_distro.as_deref(),
+            Some("Debian")
+        );
+        assert_eq!(f.host.doc_changes(), before + 1);
+        assert_eq!(copied(&f).as_deref(), Some(debian));
+        let mapped = html(&f);
+        assert!(
+            mapped.contains(&format!(r#"data-target="{debian}""#)),
+            "{mapped}"
+        );
+        // Windows' default again.
+        assert_eq!(choose(&f, "").settings.wsl_distro, None);
+        assert_eq!(copied(&f).as_deref(), Some(ubuntu));
     }
 
     #[test]

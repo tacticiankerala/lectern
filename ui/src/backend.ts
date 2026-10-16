@@ -23,6 +23,7 @@ import type { UpdateInfo } from "./generated/UpdateInfo";
 import type { UserOpen } from "./generated/UserOpen";
 import type { WorkspaceOutcome } from "./generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "./generated/WorkspaceSummary";
+import type { WslDistros } from "./generated/WslDistros";
 
 export type BackendEvent =
   | "doc-changed"
@@ -92,6 +93,11 @@ export interface Backend {
   savePosition(path: string, position: SavedPosition): Promise<void>;
   setChromeColors(bg: string, fg: string, dark: boolean): Promise<void>;
   listSystemFonts(): Promise<string[]>;
+  /**
+   * The WSL distributions for the *WSL distribution* setting: Windows' default, which a null
+   * setting stands for, and every installed one. Both empty without WSL.
+   */
+  listWslDistros(): Promise<WslDistros>;
   /**
    * Asks GitHub Releases for a newer Lectern. `automatic`: the check after startup, which then
    * runs no more this session (`StartupPayload.primary`).

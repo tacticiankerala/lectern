@@ -115,6 +115,9 @@ pub struct Settings {
     pub html_pages: HtmlPages,
     /// How many recent files the header's recent files menu lists, 5–20 (10 by default).
     pub recent_in_menu: u8,
+    /// The WSL distribution a copied Linux path goes into (`\\wsl.localhost\<name>\…`), and a
+    /// link to one opens in; `None` for Windows' default.
+    pub wsl_distro: Option<String>,
 }
 
 /// A change to some settings; absent fields are left as they are.
@@ -145,6 +148,20 @@ pub struct SettingsPatch {
     pub comments_visible: Option<bool>,
     pub html_pages: Option<HtmlPages>,
     pub recent_in_menu: Option<u8>,
+    /// A distribution's name, or `""` for Windows' default: `null` here leaves it as it is.
+    pub wsl_distro: Option<String>,
+}
+
+/// The WSL distributions Preferences offers for the *WSL distribution* setting.
+#[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WslDistros {
+    /// Windows' default distribution, which the setting's `None` stands for; `None` when WSL isn't
+    /// installed.
+    pub default: Option<String>,
+    /// Every installed distribution's name; empty when WSL isn't installed.
+    pub installed: Vec<String>,
 }
 
 /// A window's settings as a command answers or `settings-changed` carries them, with the revision

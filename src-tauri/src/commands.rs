@@ -8,7 +8,7 @@ use std::sync::Arc;
 use lectern_core::ipc::{
     Candidate, ConvertedPaths, FollowResult, FollowTarget, FrameFocus, LibraryPayload, OpenResult,
     OpenWhere, PathForm, PathForms, RecentEntry, SavedPosition, SettingsPatch, SettingsSnapshot,
-    StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary,
+    StartupPayload, UpdateInfo, UserOpen, WorkspaceOutcome, WorkspaceSummary, WslDistros,
 };
 use lectern_core::review::ops::ReviewOp;
 use lectern_core::review::text::PageBlock;
@@ -286,6 +286,17 @@ pub async fn list_system_fonts() -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(win::system_font_families)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// The WSL distributions Preferences offers: Windows' default, the one the mapper uses when the
+/// settings name none (read at startup), and every installed one, read now.
+#[tauri::command]
+pub async fn list_wsl_distros(state: Shared<'_>) -> Result<WslDistros, String> {
+    let default = state.wsl_default_distro();
+    let installed = tauri::async_runtime::spawn_blocking(win::installed_wsl_distros)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(WslDistros { default, installed })
 }
 
 /// `first-paint` also quits when Lectern was started with `--exit-after-paint`. The perf log is

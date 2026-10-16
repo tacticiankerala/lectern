@@ -388,6 +388,7 @@ pub fn apply_patch(
         comments_visible,
         html_pages,
         recent_in_menu,
+        wsl_distro,
     } = patch;
     let mut effect = PatchEffect::default();
     let (layout, changed) = match shown {
@@ -426,6 +427,8 @@ pub fn apply_patch(
     *changed |= set(&mut shared.review_comments, review_comments);
     *changed |= set(&mut shared.html_pages, html_pages);
     *changed |= set(&mut shared.recent_in_menu, recent_in_menu);
+    // `""`, Windows' default, becomes `None` as the settings are clamped.
+    *changed |= set(&mut shared.wsl_distro, wsl_distro.map(Some));
     shared.clamp();
     effect
 }

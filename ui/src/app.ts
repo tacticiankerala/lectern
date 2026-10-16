@@ -98,6 +98,7 @@ export const DEFAULT_SETTINGS: Settings = {
   commentsVisible: true,
   htmlPages: "full",
   recentInMenu: 10,
+  wslDistro: null,
 };
 
 /** How long a settings change waits for more before it is saved, when asked to. */

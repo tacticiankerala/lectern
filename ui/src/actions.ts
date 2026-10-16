@@ -404,6 +404,7 @@ export class Actions {
       renameWorkspace: (id, name) => workspaces.rename(id, name),
       deleteWorkspace: (id) => void workspaces.remove(id),
       setOwnTheme: (own) => void workspaces.setOwnTheme(own),
+      wslDistros: () => this.app.backend.listWslDistros(),
     });
     this.closeOverlays(this.preferences);
     this.preferences.open();

@@ -835,6 +835,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
             review_comments: Some(false),
             html_pages: Some(HtmlPages::Static),
             recent_in_menu: Some(99),
+            wsl_distro: Some("Debian".to_owned()),
             ..SettingsPatch::default()
         },
     );
@@ -860,6 +861,7 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
     assert!(!shared.review_comments);
     assert_eq!(shared.html_pages, HtmlPages::Static);
     assert_eq!(shared.recent_in_menu, 20);
+    assert_eq!(shared.wsl_distro.as_deref(), Some("Debian"));
 }
 
 // Open routing.

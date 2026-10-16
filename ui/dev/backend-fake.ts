@@ -24,8 +24,10 @@
 //
 // A path's Windows and WSL forms follow core's rules for drives, `/mnt/<x>`, WSL shares, Linux
 // paths and the settings' mappings from a Linux folder, for exact paths and for text (a relative
-// one flipping its separators), with Ubuntu as the WSL distribution, but no mappings from a
-// Windows path; so does converting each path in a selection.
+// one, a route such as `/r/x` and one from no drive's root flipping their separators), but no
+// mappings from a Windows path; so does converting each path in a selection. Linux paths go into
+// the WSL distribution the settings choose, else Windows' default: of the two installed (Ubuntu
+// and Debian, `wslDistros`), Ubuntu.
 //
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
@@ -82,6 +84,7 @@ import type { UpdateInfo } from "../src/generated/UpdateInfo";
 import type { UserOpen } from "../src/generated/UserOpen";
 import type { WorkspaceOutcome } from "../src/generated/WorkspaceOutcome";
 import type { WorkspaceSummary } from "../src/generated/WorkspaceSummary";
+import type { WslDistros } from "../src/generated/WslDistros";
 import { fakeBridgeKey } from "./page-serving.mjs";
 
 export interface Fixtures {
@@ -557,8 +560,42 @@ function wslPath(path: string): string | null {
     : null;
 }
 
-/** The WSL distribution the fake maps Linux paths through, as `\\wsl.localhost\<distro>\…`. */
-const FAKE_DISTRO = "Ubuntu";
+/** The top-level folders of a Linux system, as core lists them (`LINUX_TOP_FOLDERS`). */
+const LINUX_TOP_FOLDERS = new Set([
+  "bin",
+  "boot",
+  "dev",
+  "etc",
+  "home",
+  "lib",
+  "lib32",
+  "lib64",
+  "libx32",
+  "media",
+  "mnt",
+  "opt",
+  "proc",
+  "root",
+  "run",
+  "sbin",
+  "snap",
+  "srv",
+  "sys",
+  "tmp",
+  "usr",
+  "var",
+]);
+
+/** Core's `is_linux_system_path`: `/…` under one of `LINUX_TOP_FOLDERS`, such as `/home/me`. */
+function isLinuxSystemPath(path: string): boolean {
+  const first = path.split(/[\\/]/).find((part) => part !== "");
+  return path.startsWith("/") && first !== undefined && LINUX_TOP_FOLDERS.has(first);
+}
+
+/** Core's `is_from_root`: one `\` first, not a UNC path's two (`\api\v1`). */
+function isFromRoot(path: string): boolean {
+  return path.startsWith("\\") && !path.startsWith("\\\\");
+}
 
 /**
  * Where in `raw` the path is, as core's `bare_span` finds it: trimmed of whitespace, quotes and
@@ -640,18 +677,24 @@ function underMapping(
  * As core's `PathMapper::forms` and `literal_forms`, without the index. Text (`literal` false) has
  * its path converted by itself, the whitespace, quotes and backticks around it and a trailing
  * `#anchor` (after a file name with an extension), `:line` or `#Lline` kept as they are; an exact
- * path is taken as it is. A relative path (text only) flips its separators.
+ * path is taken as it is. A relative path, a path from no drive's root (`\api`) and a route
+ * (`/r/x`, text only) flip their separators.
  * Otherwise a Linux path under a mapped folder is under its Windows folder, a drive or UNC path is
- * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path goes through
- * `FAKE_DISTRO`; the WSL form is under a mapped folder, a WSL share's Linux path or a drive's
- * `/mnt/<x>/…`.
+ * its own Windows form, `/mnt/<x>/…` is on its drive, and any other Linux path (in text, a real one
+ * only) goes into `distro`; the WSL form is under a mapped folder, a WSL share's Linux path or a
+ * drive's `/mnt/<x>/…`.
  */
-function pathForms(raw: string, literal: boolean, mappings: FolderMapping[]): PathForms {
+function pathForms(
+  raw: string,
+  literal: boolean,
+  mappings: FolderMapping[],
+  distro: string | null,
+): PathForms {
   if (literal) {
-    return mappedForms(raw, mappings);
+    return mappedForms(raw, mappings, distro, true);
   }
   const [start, end] = bareSpan(raw);
-  const forms = bareForms(raw.slice(start, end), mappings);
+  const forms = bareForms(raw.slice(start, end), mappings, distro);
   const around = (path: string | null) =>
     path === null ? null : raw.slice(0, start) + path + raw.slice(end);
   return { windows: around(forms.windows), wsl: around(forms.wsl) };
@@ -661,23 +704,35 @@ function pathForms(raw: string, literal: boolean, mappings: FolderMapping[]): Pa
  * As core's `PathMapper::written_forms`: a link's path as written, nothing trimmed. A bare file name
  * is the same in both forms; anything else converts as `bareForms` says.
  */
-function writtenForms(path: string, mappings: FolderMapping[]): PathForms {
+function writtenForms(path: string, mappings: FolderMapping[], distro: string | null): PathForms {
   if (path !== "" && !/[\\/]/.test(path)) {
     return { windows: path, wsl: path };
   }
-  return bareForms(path, mappings);
+  return bareForms(path, mappings, distro);
 }
 
 /** `pathForms` of text already trimmed by `bareSpan`. */
-function bareForms(path: string, mappings: FolderMapping[]): PathForms {
-  if (isRelative(path)) {
-    return { windows: path.replaceAll("/", "\\"), wsl: path.replaceAll("\\", "/") };
+function bareForms(path: string, mappings: FolderMapping[], distro: string | null): PathForms {
+  const flipped = { windows: path.replaceAll("/", "\\"), wsl: path.replaceAll("\\", "/") };
+  if (isRelative(path) || isFromRoot(path)) {
+    return flipped;
   }
-  return mappedForms(path, mappings);
+  const forms = mappedForms(path, mappings, distro, false);
+  return forms.windows === null && path.startsWith("/") && !isLinuxSystemPath(path)
+    ? flipped
+    : forms;
 }
 
-/** The forms of an absolute path, mapped as `pathForms` says; none for anything else. */
-function mappedForms(path: string, mappings: FolderMapping[]): PathForms {
+/**
+ * The forms of an absolute path, mapped as `pathForms` says; none for anything else. Without
+ * `anyLinux`, only a real Linux path goes into `distro`.
+ */
+function mappedForms(
+  path: string,
+  mappings: FolderMapping[],
+  distro: string | null,
+  anyLinux: boolean,
+): PathForms {
   const parts = (rest: string) => rest.split(/[\\/]/).filter((part) => part !== "");
   const mnt = /^\/mnt\/([A-Za-z])(?:\/(.*))?$/.exec(path);
   const mapped = path.startsWith("/") ? underMapping(path, mappings, "linux") : null;
@@ -691,8 +746,8 @@ function mappedForms(path: string, mappings: FolderMapping[]): PathForms {
     windows = path;
   } else if (mnt) {
     windows = `${(mnt[1] ?? "").toUpperCase()}:\\${parts(mnt[2] ?? "").join("\\")}`;
-  } else if (path.startsWith("/")) {
-    windows = ["\\\\wsl.localhost", FAKE_DISTRO, ...parts(path)].join("\\");
+  } else if (path.startsWith("/") && distro !== null && (anyLinux || isLinuxSystemPath(path))) {
+    windows = ["\\\\wsl.localhost", distro, ...parts(path)].join("\\");
   }
   if (windows === null) {
     return { windows, wsl: null };
@@ -710,6 +765,11 @@ function mappedForms(path: string, mappings: FolderMapping[]): PathForms {
   return { windows, wsl };
 }
 
+/** `settings` as core's `Settings::clamp` leaves the WSL distribution: `""` is Windows' default. */
+function clamped(settings: Settings): Settings {
+  return settings.wslDistro === "" ? { ...settings, wslDistro: null } : settings;
+}
+
 /** Why a selection's paths weren't converted, as Rust says it: it is past `CONVERT_LIMIT`. */
 const TOO_LONG = "The selection is too long to convert.";
 
@@ -718,14 +778,19 @@ const TOO_LONG = "The selection is too long to convert.";
  * `pathForms`' rules for text, what surrounds its path kept; one with no such form as written. The
  * fake has no index, as core's conversion doesn't use one.
  */
-function convertPaths(text: string, form: PathForm, mappings: FolderMapping[]): ConvertedPaths {
+function convertPaths(
+  text: string,
+  form: PathForm,
+  mappings: FolderMapping[],
+  distro: string | null,
+): ConvertedPaths {
   let out = "";
   let done = 0;
   let converted = 0;
   let unconverted = 0;
   for (const token of pathTokens(text)) {
     const raw = text.slice(token.start, token.end);
-    const path = pathForms(raw, false, mappings)[form];
+    const path = pathForms(raw, false, mappings, distro)[form];
     out += text.slice(done, token.start);
     if (path === null) {
       out += raw;
@@ -758,6 +823,8 @@ export class FakeBackend implements Backend, FakeControl {
   readonly updateFlags: boolean[] = [];
   /** What `listSystemFonts` answers. */
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
+  /** What `listWslDistros` answers: Windows' default and the installed distributions. */
+  wslDistros: WslDistros = { default: "Ubuntu", installed: ["Debian", "Ubuntu"] };
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
   /** The kind of each document that isn't Markdown, by path key. */
   private readonly kinds = new Map<string, DocKind>();
@@ -1040,11 +1107,15 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   pathForms(raw: string, literal: boolean): Promise<PathForms> {
-    return Promise.resolve(pathForms(raw, literal, folderMappings(this.settings.pathMappings)));
+    return Promise.resolve(
+      pathForms(raw, literal, folderMappings(this.settings.pathMappings), this.distro()),
+    );
   }
 
   writtenForms(raw: string): Promise<PathForms> {
-    return Promise.resolve(writtenForms(raw, folderMappings(this.settings.pathMappings)));
+    return Promise.resolve(
+      writtenForms(raw, folderMappings(this.settings.pathMappings), this.distro()),
+    );
   }
 
   convertPaths(text: string, form: PathForm): Promise<ConvertedPaths> {
@@ -1053,7 +1124,14 @@ export class FakeBackend implements Backend, FakeControl {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       return Promise.reject(TOO_LONG);
     }
-    return Promise.resolve(convertPaths(text, form, folderMappings(this.settings.pathMappings)));
+    return Promise.resolve(
+      convertPaths(text, form, folderMappings(this.settings.pathMappings), this.distro()),
+    );
+  }
+
+  /** The WSL distribution Linux paths go into: the settings', else Windows' default. */
+  private distro(): string | null {
+    return this.settings.wslDistro ?? this.wslDistros.default;
   }
 
   revealInExplorer(): Promise<void> {
@@ -1392,7 +1470,7 @@ export class FakeBackend implements Backend, FakeControl {
       this.saveModel();
     }
     const shared = own ? defined.filter(([k]) => !theme.has(k)) : defined;
-    this.settings = { ...this.settings, ...Object.fromEntries(shared) };
+    this.settings = clamped({ ...this.settings, ...Object.fromEntries(shared) });
     this.saveSettings();
     if (JSON.stringify(this.windowSettings()) !== before) {
       this.rev++;
@@ -1409,7 +1487,7 @@ export class FakeBackend implements Backend, FakeControl {
   settingsElsewhere(patch: SettingsPatch): void {
     const pages = this.settings.htmlPages;
     const defined = Object.entries(patch).filter(([, v]) => v != null);
-    this.settings = { ...this.settings, ...Object.fromEntries(defined) };
+    this.settings = clamped({ ...this.settings, ...Object.fromEntries(defined) });
     this.saveSettings();
     this.rev++;
     this.emit("settings-changed", this.snapshot());
@@ -1634,6 +1712,10 @@ export class FakeBackend implements Backend, FakeControl {
 
   listSystemFonts(): Promise<string[]> {
     return Promise.resolve(this.systemFonts);
+  }
+
+  listWslDistros(): Promise<WslDistros> {
+    return Promise.resolve(structuredClone(this.wslDistros));
   }
 
   checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {

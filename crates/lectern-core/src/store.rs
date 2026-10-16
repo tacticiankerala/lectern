@@ -52,13 +52,15 @@ impl Default for Settings {
             comments_visible: true,
             html_pages: HtmlPages::Full,
             recent_in_menu: 10,
+            wsl_distro: None,
         }
     }
 }
 
 impl Settings {
     /// Brings font size, line height, measure, the sidebars' font size and the recent files menu's
-    /// length into range. Call after loading `settings.json`, which may have been edited by hand.
+    /// length into range, and takes an empty WSL distribution for Windows' default. Call after
+    /// loading `settings.json`, which may have been edited by hand.
     pub fn clamp(&mut self) {
         self.font_size = self.font_size.clamp(FONT_SIZE.0, FONT_SIZE.1);
         self.sidebar_font_size = self
@@ -74,6 +76,9 @@ impl Settings {
         };
         if let Measure::Chars(chars) = &mut self.measure {
             *chars = (*chars).clamp(MEASURE.0, MEASURE.1);
+        }
+        if self.wsl_distro.as_deref() == Some("") {
+            self.wsl_distro = None;
         }
     }
 }
