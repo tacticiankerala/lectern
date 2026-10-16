@@ -43,14 +43,21 @@ pub enum AgentReply {
     /// `show`: the window shows another file, so it asks the reader first.
     Asked,
     /// What became of a `show` the window asked the reader about, sent once it is settled: the
-    /// reader's answer, or replaced by a newer request.
-    Answered { answer: AskAnswer },
+    /// reader's answer, or replaced by a newer request. For an open that failed, why (`message`),
+    /// a sentence for the agent.
+    Answered {
+        answer: AskAnswer,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        message: Option<String>,
+    },
     /// What was asked couldn't be done: a sentence for the agent.
     Failed { message: String },
 }
 
 /// What became of a request to show a file that the window asked the reader about: they showed
-/// it or said not now, or a newer request took its place.
+/// it or said not now, or a newer request took its place. `failed`: they chose to show it, and it
+/// didn't open.
 #[derive(Serialize, Deserialize, TS, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
@@ -58,6 +65,7 @@ pub enum AskAnswer {
     Shown,
     Dismissed,
     Replaced,
+    Failed,
 }
 
 /// A request the window asked the reader about, and what became of it.
@@ -68,6 +76,10 @@ pub struct AskOutcome {
     /// The file the agent asked to show.
     pub path: String,
     pub answer: AskAnswer,
+    /// Why it didn't open, when it `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
 }
 
 /// What a window shows, as its UI sees it.
@@ -136,12 +148,14 @@ pub struct WindowStatus {
 }
 
 /// A request the window asked the reader about, as `status` gives it: the file, in both forms,
-/// and what became of it.
+/// and what became of it, with why when it `failed`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnsweredAsk {
     pub path: PathForms,
     pub answer: AskAnswer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// The settings that say what agents may do.
@@ -189,6 +203,7 @@ pub fn window_status(
             .map(|outcome| AnsweredAsk {
                 path: mapper.literal_forms(&outcome.path),
                 answer: outcome.answer,
+                message: outcome.message,
             })
             .collect(),
     }

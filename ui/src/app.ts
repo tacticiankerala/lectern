@@ -27,7 +27,8 @@
 // - An agent's request for this window (`agent-request`) is answered from agent.ts, loaded on the
 //   first, with `replyToAgent`; it is listened for before `startup`, like the others. An agent's
 //   `show` opens as a link does, on the history, so unsaved comment text is kept as on any other
-//   switch; asked about first, the bar over the document waits for the reader.
+//   switch; asked about first, the bar over the document waits for the reader, and is dismissed
+//   as the window leaves: before its page reloads into another workspace, or before it closes.
 // - The window shows one workspace, or none (a blank window), as workspaces.ts has it. Before the
 //   window turns to another workspace, or Lectern quits or restarts for an update, unsaved comment
 //   text is confirmed, and the settings and the reading position are saved.
@@ -743,6 +744,7 @@ export class App {
     try {
       const { confirmDiscard } = await import("./workspace-menu.js");
       if (await confirmDiscard(this.layout.overlayRoot)) {
+        await this.agentLeaving();
         await this.backend.closeWindow();
       }
     } catch (e) {
@@ -1014,27 +1016,46 @@ export class App {
     }
   }
 
+  /**
+   * The window is leaving (its page reloads into another workspace, or it closes): a request an
+   * agent asked the reader about is dismissed. Resolves once Rust is told.
+   */
+  async agentLeaving(): Promise<void> {
+    await this.agent?.leave();
+  }
+
   /** Answers an agent's request for this window (agent.ts, loaded on the first). */
   private async agentRequested(call: AgentCall): Promise<void> {
     let reply: AgentReply;
     try {
       const { Agent } = await import("./agent.js");
-      this.agent ??= new Agent({
-        doc: () => this.state.doc,
-        docElement: () => this.layout.doc,
-        scroller: () => this.scroller,
-        page: () => this.view.page,
-        shownPath: () => this.nav.currentPath(),
-        opens: () => this.state.settings.agentOpens,
-        open: (path, line) => this.openForAgent(path, line),
-        scrollToLine: (line) => {
-          this.view.scrollToLine(line);
-        },
-        answered: (id, answer) => {
-          quietly(this.backend.replyToAgent(id, { kind: "answered", answer }));
-        },
-        bar: this.layout.agentAsk,
-      });
+      if (this.agent === null) {
+        const agent = new Agent({
+          doc: () => this.state.doc,
+          docElement: () => this.layout.doc,
+          scroller: () => this.scroller,
+          page: () => this.view.page,
+          shownPath: () => this.nav.currentPath(),
+          opens: () => this.state.settings.agentOpens,
+          open: (path, line) => this.openForAgent(path, line),
+          scrollToLine: (line) => {
+            this.view.scrollToLine(line);
+          },
+          answered: (id, answer, message) =>
+            this.backend
+              .replyToAgent(id, {
+                kind: "answered",
+                answer,
+                ...(message === undefined ? {} : { message }),
+              })
+              .catch(warn),
+          bar: this.layout.agentAsk,
+        });
+        this.on("doc", () => {
+          agent.docShown();
+        });
+        this.agent = agent;
+      }
       reply = await this.agent.answer(call);
     } catch (e) {
       reply = { kind: "failed", message: `Lectern couldn't answer: ${String(e)}` };

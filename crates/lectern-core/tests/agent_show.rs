@@ -296,25 +296,35 @@ fn a_window_is_asked_to_show_with_the_agents_name() {
 
 #[test]
 fn a_window_answers_a_show_shown_or_asked_then_with_the_readers_answer() {
+    let answered = |answer| AgentReply::Answered {
+        answer,
+        message: None,
+    };
     for (json, reply) in [
         (json!({"kind": "shown"}), AgentReply::Shown),
         (json!({"kind": "asked"}), AgentReply::Asked),
         (
             json!({"kind": "answered", "answer": "shown"}),
-            AgentReply::Answered {
-                answer: AskAnswer::Shown,
-            },
+            answered(AskAnswer::Shown),
         ),
         (
             json!({"kind": "answered", "answer": "dismissed"}),
-            AgentReply::Answered {
-                answer: AskAnswer::Dismissed,
-            },
+            answered(AskAnswer::Dismissed),
         ),
         (
             json!({"kind": "answered", "answer": "replaced"}),
+            answered(AskAnswer::Replaced),
+        ),
+        // The reader chose Show, and the file didn't open: why, for the agent.
+        (
+            json!({
+                "kind": "answered",
+                "answer": "failed",
+                "message": "plan.md didn't open: It's gone.",
+            }),
             AgentReply::Answered {
-                answer: AskAnswer::Replaced,
+                answer: AskAnswer::Failed,
+                message: Some("plan.md didn't open: It's gone.".to_owned()),
             },
         ),
     ] {
@@ -331,23 +341,38 @@ fn a_windows_view_names_its_waiting_request_and_the_answers_so_far() {
         "line": null,
         "selection": null,
         "ask": NOTES,
-        "answers": [{"path": PLAN, "answer": "replaced"}],
+        "answers": [
+            {"path": PLAN, "answer": "replaced"},
+            {"path": PLAN, "answer": "failed", "message": "plan.md didn't open: It's gone."},
+        ],
     }))
     .unwrap();
     assert_eq!(view.ask.as_deref(), Some(NOTES));
     assert_eq!(
         view.answers,
-        [AskOutcome {
-            path: PLAN.to_owned(),
-            answer: AskAnswer::Replaced
-        }]
+        [
+            AskOutcome {
+                path: PLAN.to_owned(),
+                answer: AskAnswer::Replaced,
+                message: None,
+            },
+            AskOutcome {
+                path: PLAN.to_owned(),
+                answer: AskAnswer::Failed,
+                message: Some("plan.md didn't open: It's gone.".to_owned()),
+            }
+        ]
     );
     let status = window_status("main", Some("Studio".to_owned()), view, &wsl_mapper());
     let status = serde_json::to_value(&status).unwrap();
     assert_eq!(status["ask"], json!({"windows": NOTES, "wsl": NOTES_WSL}));
+    let plan = json!({"windows": PLAN, "wsl": PLAN_WSL});
     assert_eq!(
         status["answers"],
-        json!([{"path": {"windows": PLAN, "wsl": PLAN_WSL}, "answer": "replaced"}])
+        json!([
+            {"path": plan, "answer": "replaced"},
+            {"path": plan, "answer": "failed", "message": "plan.md didn't open: It's gone."},
+        ])
     );
 }
 
@@ -362,6 +387,7 @@ fn a_view_without_asks_has_none_and_status_keeps_the_latest_answers() {
         .map(|n| AskOutcome {
             path: format!(r"S:\Notes\My Vault\n{n}.md"),
             answer: AskAnswer::Dismissed,
+            message: None,
         })
         .collect();
     let status = window_status(
@@ -409,14 +435,22 @@ fn show_answers_its_state_the_file_in_both_forms_the_window_and_the_focus() {
         (AskAnswer::Dismissed, "dismissed"),
         (AskAnswer::Replaced, "replaced"),
     ] {
-        assert_eq!(
-            serde_json::to_value(ShowState::from(answer)).unwrap(),
-            json!(state)
-        );
+        let settled = ShowState::settled(answer, None).unwrap();
+        assert_eq!(serde_json::to_value(settled).unwrap(), json!(state));
     }
     assert_eq!(
         serde_json::to_value(ShowState::Waiting).unwrap(),
         json!("waiting")
+    );
+    // An open the reader chose that failed is the tool's error: why, as the window said.
+    let why = "plan.md didn't open: It's gone.";
+    assert_eq!(
+        ShowState::settled(AskAnswer::Failed, Some(why.to_owned())),
+        Err(why.to_owned())
+    );
+    assert_eq!(
+        ShowState::settled(AskAnswer::Failed, None),
+        Err("The file didn't open.".to_owned())
     );
 }
 

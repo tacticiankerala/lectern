@@ -116,12 +116,15 @@ pub enum ShowState {
     Waiting,
 }
 
-impl From<AskAnswer> for ShowState {
-    fn from(answer: AskAnswer) -> Self {
+impl ShowState {
+    /// What a `show` that waited answers once the reader's window settled it as `answer`: an
+    /// open the reader chose that failed is the tool's error, why it failed (`message`).
+    pub fn settled(answer: AskAnswer, message: Option<String>) -> Result<Self, String> {
         match answer {
-            AskAnswer::Shown => Self::Shown,
-            AskAnswer::Dismissed => Self::Dismissed,
-            AskAnswer::Replaced => Self::Replaced,
+            AskAnswer::Shown => Ok(Self::Shown),
+            AskAnswer::Dismissed => Ok(Self::Dismissed),
+            AskAnswer::Replaced => Ok(Self::Replaced),
+            AskAnswer::Failed => Err(message.unwrap_or_else(|| "The file didn't open.".to_owned())),
         }
     }
 }

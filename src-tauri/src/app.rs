@@ -329,8 +329,13 @@ pub fn focus_window(handle: &AppHandle, label: &str) {
 
 /// Brings the window `label` forward for an agent as `mode` has it, on the main thread, which owns
 /// it (`win::bring_forward`), and says how far it came. `None` when it isn't showing, or the main
-/// thread didn't get to it in time.
-pub fn agent_focus(handle: &AppHandle, label: &str, mode: AgentFocus) -> Option<FocusStep> {
+/// thread didn't get to it in time: `AGENT_FOCUS_WAIT`, or `within` when that's less.
+pub fn agent_focus(
+    handle: &AppHandle,
+    label: &str,
+    mode: AgentFocus,
+    within: Duration,
+) -> Option<FocusStep> {
     let window = handle.get_webview_window(label)?;
     if !window.is_visible().unwrap_or(false) {
         return None;
@@ -347,7 +352,7 @@ pub fn agent_focus(handle: &AppHandle, label: &str, mode: AgentFocus) -> Option<
         log::warn!("couldn't bring {label} forward: {e}");
         return None;
     }
-    step.recv_timeout(AGENT_FOCUS_WAIT).ok()
+    step.recv_timeout(AGENT_FOCUS_WAIT.min(within)).ok()
 }
 
 /// Keeps `window`, restored at launch and just shown, behind `front`, the window the user is in,

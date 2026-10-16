@@ -2,6 +2,7 @@
 
 /**
  * What became of a request to show a file that the window asked the reader about: they showed
- * it or said not now, or a newer request took its place.
+ * it or said not now, or a newer request took its place. `failed`: they chose to show it, and it
+ * didn't open.
  */
-export type AskAnswer = "shown" | "dismissed" | "replaced";
+export type AskAnswer = "shown" | "dismissed" | "replaced" | "failed";

@@ -297,8 +297,11 @@ export interface FakeControl {
    * numbered from 1.
    */
   agentRequest(request: AgentRequest, agent?: string): Promise<AgentReply>;
-  /** What became of each `show` the UI asked the reader about, as it told Rust, in order. */
-  readonly agentAnswers: { id: number; answer: AskAnswer }[];
+  /**
+   * What became of each `show` the UI asked the reader about, as it told Rust, in order, with why
+   * when it `failed`.
+   */
+  readonly agentAnswers: { id: number; answer: AskAnswer; message?: string }[];
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -603,7 +606,7 @@ export class FakeBackend implements Backend, FakeControl {
   /** Agents' requests sent to the UI and not answered yet, by id. */
   private readonly agentCalls = new Map<number, (reply: AgentReply) => void>();
   private agentCallId = 0;
-  readonly agentAnswers: { id: number; answer: AskAnswer }[] = [];
+  readonly agentAnswers: { id: number; answer: AskAnswer; message?: string }[] = [];
   /** Sidecars, by note path key. */
   private readonly reviews = new Map<string, StoredReview>();
   /** Core's text blocks, by path key. */
@@ -1444,7 +1447,8 @@ export class FakeBackend implements Backend, FakeControl {
 
   replyToAgent(id: number, reply: AgentReply): Promise<void> {
     if (reply.kind === "answered") {
-      this.agentAnswers.push({ id, answer: reply.answer });
+      const { answer, message } = reply;
+      this.agentAnswers.push(message === undefined ? { id, answer } : { id, answer, message });
       return Promise.resolve();
     }
     this.agentCalls.get(id)?.(reply);

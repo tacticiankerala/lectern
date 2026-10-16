@@ -8,4 +8,8 @@ export type AskOutcome = {
 /**
  * The file the agent asked to show.
  */
-path: string, answer: AskAnswer, };
+path: string, answer: AskAnswer, 
+/**
+ * Why it didn't open, when it `failed`.
+ */
+message?: string, };

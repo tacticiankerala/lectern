@@ -3,6 +3,7 @@
 //! in a fake host.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use lectern_core::agent::show::FocusStep;
 use lectern_core::agent::AgentCall;
@@ -79,8 +80,9 @@ pub trait Host: Send + Sync {
     /// Brings the window `label` forward, unminimised, if it is showing yet.
     fn focus_window(&self, label: &str);
     /// Brings the window `label` forward for an agent as `mode` has it (`win::bring_forward`), and
-    /// says how far it came; `None` when it isn't showing.
-    fn agent_focus(&self, label: &str, mode: AgentFocus) -> Option<FocusStep>;
+    /// says how far it came, waiting at most `within` to hear; `None` when it isn't showing, or
+    /// didn't say in time.
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep>;
 }
 
 /// The real host.
@@ -123,8 +125,8 @@ impl Host for TauriHost {
         crate::app::focus_window(&self.0, label);
     }
 
-    fn agent_focus(&self, label: &str, mode: AgentFocus) -> Option<FocusStep> {
-        crate::app::agent_focus(&self.0, label, mode)
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep> {
+        crate::app::agent_focus(&self.0, label, mode, within)
     }
 }
 

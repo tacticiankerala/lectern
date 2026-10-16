@@ -8,7 +8,8 @@ use lectern_core::ipc::OpenRequest;
 use super::sync::lock;
 
 /// Files that second launches, or agents, ask to open. Until the UI has asked for its startup
-/// payload it can't receive events, so the latest request is held for `startup` instead.
+/// payload it can't receive events, so the latest request is held for `startup` instead; an
+/// agent's never takes the place of a launch's.
 #[derive(Default)]
 pub struct OpenQueue {
     inner: Mutex<(bool, Option<HeldOpen>)>,
@@ -21,24 +22,44 @@ pub(super) struct HeldOpen {
     pub(super) by_agent: bool,
 }
 
+/// What became of an agent's request offered to a window's queue (`offer_from_agent`).
+pub(super) enum AgentOffer {
+    /// The UI is up: the request goes to it now, not held.
+    Now,
+    /// Held for the UI's startup.
+    Held,
+    /// The UI's startup holds a file the user launched, which an agent's never takes the place of.
+    Refused,
+}
+
 impl OpenQueue {
     /// Holds `request`, a launch's, while the UI isn't ready, or hands it back to be sent now.
     pub fn offer(&self, request: OpenRequest) -> Option<OpenRequest> {
-        self.hold(request, false)
-    }
-
-    /// As `offer`, for an agent's request.
-    pub(super) fn offer_from_agent(&self, request: OpenRequest) -> Option<OpenRequest> {
-        self.hold(request, true)
-    }
-
-    fn hold(&self, request: OpenRequest, by_agent: bool) -> Option<OpenRequest> {
         let mut inner = lock(&self.inner);
         if inner.0 {
             return Some(request);
         }
-        inner.1 = Some(HeldOpen { request, by_agent });
+        inner.1 = Some(HeldOpen {
+            request,
+            by_agent: false,
+        });
         None
+    }
+
+    /// As `offer`, for an agent's request, which is refused while a launch's is held.
+    pub(super) fn offer_from_agent(&self, request: OpenRequest) -> AgentOffer {
+        let mut inner = lock(&self.inner);
+        if inner.0 {
+            return AgentOffer::Now;
+        }
+        if inner.1.as_ref().is_some_and(|held| !held.by_agent) {
+            return AgentOffer::Refused;
+        }
+        inner.1 = Some(HeldOpen {
+            request,
+            by_agent: true,
+        });
+        AgentOffer::Held
     }
 
     /// Whether a request is held for the UI.
@@ -110,14 +131,44 @@ mod tests {
             Some(r"C:\c.md".to_owned())
         );
         assert!(queue.ready().is_none());
-        // An agent's is held the same way, marked as the agent's.
+    }
+
+    /// An agent's request is held as a launch's is, marked as the agent's: the latest of either
+    /// is kept, except that an agent's never takes the place of a launch's.
+    #[test]
+    fn an_agents_open_waits_for_the_ui_but_never_displaces_a_launch() {
+        let request = |path: &str| OpenRequest {
+            path: path.to_owned(),
+            t0_ms: None,
+            folder: false,
+        };
+        let held = |queue: &OpenQueue| queue.ready().map(|h| (h.request.path, h.by_agent));
         let queue = OpenQueue::default();
-        assert!(queue.offer(request(r"C:\a.md")).is_none());
-        assert!(queue.offer_from_agent(request(r"C:\b.md")).is_none());
-        assert_eq!(
-            queue.ready().map(|held| (held.request.path, held.by_agent)),
-            Some((r"C:\b.md".to_owned(), true))
-        );
+        assert!(matches!(
+            queue.offer_from_agent(request(r"C:\a.md")),
+            AgentOffer::Held
+        ));
+        assert!(matches!(
+            queue.offer_from_agent(request(r"C:\b.md")),
+            AgentOffer::Held
+        ));
+        assert_eq!(held(&queue), Some((r"C:\b.md".to_owned(), true)));
+        assert!(matches!(
+            queue.offer_from_agent(request(r"C:\c.md")),
+            AgentOffer::Now
+        ));
+        // A launch takes an agent's place, and keeps it.
+        let queue = OpenQueue::default();
+        assert!(matches!(
+            queue.offer_from_agent(request(r"C:\a.md")),
+            AgentOffer::Held
+        ));
+        assert!(queue.offer(request(r"C:\b.md")).is_none());
+        assert!(matches!(
+            queue.offer_from_agent(request(r"C:\c.md")),
+            AgentOffer::Refused
+        ));
+        assert_eq!(held(&queue), Some((r"C:\b.md".to_owned(), false)));
     }
 
     #[test]

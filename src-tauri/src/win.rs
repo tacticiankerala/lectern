@@ -31,8 +31,7 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, MOUSEEVENTF_MOVE, MOUSEINPUT, VK_MENU,
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetGUIThreadInfo,
@@ -313,7 +312,8 @@ pub trait Desktop {
     /// `SetForegroundWindow`, which Windows grants only to a process it lets take the foreground.
     fn ask_foreground(&self);
     /// Input from this process, which Windows counts towards letting it take the foreground: a
-    /// mouse move by nothing (`SendInput`), else a tap of Alt.
+    /// mouse move by nothing (`SendInput`). Never a tap of Alt: UIPI blocks it where it blocks the
+    /// move, and a stray Alt can leave the window in front in menu mode.
     fn nudge(&self);
     /// With this thread's input attached to the foreground window's thread's, `SetForegroundWindow`
     /// and `BringWindowToTop`; then detached.
@@ -421,24 +421,8 @@ impl Desktop for Win32Window {
                 },
             },
         };
-        // SAFETY: the inputs are live locals, and `size` is an INPUT's.
-        if unsafe { SendInput(&[mouse], size) } == 1 {
-            return;
-        }
-        let alt = |flags: KEYBD_EVENT_FLAGS| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_MENU,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        // SAFETY: as above.
-        let _ = unsafe { SendInput(&[alt(KEYBD_EVENT_FLAGS(0)), alt(KEYEVENTF_KEYUP)], size) };
+        // SAFETY: the input is a live local, and `size` is an INPUT's.
+        let _ = unsafe { SendInput(&[mouse], size) };
     }
 
     fn attach_and_raise(&self) {

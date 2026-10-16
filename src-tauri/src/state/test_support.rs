@@ -40,6 +40,8 @@ pub(super) struct FakeHost {
     pub(super) focused: Mutex<Vec<String>>,
     /// The windows brought forward for an agent, in order, each with the `agentFocus` it had.
     pub(super) agent_focused: Mutex<Vec<(String, AgentFocus)>>,
+    /// How long each of those was given to say how far it came, in order.
+    pub(super) focus_within: Mutex<Vec<Duration>>,
     /// The app asked to exit.
     pub(super) exited: Mutex<bool>,
 }
@@ -73,8 +75,9 @@ impl Host for FakeHost {
     }
 
     /// Each mode works as asked: `front` takes the foreground.
-    fn agent_focus(&self, label: &str, mode: AgentFocus) -> Option<FocusStep> {
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep> {
         lock(&self.agent_focused).push((label.to_owned(), mode));
+        lock(&self.focus_within).push(within);
         Some(match mode {
             AgentFocus::Front => FocusStep::Foreground,
             AgentFocus::Raise => FocusStep::Raised,

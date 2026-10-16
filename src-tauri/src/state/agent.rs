@@ -4,11 +4,17 @@
 //!   answered by the command `agent_reply`).
 //! - **`show`:** the file goes to the window `route_show` picks. A window whose UI is up decides
 //!   itself whether to ask the reader first (the bar) and answers `shown` or `asked`; a window
-//!   still starting, or a new one, opens the file first thing. The window then comes forward as
+//!   still starting, or a new one, opens the file first thing, unless it holds a file the user
+//!   launched, which an agent's never takes the place of. The window then comes forward as
 //!   `agentFocus` has it. With a `wait`, an `asked` waits that long for what became of the
-//!   request, which the UI sends once it is settled (`AgentReply::Answered`).
+//!   request, which the UI sends once it is settled (`AgentReply::Answered`). A window that turns
+//!   to another workspace meanwhile (its page reloads) dismisses it; one that closes is the tool's
+//!   error.
 //! - **`workspace`:** switches to a workspace, bringing its window forward or reopening it in a
 //!   new one, or creates one in a new window; an open window never changes workspace.
+//!
+//! Both answer within the pipe's time (`ANSWER_WITHIN`, and the reader's `wait`), a second to
+//! spare: each step that waits waits only as long as is left of it (`Budget`).
 //!
 //! An agent's path on a network share is taken only when Lectern already trusts the share's host:
 //! a library's, a path mapping's, WSL's, or one the user opened a file from (`agent_location`).
@@ -35,12 +41,13 @@ use lectern_core::agent::show::{
 use lectern_core::agent::status::{
     window_status, AgentCall, AgentReply, AgentSettings, AskAnswer, Status, WindowView,
 };
-use lectern_core::agent::AgentRequest;
+use lectern_core::agent::{AgentRequest, ANSWER_WITHIN};
 use lectern_core::ipc::{AgentFocus, OpenRequest};
 use lectern_core::library::pathmap::PathMapper;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::open_queue::AgentOffer;
 use super::paths::{normalize_root, path_string, same_path};
 use super::sync::{lock, read};
 use super::trust::Trust;
@@ -55,6 +62,16 @@ const VIEW_WAIT: Duration = Duration::from_secs(3);
 /// How long `show` waits for the window's UI to open the file or ask the reader.
 const SHOW_WAIT: Duration = Duration::from_secs(5);
 
+/// What `show` and `workspace` keep of the pipe's time (`ANSWER_WITHIN`) to answer in.
+const ANSWER_SPARE: Duration = Duration::from_secs(1);
+
+/// The tool error when the window a request went to closes before it is settled.
+const CLOSED: &str = "That window has closed.";
+
+/// The tool error for an agent's `show` while the window it goes to starts with a file the user
+/// launched.
+const OPENING_FOR_USER: &str = "Lectern is opening a file for the user; try again in a moment.";
+
 /// The answer to a tool Lectern doesn't offer yet.
 pub const NOT_YET: &str = "Not yet available.";
 
@@ -64,8 +81,11 @@ pub const NOT_YET: &str = "Not yet available.";
 pub struct AgentCalls {
     next: AtomicU64,
     waiting: Mutex<HashMap<u64, (String, Sender<AgentReply>)>>,
-    asks: Mutex<HashMap<u64, (String, Sender<AskAnswer>)>>,
+    asks: Mutex<HashMap<u64, (String, Sender<Settled>)>>,
 }
+
+/// What became of a `show` the window asked the reader about, with why when it `failed`.
+type Settled = (AskAnswer, Option<String>);
 
 impl AgentCalls {
     /// A new request to the window `label`: its id, and where its answer arrives.
@@ -78,7 +98,7 @@ impl AgentCalls {
 
     /// Where what becomes of the `show` `id`, sent to the window `label`, arrives once the window
     /// has asked the reader about it.
-    fn await_answer(&self, label: &str, id: u64) -> Receiver<AskAnswer> {
+    fn await_answer(&self, label: &str, id: u64) -> Receiver<Settled> {
         let (sender, receiver) = mpsc::channel();
         lock(&self.asks).insert(id, (label.to_owned(), sender));
         receiver
@@ -88,8 +108,9 @@ impl AgentCalls {
     /// when no one waits (it took too long, or the id isn't one sent to that window). What became
     /// of a `show` goes to whoever waits for that.
     fn answer(&self, label: &str, id: u64, reply: AgentReply) -> bool {
-        if let AgentReply::Answered { answer } = reply {
-            return take_for(&self.asks, label, id).is_some_and(|s| s.send(answer).is_ok());
+        if let AgentReply::Answered { answer, message } = reply {
+            return take_for(&self.asks, label, id)
+                .is_some_and(|s| s.send((answer, message)).is_ok());
         }
         take_for(&self.waiting, label, id).is_some_and(|s| s.send(reply).is_ok())
     }
@@ -98,6 +119,37 @@ impl AgentCalls {
     fn forget(&self, id: u64) {
         lock(&self.waiting).remove(&id);
         lock(&self.asks).remove(&id);
+    }
+
+    /// Stops waiting on every request sent to the window `label`, and on what becomes of them, as
+    /// its state is let go of (`WindowState::retire`): whoever waits on one wakes at once, finding
+    /// nothing will answer.
+    pub(super) fn forget_window(&self, label: &str) {
+        lock(&self.waiting).retain(|_, (asked, _)| asked != label);
+        lock(&self.asks).retain(|_, (asked, _)| asked != label);
+    }
+}
+
+/// The time a `show` or `workspace` has to act in: the pipe's (`ANSWER_WITHIN` from when the
+/// request came, the reader's `wait` aside), less a second to answer in. Each step that waits
+/// (the file check, the window's UI, a new window showing, the focus) waits only as long as is
+/// left, so together they never outlast the pipe.
+#[derive(Clone, Copy, Debug)]
+struct Budget(Instant);
+
+impl Budget {
+    /// The pipe's, for a request that has just come.
+    fn new() -> Self {
+        Self(Instant::now() + ANSWER_WITHIN - ANSWER_SPARE)
+    }
+
+    /// `most`, or what is left when that's less.
+    fn at_most(self, most: Duration) -> Duration {
+        most.min(self.left())
+    }
+
+    fn left(self) -> Duration {
+        self.0.saturating_duration_since(Instant::now())
     }
 }
 
@@ -135,8 +187,8 @@ impl App {
     ) -> Result<Value, String> {
         match request {
             AgentRequest::Status => to_value(&self.agent_status(agent)),
-            AgentRequest::Show(args) => to_value(&self.agent_show(args, agent)?),
-            AgentRequest::Workspace(args) => to_value(&self.agent_workspace(args)?),
+            AgentRequest::Show(args) => to_value(&self.agent_show(args, agent, Budget::new())?),
+            AgentRequest::Workspace(args) => to_value(&self.agent_workspace(args, Budget::new())?),
             // The connection answers it; nothing reaches here.
             AgentRequest::Hello { .. } => Ok(json!({})),
             _ => Err(NOT_YET.to_owned()),
@@ -216,12 +268,18 @@ impl App {
     }
 
     /// `show`: the file `args.path` (a Windows or WSL path) in the window `route_show` picks, at
-    /// its target (a line, for now; the path's own `:12` when no target is given). It must be a
-    /// file, on a share only when Lectern already trusts its host, which is checked first.
-    fn agent_show(self: &Arc<Self>, args: ShowArgs, agent: &str) -> Result<ShowAnswer, String> {
+    /// its target (a line, for now; the path's own `:12` when no target is given), within
+    /// `budget`. It must be a file, on a share only when Lectern already trusts its host, which is
+    /// checked first.
+    fn agent_show(
+        self: &Arc<Self>,
+        args: ShowArgs,
+        agent: &str,
+        budget: Budget,
+    ) -> Result<ShowAnswer, String> {
         let path = self.agent_location(&args.path)?;
         let file = PathBuf::from(&path.windows);
-        check_file(&file, self.timings.exists)?;
+        check_file(&file, budget.at_most(self.timings.exists))?;
         let front = read(&self.settings).agent_focus == AgentFocus::Front;
         let request = OpenRequest {
             path: path.windows.clone(),
@@ -236,16 +294,17 @@ impl App {
                 AgentRoute::Reopen(id) => (self.bind_window(Some(id), front), true, true),
                 AgentRoute::NewWindow => (self.bind_window(None, front), true, false),
             };
-            let window = self.window(&label).ok_or("That window has closed.")?;
+            let window = self.window(&label).ok_or(CLOSED)?;
             // A window whose UI isn't up yet opens the file first thing, as it would a launch's,
-            // but trusting nothing.
+            // but trusting nothing; unless it holds a launch's, which goes first.
             match window.opens.offer_from_agent(request) {
-                None => Placed::Starting {
+                AgentOffer::Held => Placed::Starting {
                     label,
                     new,
                     reopened,
                 },
-                Some(_) => Placed::Ready(window),
+                AgentOffer::Now => Placed::Ready(window),
+                AgentOffer::Refused => return Err(OPENING_FOR_USER.to_owned()),
             }
         };
         let (label, state, focus) = match placed {
@@ -260,7 +319,7 @@ impl App {
                         self.workspaces_changed();
                     }
                 }
-                let focus = self.agent_focus(&label);
+                let focus = self.agent_focus(&label, budget);
                 (label, ShowState::Shown, focus)
             }
             Placed::Ready(window) => {
@@ -273,7 +332,7 @@ impl App {
                     wait,
                 };
                 let label = window.label().to_owned();
-                let (state, focus) = self.show_in(&window, shown, agent)?;
+                let (state, focus) = self.show_in(&window, shown, agent, budget)?;
                 (label, state, focus)
             }
         };
@@ -289,24 +348,31 @@ impl App {
 
     /// Asks the UI of `window`, which is up, to show `args.path`. It opens it, or asks the reader
     /// first; either way the window then comes forward. Asked, with a `wait`, what became of it is
-    /// waited for that long.
+    /// waited for that long. A window let go of before it settles the request (`let_go_of`) ends
+    /// the wait at once.
     fn show_in(
         &self,
         window: &WindowState,
         args: ShowArgs,
         agent: &str,
+        budget: Budget,
     ) -> Result<(ShowState, Option<FocusStep>), String> {
         let label = window.label();
         let wait = Duration::from_secs(args.wait.into());
         let (id, reply) = self.agent_calls.open(label);
         // Before the UI hears of it, so an answer however quick finds its waiter.
         let answered = (!wait.is_zero()).then(|| self.agent_calls.await_answer(label, id));
+        // Let go of already, its requests went before these came: nothing would answer them.
+        if window.is_retired() {
+            self.agent_calls.forget(id);
+            return Ok((self.let_go_of(label)?, None));
+        }
         window.emit(UiEvent::AgentRequest(AgentCall {
             id,
             request: AgentRequest::Show(args),
             agent: agent.to_owned(),
         }));
-        let state = match reply.recv_timeout(SHOW_WAIT) {
+        let state = match reply.recv_timeout(budget.at_most(SHOW_WAIT)) {
             Ok(AgentReply::Shown) => ShowState::Shown,
             Ok(AgentReply::Asked) => ShowState::Asked,
             Ok(AgentReply::Failed { message }) => {
@@ -317,20 +383,25 @@ impl App {
                 self.agent_calls.forget(id);
                 return Err("The window gave an answer Lectern didn't expect.".to_owned());
             }
-            Err(_) => {
+            Err(RecvTimeoutError::Timeout) => {
                 self.agent_calls.forget(id);
                 return Err("The window didn't answer in time.".to_owned());
             }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.agent_calls.forget(id);
+                return Ok((self.let_go_of(label)?, None));
+            }
         };
-        let focus = self.agent_focus(label);
+        let focus = self.agent_focus(label, budget);
         let state = match (state, answered) {
             (ShowState::Asked, Some(answered)) => {
-                let state = match answered.recv_timeout(wait) {
-                    Ok(answer) => answer.into(),
-                    Err(_) => ShowState::Waiting,
+                let settled = match answered.recv_timeout(wait) {
+                    Ok((answer, message)) => ShowState::settled(answer, message),
+                    Err(RecvTimeoutError::Timeout) => Ok(ShowState::Waiting),
+                    Err(RecvTimeoutError::Disconnected) => self.let_go_of(label),
                 };
                 self.agent_calls.forget(id);
-                state
+                settled?
             }
             (state, _) => {
                 self.agent_calls.forget(id);
@@ -340,17 +411,36 @@ impl App {
         Ok((state, focus))
     }
 
-    /// `workspace`: switches to the workspace named `args.name`, or creates it with `args.folders`.
-    fn agent_workspace(self: &Arc<Self>, args: WorkspaceArgs) -> Result<WorkspaceAnswer, String> {
+    /// What a `show` answers when the window `label` let go of it before settling it (its state
+    /// retired): the window turned to another workspace, its page reloading, which dismisses it;
+    /// or it closed, which is the tool's error.
+    fn let_go_of(&self, label: &str) -> Result<ShowState, String> {
+        match self.window(label) {
+            Some(_) => Ok(ShowState::Dismissed),
+            None => Err(CLOSED.to_owned()),
+        }
+    }
+
+    /// `workspace`: switches to the workspace named `args.name`, or creates it with `args.folders`,
+    /// within `budget`.
+    fn agent_workspace(
+        self: &Arc<Self>,
+        args: WorkspaceArgs,
+        budget: Budget,
+    ) -> Result<WorkspaceAnswer, String> {
         match args.action {
-            WorkspaceAction::Switch => self.agent_switch(&args.name),
-            WorkspaceAction::Create => self.agent_create(&args.name, &args.folders),
+            WorkspaceAction::Switch => self.agent_switch(&args.name, budget),
+            WorkspaceAction::Create => self.agent_create(&args.name, &args.folders, budget),
         }
     }
 
     /// Brings the window of the workspace named `name` forward, or reopens it, closed, in a new
     /// window.
-    fn agent_switch(self: &Arc<Self>, name: &str) -> Result<WorkspaceAnswer, String> {
+    fn agent_switch(
+        self: &Arc<Self>,
+        name: &str,
+        budget: Budget,
+    ) -> Result<WorkspaceAnswer, String> {
         let front = read(&self.settings).agent_focus == AgentFocus::Front;
         let (workspace, label, opened) = {
             let _life = lock(&self.lifecycle);
@@ -372,7 +462,7 @@ impl App {
         }
         Ok(WorkspaceAnswer {
             workspace,
-            focus: self.agent_focus(&label),
+            focus: self.agent_focus(&label, budget),
             window: label,
             opened,
         })
@@ -384,6 +474,7 @@ impl App {
         self: &Arc<Self>,
         name: &str,
         folders: &[String],
+        budget: Budget,
     ) -> Result<WorkspaceAnswer, String> {
         let mut roots: Vec<PathBuf> = Vec::new();
         for folder in folders {
@@ -399,51 +490,55 @@ impl App {
             }
         }
         let front = read(&self.settings).agent_focus == AgentFocus::Front;
-        let (id, workspace) = self.change_workspaces(|workspaces| {
-            if let Some(ws) = workspaces.find_by_name(name) {
-                return Err(format!(
-                    "There's a workspace named “{}” already. Switch to it, or choose another name.",
-                    ws.name
-                ));
-            }
-            let id = workspaces.create(name);
-            let ws = workspaces
-                .get_mut(&id)
-                .ok_or("The workspace wasn't made.")?;
-            ws.roots = roots.iter().map(|root| path_string(root)).collect();
-            Ok((id, ws.name.clone()))
-        })?;
-        if !roots.is_empty() && self.reconfigure_trust() {
-            self.forget_renders();
-        }
-        let label = {
+        let (label, workspace) = {
+            // From making the workspace to binding its window, so nothing opens it meanwhile: a
+            // launch or a show of a file in its folders would reopen it in a window of its own.
             let _life = lock(&self.lifecycle);
-            self.bind_window(Some(id), front)
+            let (id, workspace) = self.change_workspaces(|workspaces| {
+                if let Some(ws) = workspaces.find_by_name(name) {
+                    return Err(format!(
+                        "There's a workspace named “{}” already. Switch to it, or choose another \
+                         name.",
+                        ws.name
+                    ));
+                }
+                let id = workspaces.create(name);
+                let ws = workspaces
+                    .get_mut(&id)
+                    .ok_or("The workspace wasn't made.")?;
+                ws.roots = roots.iter().map(|root| path_string(root)).collect();
+                Ok((id, ws.name.clone()))
+            })?;
+            if !roots.is_empty() && self.reconfigure_trust() {
+                self.forget_renders();
+            }
+            (self.bind_window(Some(id), front), workspace)
         };
         let built = self.build(&label, front);
         self.workspaces_changed();
         built?;
         Ok(WorkspaceAnswer {
             workspace,
-            focus: self.agent_focus(&label),
+            focus: self.agent_focus(&label, budget),
             window: label,
             opened: true,
         })
     }
 
     /// Brings the window `label` forward for an agent as the `agentFocus` setting has it, once it
-    /// has shown (waiting a moment for a new one): how far it came, or none when it isn't showing.
-    fn agent_focus(&self, label: &str) -> Option<FocusStep> {
+    /// has shown (waiting a moment for a new one), within `budget`: how far it came, or none when
+    /// it isn't showing or didn't say in time.
+    fn agent_focus(&self, label: &str, budget: Budget) -> Option<FocusStep> {
         let window = self.window(label)?;
         let mode = read(&self.settings).agent_focus;
         if mode == AgentFocus::Front {
             // Restored at launch and not shown yet, it comes forward as it shows, not behind.
             window.quiet.store(false, Ordering::SeqCst);
         }
-        if !window.ui_shown.wait(self.timings.shown) {
+        if !window.ui_shown.wait(budget.at_most(self.timings.shown)) {
             log::info!("{label} hasn't shown yet; it comes forward as it does");
         }
-        self.host.agent_focus(label, mode)
+        self.host.agent_focus(label, mode, budget.left())
     }
 
     /// The path an agent wrote, `raw`, as `agent_location` takes it.
@@ -518,7 +613,7 @@ mod tests {
     use crate::state::sync::write;
     use crate::state::test_support::*;
     use lectern_core::agent::status::ViewSelection;
-    use lectern_core::ipc::{AgentOpens, PathMapping};
+    use lectern_core::ipc::{AgentOpens, OpenWhere, PathMapping, WorkspaceOutcome};
 
     /// The `agent-request`s sent, in order, with the window each went to.
     fn agent_requests(host: &FakeHost) -> Vec<(Target, AgentCall)> {
@@ -690,7 +785,8 @@ mod tests {
             "main",
             call.id,
             AgentReply::Answered {
-                answer: AskAnswer::Shown
+                answer: AskAnswer::Shown,
+                message: None,
             }
         ));
     }
@@ -729,7 +825,13 @@ mod tests {
             let answering = ui_answers(
                 &f,
                 "main",
-                vec![AgentReply::Asked, AgentReply::Answered { answer }],
+                vec![
+                    AgentReply::Asked,
+                    AgentReply::Answered {
+                        answer,
+                        message: None,
+                    },
+                ],
             );
             let shown = f.app.agent_answer(show(&notes, 30), "Claude").unwrap();
             answering.join().unwrap();
@@ -758,6 +860,173 @@ mod tests {
             Err("It's too big to show.".to_owned())
         );
         answering.join().unwrap();
+    }
+
+    /// A file the reader chose to show that didn't open: the agent that waited hears why.
+    #[test]
+    fn a_show_the_reader_chose_that_did_not_open_is_its_error() {
+        let (f, _, notes) = vault(|root| profile(&[root]));
+        let why = "notes.md didn't open: It's too big to show.";
+        let answering = ui_answers(
+            &f,
+            "main",
+            vec![
+                AgentReply::Asked,
+                AgentReply::Answered {
+                    answer: AskAnswer::Failed,
+                    message: Some(why.to_owned()),
+                },
+            ],
+        );
+        assert_eq!(
+            f.app.agent_answer(show(&path_string(&notes), 30), "Claude"),
+            Err(why.to_owned())
+        );
+        answering.join().unwrap();
+    }
+
+    /// The `show` `request` on a thread of its own, from Claude.
+    fn showing(f: &Fixture, request: AgentRequest) -> thread::JoinHandle<Result<Value, String>> {
+        let app = Arc::clone(&f.app);
+        thread::spawn(move || app.agent_answer(request, "Claude"))
+    }
+
+    /// Two `show`s that wait, to one window: the newer takes the older's place at the bar, which
+    /// the older's agent hears at once, and the newer waits on for the reader.
+    #[test]
+    fn a_newer_show_to_the_same_window_replaces_one_that_waits() {
+        let (f, plan, notes) = vault(|root| profile(&[root]));
+        let first_asked = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        let first = showing(&f, show(&path_string(&notes), 30));
+        let (_, first_call) = first_asked.join().unwrap();
+        // As the UI does with a newer request: the older one settles as replaced, and the newer
+        // is asked about, here to hear Not now.
+        let (host, app) = (Arc::clone(&f.host), Arc::clone(&f.app));
+        let before = agent_requests(&host).len();
+        let ui = thread::spawn(move || {
+            wait_until("the UI is asked again", || {
+                agent_requests(&host).len() > before
+            });
+            let (_, second_call) = agent_requests(&host).remove(before);
+            let answered = |answer| AgentReply::Answered {
+                answer,
+                message: None,
+            };
+            assert!(app.agent_reply("main", first_call.id, answered(AskAnswer::Replaced)));
+            assert!(app.agent_reply("main", second_call.id, AgentReply::Asked));
+            assert!(app.agent_reply("main", second_call.id, answered(AskAnswer::Dismissed)));
+        });
+        let second = f
+            .app
+            .agent_answer(show(&path_string(&plan), 30), "Claude")
+            .unwrap();
+        ui.join().unwrap();
+        assert_eq!(first.join().unwrap().unwrap()["state"], "replaced");
+        assert_eq!(second["state"], "dismissed");
+    }
+
+    /// A window that closes while a `show` waits for the reader ends the wait at once: the agent
+    /// hears the window has closed.
+    #[test]
+    fn closing_the_window_while_a_show_waits_answers_that_it_closed() {
+        let (f, _, notes) = vault(|root| profile(&[root]));
+        // Another window, so closing this one lets it go.
+        f.app.new_window().unwrap();
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        let started = Instant::now();
+        let shown = showing(&f, show(&path_string(&notes), 30));
+        answering.join().unwrap();
+        f.app.window_closing("main");
+        assert_eq!(shown.join().unwrap(), Err(CLOSED.to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// A window that turns to another workspace while a `show` waits (its page reloads, and the
+    /// bar with it) ends the wait at once: the request is dismissed.
+    #[test]
+    fn turning_the_window_to_another_workspace_while_a_show_waits_dismisses_it() {
+        let (f, _, garden) = main_and_garden(AgentFocus::Front);
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        let started = Instant::now();
+        let shown = showing(&f, show(&path_string(&notes), 30));
+        answering.join().unwrap();
+        assert_eq!(
+            f.app.open_workspace("main", &garden, OpenWhere::Here),
+            Ok(WorkspaceOutcome::Reload)
+        );
+        assert_eq!(shown.join().unwrap().unwrap()["state"], "dismissed");
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// A `show` that reaches a window's state once it is let go of (the window closed, or turned
+    /// to another workspace, as the show was routed) doesn't wait for an answer that won't come,
+    /// and its UI hears nothing.
+    #[test]
+    fn a_show_that_reaches_a_window_let_go_of_answers_at_once() {
+        let (f, _, garden) = main_and_garden(AgentFocus::Front);
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        let args = ShowArgs {
+            path: path_string(&notes),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: 30,
+        };
+        let started = Instant::now();
+        let turned = f.app.window("main").unwrap();
+        f.app
+            .open_workspace("main", &garden, OpenWhere::Here)
+            .unwrap();
+        assert_eq!(
+            f.app
+                .show_in(&turned, args.clone(), "Claude", Budget::new()),
+            Ok((ShowState::Dismissed, None))
+        );
+        let closed = f.app.window("main").unwrap();
+        f.app.window_destroyed("main");
+        assert_eq!(
+            f.app.show_in(&closed, args, "Claude", Budget::new()),
+            Err(CLOSED.to_owned())
+        );
+        assert!(started.elapsed() < SHOW_WAIT);
+        assert!(agent_requests(&f.host).is_empty());
+    }
+
+    /// A `show` answers within the pipe's time, a second to spare: what is left of it bounds each
+    /// wait, the window's UI's answer and the focus among them.
+    #[test]
+    fn a_show_waits_only_as_long_as_the_pipe_gives_it() {
+        let (f, _, notes) = vault(|root| profile(&[root]));
+        let args = || ShowArgs {
+            path: path_string(&notes),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: 0,
+        };
+        let within = |left: Duration| Budget(Instant::now() + left);
+        // A UI that doesn't answer: given 300 ms, the show gives up then, not after SHOW_WAIT.
+        let started = Instant::now();
+        assert_eq!(
+            f.app
+                .agent_show(args(), "Claude", within(Duration::from_millis(300)))
+                .unwrap_err(),
+            "The window didn't answer in time."
+        );
+        assert!(started.elapsed() < SHOW_WAIT);
+        // Answered at once, the focus is given what is left of a second, not the host's 2 s.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        f.app
+            .agent_show(args(), "Claude", within(Duration::from_secs(1)))
+            .unwrap();
+        answering.join().unwrap();
+        let given = *lock(&f.host.focus_within).last().unwrap();
+        assert!(given <= Duration::from_secs(1), "{given:?}");
+        // The pipe's: ANSWER_WITHIN, less a second.
+        let left = Budget::new().left();
+        assert!(left <= ANSWER_WITHIN - ANSWER_SPARE, "{left:?}");
+        assert!(left > ANSWER_WITHIN - ANSWER_SPARE * 2, "{left:?}");
     }
 
     /// Only a file is shown: a folder, a file that isn't there and a relative path are errors, and
@@ -794,6 +1063,66 @@ mod tests {
         assert!(agent_requests(&f.host).is_empty());
         let payload = f.state.startup();
         assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+    }
+
+    /// A window still starting with a file the user launched opens that one: an agent's `show`
+    /// meanwhile is refused, never taking its place.
+    #[test]
+    fn an_agents_show_never_takes_the_place_of_a_launch_a_starting_window_holds() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let notes = dir.file("vault/notes.md", "# Notes\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let launch = OpenRequest {
+            path: path_string(&plan),
+            t0_ms: None,
+            folder: false,
+        };
+        assert!(f.state.opens.offer(launch).is_none());
+        assert_eq!(
+            f.app.agent_answer(show(&path_string(&notes), 0), "Claude"),
+            Err(OPENING_FOR_USER.to_owned())
+        );
+        let payload = f.state.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+    }
+
+    /// `newWindow`: a file no open window's libraries hold opens in a new blank window, as it
+    /// starts; one a workspace holds goes to that workspace's window all the same.
+    #[test]
+    fn a_show_in_a_new_window_opens_a_blank_one_unless_a_workspace_holds_the_file() {
+        let (f, plan, _) = vault(|root| profile(&[root]));
+        let loose = f.dir.file("elsewhere/loose.md", "# Loose\n");
+        let in_new = |path: &Path| {
+            AgentRequest::Show(ShowArgs {
+                path: path_string(path),
+                workspace: None,
+                target: None,
+                new_window: true,
+                wait: 0,
+            })
+        };
+        let answer = f.app.agent_answer(in_new(&loose), "Claude").unwrap();
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(answer["workspace"], Value::Null);
+        let label = answer["window"].as_str().unwrap().to_owned();
+        assert_ne!(label, "main");
+        assert_eq!(*lock(&f.host.opened), [(label.clone(), true)]);
+        let window = f.app.window(&label).unwrap();
+        assert_eq!(window.workspace_id(), None);
+        assert!(agent_requests(&f.host).is_empty());
+        let payload = window.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), loose);
+        // Main's file goes to Main's window.
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown]);
+        let answer = f.app.agent_answer(in_new(&plan), "Claude").unwrap();
+        answering.join().unwrap();
+        assert_eq!(
+            (answer["window"].as_str(), answer["workspace"].as_str()),
+            (Some("main"), Some("Main"))
+        );
+        assert_eq!(f.host.opened_windows(), [label]);
     }
 
     /// Workspaces Main (open, over the vault) and Garden (closed, over the garden), each holding
@@ -922,7 +1251,10 @@ mod tests {
             folder: false,
         };
         let reach = |raw: &str| agent_location(&f.app.mapper(), &read(&f.app.trust), raw);
-        assert!(f.state.opens.offer_from_agent(request("a.md")).is_none());
+        assert!(matches!(
+            f.state.opens.offer_from_agent(request("a.md")),
+            AgentOffer::Held
+        ));
         let _ = f.state.startup();
         write(&f.app.trust).configure(&[], &[]);
         assert!(!f.app.trusts(r"\\0.0.0.0\share\a.md"));
@@ -1084,5 +1416,51 @@ mod tests {
         );
         assert!(f.host.opened_windows().is_empty());
         assert!(read(&f.app.workspaces).find_by_name("Attic").is_none());
+    }
+
+    /// A workspace an agent creates opens in its own window before anything else can open it. A
+    /// `show` of a file in its folder that races the create, routed and bound under the lifecycle
+    /// lock as any is, finds it not made yet, so the workspace never shows in two windows.
+    #[test]
+    fn a_workspace_being_created_is_never_opened_twice() {
+        let (f, _, _) = main_and_garden(AgentFocus::Front);
+        let reading = f.dir.folder("reading");
+        let note = f.dir.file("reading/note.md", "# Note\n");
+        let made = || read(&f.app.workspaces).find_by_name("Reading").is_some();
+        let creating = {
+            // Something else is binding a window: the create waits its turn.
+            let _life = lock(&f.app.lifecycle);
+            let app = Arc::clone(&f.app);
+            let folder = path_string(&reading);
+            let creating = thread::spawn(move || {
+                app.agent_answer(
+                    workspace(WorkspaceAction::Create, "Reading", &[folder]),
+                    "Claude",
+                )
+            });
+            let started = Instant::now();
+            while !made() && started.elapsed() < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            // The racing show, as `agent_show` routes and binds it.
+            if let Ok(AgentRoute::Reopen(id)) = f.app.route_agent(&note, None, false) {
+                f.app.bind_window(Some(id), false);
+            }
+            creating
+        };
+        creating.join().unwrap().unwrap();
+        let id = read(&f.app.workspaces)
+            .find_by_name("Reading")
+            .unwrap()
+            .id
+            .clone();
+        let showing: Vec<String> = f
+            .app
+            .windows()
+            .iter()
+            .filter(|w| w.workspace_id().as_deref() == Some(id.as_str()))
+            .map(|w| w.label().to_owned())
+            .collect();
+        assert_eq!(showing.len(), 1, "{showing:?}");
     }
 }

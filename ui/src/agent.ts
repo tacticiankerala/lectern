@@ -8,9 +8,12 @@
 //   line), or when the `agentOpens` setting says to switch. Otherwise the window asks the reader
 //   first, with a bar over the top of the document: "Claude wants to show plan.md › Rollout",
 //   Show and Not now. One request asks at a time: a newer one takes its place, whatever the newer
-//   one does. It is never dropped otherwise; the reader's own moves leave it. What became of each
-//   request asked about (shown, dismissed or replaced) is told to Rust as an `answered` reply to
-//   it, and kept for `status`. Agent opens go on the history, so Back returns.
+//   one does. The reader's own moves leave it, unless they open its file themselves, which shows
+//   it. Show takes it off the bar and settles it once the file has opened (shown), or hasn't
+//   (failed, with why). The window leaving (its page reloading into another workspace, or the
+//   window closing once its unsaved comment text is let go) dismisses it. What became of each
+//   request asked about (shown, dismissed, replaced or failed) is told to Rust as an `answered`
+//   reply to it, and kept for `status`. Agent opens go on the history, so Back returns.
 // The other tools aren't offered yet. Loaded on the first request.
 import { blockLines, leafBlockOf, quoteFromRange, textOnly } from "./comments-text";
 import { h, HEADINGS, samePath } from "./dom";
@@ -57,8 +60,11 @@ export interface AgentHost extends DocHost {
   open(path: string, line: number | null): Promise<string | null>;
   /** Scrolls the document on screen to its source line `line`. */
   scrollToLine(line: number): void;
-  /** Tells Rust what became of the request `id`, which the window asked the reader about. */
-  answered(id: number, answer: AskAnswer): void;
+  /**
+   * Tells Rust what became of the request `id`, which the window asked the reader about, with why
+   * when it `failed`; resolves once told.
+   */
+  answered(id: number, answer: AskAnswer, message?: string): Promise<void>;
   /** Where the bar that asks the reader goes. */
   readonly bar: HTMLElement;
 }
@@ -101,6 +107,22 @@ export class Agent {
     return { ...view(this.host), ask: this.asking?.path ?? null, answers: [...this.answers] };
   }
 
+  /** The document on screen changed: the file asked about, opened by the reader, is shown. */
+  docShown(): void {
+    const doc = this.host.doc();
+    if (this.asking && doc && samePath(doc.path, this.asking.path)) {
+      void this.settle("shown");
+    }
+  }
+
+  /**
+   * The window is leaving: its page reloads into another workspace, or it closes. The request it
+   * asks about, if any, is dismissed; resolves once Rust is told.
+   */
+  leave(): Promise<void> {
+    return this.settle("dismissed");
+  }
+
   /**
    * `show` from the agent `agent`, the request `id`: on screen at once, or asked about first (see
    * the top of this file).
@@ -108,7 +130,7 @@ export class Agent {
   private async show(id: number, agent: string, args: ShowArgs): Promise<AgentReply> {
     const target = args.target;
     const line = target && "line" in target ? target.line : null;
-    this.settle("replaced");
+    void this.settle("replaced");
     const doc = this.host.doc();
     if (doc && samePath(doc.path, args.path)) {
       if (line !== null) this.host.scrollToLine(line);
@@ -129,24 +151,50 @@ export class Agent {
     const failure = await this.host.open(path, line);
     return failure === null
       ? { kind: "shown" }
-      : { kind: "failed", message: `${fileName(path)} didn't open: ${failure}` };
+      : { kind: "failed", message: didNotOpen(path, failure) };
   }
 
   /**
-   * The request being asked about, if any, settles as `answer`: the bar goes, Rust is told, and
-   * `status` keeps it.
+   * Show, on the bar: the request comes off it, and settles once its file has opened (shown), or
+   * hasn't (failed, with why, which the window shows too).
    */
-  private settle(answer: AskAnswer): Ask | null {
-    const ask = this.asking;
+  private async showAsked(): Promise<void> {
+    const ask = this.take();
     if (ask === null) {
-      return null;
+      return;
     }
-    this.asking = null;
-    this.renderBar();
-    this.answers.push({ path: ask.path, answer });
-    this.answers.splice(0, Math.max(0, this.answers.length - ANSWERS_KEPT));
-    this.host.answered(ask.id, answer);
+    const failure = await this.host.open(ask.path, ask.line);
+    await (failure === null
+      ? this.record(ask, "shown")
+      : this.record(ask, "failed", didNotOpen(ask.path, failure)));
+  }
+
+  /** The request being asked about, if any, settles as `answer` (see `take` and `record`). */
+  private settle(answer: AskAnswer): Promise<void> {
+    const ask = this.take();
+    return ask === null ? Promise.resolve() : this.record(ask, answer);
+  }
+
+  /** The request being asked about, taken off the bar, which goes; null for none. */
+  private take(): Ask | null {
+    const ask = this.asking;
+    if (ask !== null) {
+      this.asking = null;
+      this.renderBar();
+    }
     return ask;
+  }
+
+  /**
+   * What became of `ask`, with why when it `failed`: `status` keeps it, and Rust is told; resolves
+   * once it is.
+   */
+  private record(ask: Ask, answer: AskAnswer, message?: string): Promise<void> {
+    const outcome: AskOutcome = { path: ask.path, answer };
+    if (message !== undefined) outcome.message = message;
+    this.answers.push(outcome);
+    this.answers.splice(0, Math.max(0, this.answers.length - ANSWERS_KEPT));
+    return this.host.answered(ask.id, answer, message);
   }
 
   /** The bar, for the request being asked about; hidden when there is none. */
@@ -161,12 +209,10 @@ export class Agent {
     const show = h("button", { type: "button", class: "btn primary" }, "Show");
     const later = h("button", { type: "button", class: "btn" }, "Not now");
     show.addEventListener("click", () => {
-      const shown = this.settle("shown");
-      // A file that fails to open now shows why in the window.
-      if (shown) void this.host.open(shown.path, shown.line);
+      void this.showAsked();
     });
     later.addEventListener("click", () => {
-      this.settle("dismissed");
+      void this.settle("dismissed");
     });
     bar.replaceChildren(
       h(
@@ -188,6 +234,11 @@ export class Agent {
 /** A path's file name. */
 function fileName(path: string): string {
   return path.slice(Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")) + 1);
+}
+
+/** Why `path` didn't open, `failure`, as the agent hears it. */
+function didNotOpen(path: string, failure: string): string {
+  return `${fileName(path)} didn't open: ${failure}`;
 }
 
 /** What the document on screen shows: its file, the heading and line at the top, the selection. */

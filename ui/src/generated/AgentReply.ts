@@ -5,4 +5,4 @@ import type { WindowView } from "./WindowView";
 /**
  * A window's UI's answer to an [`AgentCall`], tagged by `kind`.
  */
-export type AgentReply = { "kind": "view" } & WindowView | { "kind": "shown" } | { "kind": "asked" } | { "kind": "answered", answer: AskAnswer, } | { "kind": "failed", message: string, };
+export type AgentReply = { "kind": "view" } & WindowView | { "kind": "shown" } | { "kind": "asked" } | { "kind": "answered", answer: AskAnswer, message?: string, } | { "kind": "failed", message: string, };

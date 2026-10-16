@@ -1,10 +1,10 @@
 // An agent's requests to a window (src/agent.ts): what `status` hears from it about what it shows,
 // for a note or text file (the heading path and line at the top of the view, and the selection), an
 // HTML page (from its session), a PDF and nothing; the round trip through the app; and `show`,
-// which asks first with the bar when the window shows another file, and the agent settings in
-// Preferences.
+// which asks first with the bar when the window shows another file, settled once the reader's
+// answer has landed, or as the window leaves; and the agent settings in Preferences.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FakeBackend, type FakeOptions } from "../dev/backend-fake";
+import { FakeBackend, type FakeOptions, type FakeWorkspace } from "../dev/backend-fake";
 import { NOT_YET, view, type DocHost } from "../src/agent";
 import { App } from "../src/app";
 import type { AgentRequest } from "../src/generated/AgentRequest";
@@ -12,7 +12,18 @@ import type { DocKind } from "../src/generated/DocKind";
 import type { DocPayload } from "../src/generated/DocPayload";
 import type { OutlineItem } from "../src/generated/OutlineItem";
 import type { Target } from "../src/generated/Target";
-import { A, B, C, appRoot, docPayload, fixtures, rendered, settle } from "./helpers";
+import {
+  A,
+  B,
+  C,
+  ROOT,
+  appRoot,
+  deferred,
+  docPayload,
+  fixtures,
+  rendered,
+  settle,
+} from "./helpers";
 
 const PLAN = "S:\\Notes\\My Vault\\plan.md";
 /** The pane's height, in pixels. */
@@ -431,6 +442,111 @@ describe("an agent's show", () => {
     await vi.waitFor(() => {
       expect(app.state.doc?.path).toBe(B);
     });
+  });
+
+  it("settles Show once the file has opened, not before", async () => {
+    const { fake, app } = await launched();
+    await fake.agentRequest(show(B));
+    const opening = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+      await opening.promise;
+      return open(path);
+    });
+    barButton("Show").click();
+    await settle();
+    // The bar goes at once; the answer waits for the open.
+    expect(bar()).toBeNull();
+    expect(fake.agentAnswers).toEqual([]);
+    opening.resolve();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    });
+    expect(app.state.doc?.path).toBe(B);
+  });
+
+  it("settles Show of a file that doesn't open as failed, with why", async () => {
+    const { fake } = await launched();
+    const gone = "C:\\V\\gone.md";
+    await fake.agentRequest(show(gone));
+    barButton("Show").click();
+    const message = `gone.md didn't open: Couldn't find ${gone}`;
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "failed", message }]);
+    });
+    expect(await fake.agentRequest({ tool: "status" })).toMatchObject({
+      ask: null,
+      answers: [{ path: gone, answer: "failed", message }],
+    });
+  });
+
+  it("settles as shown when the reader opens the file asked about themselves", async () => {
+    const { fake, app } = await launched();
+    await fake.agentRequest(show(B));
+    await app.open(B, { push: true });
+    expect(bar()).toBeNull();
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    expect(await fake.agentRequest({ tool: "status" })).toMatchObject({
+      ask: null,
+      answers: [{ path: B, answer: "shown" }],
+    });
+  });
+});
+
+const WORK: FakeWorkspace = { id: "w1", name: "Work", roots: [ROOT], open: true, theme: null };
+const PERSONAL: FakeWorkspace = {
+  id: "w2",
+  name: "Personal",
+  roots: ["C:\\Users\\me\\projects"],
+  open: false,
+  theme: null,
+};
+
+describe("a request asked about as the window leaves", () => {
+  it("is dismissed before the page reloads into another workspace", async () => {
+    const { fake, app } = await launched(A, { workspaces: [WORK, PERSONAL] });
+    const reload = vi.fn();
+    app.reloadWindow = reload;
+    await fake.agentRequest(show(B));
+    const replied = vi.spyOn(fake, "replyToAgent");
+    await app.workspaces.open("w2", "here");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "dismissed" }]);
+    expect(replied.mock.invocationCallOrder[0]).toBeLessThan(
+      reload.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it("is dismissed before the window closes, once its unsaved comment is let go", async () => {
+    const { fake } = await launched();
+    await fake.agentRequest(show(B));
+    fake.emit("close-requested", null);
+    const asked = await vi.waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".ws-confirm");
+      if (!found) throw new Error("no confirm");
+      return found;
+    });
+    // Kept open, the request still asks.
+    asked.querySelectorAll<HTMLButtonElement>(".btn")[1]?.click();
+    await settle();
+    expect(bar()).not.toBeNull();
+    expect(fake.agentAnswers).toEqual([]);
+    fake.emit("close-requested", null);
+    const again = await vi.waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".ws-confirm");
+      if (!found) throw new Error("no confirm");
+      return found;
+    });
+    const replied = vi.spyOn(fake, "replyToAgent");
+    const closed = vi.spyOn(fake, "closeWindow");
+    again.querySelectorAll<HTMLButtonElement>(".btn")[0]?.click();
+    await vi.waitFor(() => {
+      expect(closed).toHaveBeenCalledTimes(1);
+    });
+    expect(fake.agentAnswers).toEqual([{ id: 1, answer: "dismissed" }]);
+    expect(replied.mock.invocationCallOrder[0]).toBeLessThan(
+      closed.mock.invocationCallOrder[0] ?? 0,
+    );
   });
 });
 

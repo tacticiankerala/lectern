@@ -5,9 +5,10 @@
 // 20), what HTML pages may do, path mappings (from/to rows, saved as a field loses focus), the WSL
 // distribution Linux paths go into (listed each time Preferences opens, and hidden without WSL),
 // the editor command, automatic update checks, what an agent's open of a file does and how its
-// window comes forward, and the workspaces, to rename or delete (not one open in a window). Then the version. Settings changed elsewhere show at once in the switches,
-// the theme, the WSL distribution and the path mappings, unless the mappings were edited here:
-// those are what closing saves. Loaded on first use.
+// window comes forward, and the workspaces, to rename or delete (not one open in a window). Then
+// the version. Settings changed elsewhere show at once in the switches, the theme, the WSL
+// distribution and the path mappings, unless the mappings were edited here: those are what
+// closing saves. Loaded on first use.
 import { h } from "./dom";
 import type { AgentFocus } from "./generated/AgentFocus";
 import type { AgentOpens } from "./generated/AgentOpens";

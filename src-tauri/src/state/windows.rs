@@ -701,6 +701,8 @@ impl WindowState {
         drop(watch);
         // Its pages' opens go with it: their URLs serve nothing, and their reports go nowhere.
         lock(&self.app.page_opens).forget(&self.label);
+        // So do the agents' requests it was sent: whoever waits on one wakes now (`App::show_in`).
+        self.app.agent_calls.forget_window(&self.label);
     }
 
     pub(super) fn is_retired(&self) -> bool {
