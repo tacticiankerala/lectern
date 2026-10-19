@@ -189,6 +189,7 @@ pub fn run(context: tauri::Context, launch: Launch) {
             commands::agent_reply,
             commands::agent_places,
             commands::leave_document,
+            commands::keep_document,
         ])
         .on_window_event(on_window_event)
         .setup(move |app| setup(app, launch, &held))

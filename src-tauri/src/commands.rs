@@ -1,8 +1,12 @@
 //! The commands the UI invokes, each a thin call into the calling window's `WindowState` (or into
 //! the `App`). Tauri runs synchronous commands on the main thread, so every command that may touch
-//! the file system (or wait on a share) is async and runs its work on the blocking pool. Arguments
-//! arrive camelCased.
+//! the file system (or wait on a share) is async and runs its work on the blocking pool. An async
+//! command runs only once the runtime polls it, while a synchronous one runs at once, so the UI
+//! numbers its opens, and its leaves and keeps of its document, in the order it sends them
+//! (`generation`), and Rust orders them by that number, never by when they ran
+//! (`WindowState::open_numbered`). Arguments arrive camelCased.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use lectern_core::agent::request::Target;
@@ -51,28 +55,32 @@ pub async fn startup(window: WebviewWindow, state: Shared<'_>) -> Result<Startup
     blocking(window_state(&window, &state)?, |s| s.startup()).await
 }
 
+/// Opens a document, as the open the UI numbered `generation` (see the top of this file).
 #[tauri::command]
 pub async fn open_document(
     path: String,
+    generation: u64,
     window: WebviewWindow,
     state: Shared<'_>,
 ) -> Result<OpenResult, String> {
     blocking(window_state(&window, &state)?, move |s| {
-        s.open_document(&path)
+        s.open_numbered(generation, &path)
     })
     .await
 }
 
 /// Opens a file or folder the user chose (the file dialog, a drop, Add folder) as a launch argument
 /// would: its network host is trusted, and a folder joins the library unless it nests with a root.
+/// The open the UI numbered `generation` (see the top of this file).
 #[tauri::command]
 pub async fn open_user_path(
     path: String,
+    generation: u64,
     window: WebviewWindow,
     state: Shared<'_>,
 ) -> Result<UserOpen, String> {
     blocking(window_state(&window, &state)?, move |s| {
-        s.open_user_path(&path)
+        s.open_user_path_numbered(generation, &path)
     })
     .await
 }
@@ -472,13 +480,34 @@ pub fn agent_reply(id: u64, reply: AgentReply, window: WebviewWindow, state: Sha
     state.agent_reply(window.label(), id, reply);
 }
 
-/// The calling window's UI left its document for none: the welcome page, or a file deleted while
-/// open. Nothing acts on that document any more.
+/// The calling window's UI left its document for none, the welcome page: nothing acts on that
+/// document any more. When `missing`, it was deleted or moved away while open, and the window says
+/// so: nothing acts on it either, but it is still watched, so its return reloads the window. No
+/// open the UI numbered below `generation` becomes its document (see the top of this file).
 #[tauri::command]
-pub fn leave_document(window: WebviewWindow, state: Shared<'_>) {
+pub fn leave_document(missing: bool, generation: u64, window: WebviewWindow, state: Shared<'_>) {
     if let Some(s) = state.window(window.label()) {
-        s.leave_document();
+        if missing {
+            s.document_missing(generation);
+        } else {
+            s.leave_document(generation);
+        }
     }
+}
+
+/// The calling window's UI dropped an open on its way and keeps `path` on screen: no open it
+/// numbered below `generation` becomes its document (see the top of this file). False when one had
+/// already, for the UI to open `path` again.
+#[tauri::command]
+pub fn keep_document(
+    path: String,
+    generation: u64,
+    window: WebviewWindow,
+    state: Shared<'_>,
+) -> bool {
+    state
+        .window(window.label())
+        .is_some_and(|s| s.keep_document(Path::new(&path), generation))
 }
 
 /// Where each of an agent's `targets` is now in `path`, the note or text file the calling window

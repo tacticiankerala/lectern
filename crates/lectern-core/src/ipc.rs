@@ -383,6 +383,10 @@ pub struct StartupPayload {
     /// asked for its startup payload, each time it starts again (it turned to another workspace),
     /// until a check has run.
     pub primary: bool,
+    /// The highest number this window's UI has given an open, or a leave or keep of its document
+    /// (`open_document`'s `generation`), so a page loaded over the same window state (a reload)
+    /// numbers from above it; 0 for a fresh window.
+    pub generation: u64,
     /// Where an agent's `show` takes the reader in `initial`, when the window opened it for an
     /// agent while starting.
     #[serde(default, skip_serializing_if = "Option::is_none")]

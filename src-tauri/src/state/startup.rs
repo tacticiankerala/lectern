@@ -24,7 +24,9 @@ impl WindowState {
     /// a second launch, or an agent's `show`, asked for another one meanwhile: the agent's comes
     /// with its target, and its `show` hears whether it opened. The payloads of the window that
     /// asked first are the primary ones, until the automatic update check has run
-    /// (`App::claims_update_check`).
+    /// (`App::claims_update_check`). The payload tells the highest generation the UI has numbered
+    /// with, so a page loaded over this same state (a reload) numbers from above it, and an open
+    /// still on its way from the page before never becomes current.
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
         self.app.perf.mark("webview-ready", None);
         if !self.snapshots_loaded.wait(self.app.timings.snapshots) {
@@ -53,7 +55,7 @@ impl WindowState {
             settle,
         }) = self.opens.ready()
         {
-            self.next_seq();
+            self.count_open();
             let path = PathBuf::from(&request.path);
             if by_agent {
                 // A file, its host checked already (`state::agent`): opened as it is, trusting
@@ -88,6 +90,7 @@ impl WindowState {
             workspace,
             workspaces,
             primary: self.app.claims_update_check(&self.label),
+            generation: self.ui_generation().max(self.cutoff.load(Ordering::SeqCst)),
             agent_target,
         };
         self.app.perf.mark("startup-ready", None);
@@ -111,7 +114,10 @@ impl WindowState {
                 log::info!("didn't restore the last document: {}", error.message);
                 None
             }
-            outcome => Some(self.finish_open(self.next_seq(), &doc.path, outcome)),
+            outcome => {
+                self.count_open();
+                Some(self.finish_open(self.ui_generation(), &doc.path, outcome))
+            }
         }
     }
 
@@ -153,17 +159,27 @@ impl WindowState {
         }
     }
 
-    /// Opens a path the user chose in the running app (the file dialog, a drop, Add folder) with
-    /// the same decision as a launch argument (`resolve_target`): its network host is trusted, a
-    /// file opens, and a folder joins the library unless it nests with a root, opening its README
-    /// when it has one. A blank window has no library: a folder there opens and joins nothing, and
-    /// the answer says it was one (`folder`), for the UI to make a workspace of it. Touches the
-    /// file system.
+    /// Opens a path the user chose in the running app at the UI's latest generation
+    /// (`open_user_path_numbered`), for tests: `commands::open_user_path` carries the UI's number.
+    #[cfg(test)]
     pub fn open_user_path(self: &Arc<Self>, path: &str) -> UserOpen {
-        // Numbered on arrival: an open made while the path resolves (a share can stall) is newer,
-        // and stays current. It counts as an open, like a launch, even when it opens nothing, so
-        // a boot render landing late never overrides it.
-        let seq = self.next_seq();
+        self.open_user_path_numbered(self.ui_generation(), path)
+    }
+
+    /// Opens a path the user chose in the running app (the file dialog, a drop, Add folder) as
+    /// the open the UI numbered `generation` (`open_numbered`), with the same decision as a launch
+    /// argument (`resolve_target`): its network host is trusted, a file opens, and a folder joins
+    /// the library unless it nests with a root, opening its README when it has one. A blank
+    /// window has no library: a folder there opens and joins nothing, and the answer says it was
+    /// one (`folder`), for the UI to make a workspace of it. An open the UI numbered after it,
+    /// while the path resolves (a share can stall), is newer, and stays current; it counts as an
+    /// open, like a launch, even when it opens nothing, so a boot render landing late never
+    /// overrides it. Touches the file system.
+    pub fn open_user_path_numbered(self: &Arc<Self>, generation: u64, path: &str) -> UserOpen {
+        self.generation.fetch_max(generation, Ordering::SeqCst);
+        // Counted before the path resolves (a share can stall), and whether or not it opens
+        // anything, so a boot render landing meanwhile stays quiet (`early_landed_late`).
+        self.count_open();
         if self.blank_window_folder(Path::new(path)) {
             return UserOpen {
                 doc: None,
@@ -172,17 +188,17 @@ impl WindowState {
             };
         }
         let target = self.resolve_target(Path::new(path));
-        self.finish_user_open(seq, target)
+        self.finish_user_open(generation, target)
     }
 
-    /// Opens what a user path resolved to, as the open numbered `seq`.
+    /// Opens what a user path resolved to, as the open numbered `generation`.
     pub(super) fn finish_user_open(
         self: &Arc<Self>,
-        seq: u64,
+        generation: u64,
         target: Option<PathBuf>,
     ) -> UserOpen {
         UserOpen {
-            doc: target.map(|doc| self.open_numbered(seq, &path_string(&doc))),
+            doc: target.map(|doc| self.open_numbered(generation, &path_string(&doc))),
             library: self.library_payload(),
             folder: false,
         }
@@ -196,7 +212,7 @@ impl WindowState {
 
     pub(super) fn forward_now(self: &Arc<Self>, request: OpenRequest) {
         // Counts as an open, so a boot render landing late never overrides it.
-        self.next_seq();
+        self.count_open();
         let path = PathBuf::from(&request.path);
         if self.blank_window_folder(&path) {
             self.emit(UiEvent::OpenRequest(OpenRequest {
@@ -299,6 +315,31 @@ mod tests {
         f.state.open_document(&path_string(&b));
         f.early.fill(early_doc(&a));
         assert!(f.host.open_requests().is_empty());
+        assert_eq!(current(&f).0, b);
+    }
+
+    /// The boot render misses startup, and the reader starts an open that stalls (a slow share):
+    /// it counts from its start, so the boot render landing meanwhile stays quiet, never asking
+    /// the UI to open it over the reader's own open.
+    #[test]
+    fn a_late_boot_render_gives_way_to_an_open_still_under_way() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let a = f.dir.file("a.md", "# A");
+        let b = f.dir.file("b.md", "# B");
+        f.state.startup();
+        let before = f.state.open_seq.load(Ordering::SeqCst);
+        // The reader's open stalls: held at the render cache, as a slow share would hold it.
+        let stalled = lock(&f.state.cache);
+        let state = Arc::clone(&f.state);
+        let path = path_string(&b);
+        let opening = thread::spawn(move || state.open_numbered(1, &path));
+        wait_until("the open is counted", || {
+            f.state.open_seq.load(Ordering::SeqCst) > before
+        });
+        f.early.fill(early_doc(&a));
+        assert!(f.host.open_requests().is_empty());
+        drop(stalled);
+        assert!(matches!(opening.join().unwrap(), OpenResult::Ok { .. }));
         assert_eq!(current(&f).0, b);
     }
 
@@ -444,17 +485,37 @@ mod tests {
         assert_eq!(sidebar_roots(&opened), [path_string(&root)]);
     }
 
+    /// The window's page reloaded over the same state (WebView2's own F5 or Ctrl+R, a renderer
+    /// failure, a dev reload): the UI numbers from what Rust has seen, the payload's `generation`
+    /// (the highest of its opens and its cutoff), so its first open is numbered above everything
+    /// before, and an open still on its way from the page before never becomes current.
+    #[test]
+    fn startup_tells_the_generation_so_a_reloaded_page_numbers_above_it() {
+        let f = fixture(profile(&[]), FakeHost::default());
+        let plan = f.dir.file("notes/plan.md", "# Plan");
+        let notes = f.dir.file("notes/b.md", "# B");
+        // The page before numbered up to 50: an open, then a keep of its file.
+        let _ = f.state.open_numbered(49, &path_string(&plan));
+        assert!(f.state.keep_document(&plan, 50));
+        let payload = f.state.startup();
+        assert_eq!(payload.generation, 50);
+        // The reloaded page's first open is numbered above it; one left over from before isn't.
+        let _ = f.state.open_numbered(51, &path_string(&notes));
+        assert_eq!(current(&f).0, notes);
+        let _ = f.state.open_numbered(49, &path_string(&plan));
+        assert_eq!(current(&f).0, notes);
+    }
+
     #[test]
     fn a_user_path_that_resolves_slowly_never_replaces_a_newer_open() {
         let f = fixture(profile(&[]), FakeHost::default());
         let vault = f.dir.folder("vault");
         f.dir.file("vault/README.md", "# Vault");
         let newer = f.dir.file("notes/b.md", "# B");
-        // The folder arrives and is numbered; while it resolves (a stalled share), B opens.
-        let seq = f.state.next_seq();
+        // The folder arrives, numbered 1; while it resolves (a stalled share), B opens, numbered 2.
         let target = f.state.resolve_target(&vault);
-        f.state.open_document(&path_string(&newer));
-        let opened = f.state.finish_user_open(seq, target);
+        f.state.open_numbered(2, &path_string(&newer));
+        let opened = f.state.finish_user_open(1, target);
         // The README still renders for the UI, which drops the stale answer, but B stays current.
         assert!(matches!(opened.doc, Some(OpenResult::Ok { .. })));
         assert_eq!(current(&f).0, newer);

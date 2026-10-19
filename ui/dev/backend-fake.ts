@@ -642,6 +642,16 @@ export class FakeBackend implements Backend, FakeControl {
   private pageOpens = 0;
   /** The document last opened, which a change of the *HTML pages* setting opens again. */
   private onScreen: string | null = null;
+  /**
+   * As Rust: the generation the window last left or kept its document at. An open numbered below
+   * never becomes the fake's document, however late it is run.
+   */
+  private cutoff = 0;
+  /**
+   * As Rust: the highest generation the window has sent, which its startup payload tells, so a
+   * page loaded over the same state numbers above it.
+   */
+  private generation = 0;
   /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
   /** The settings revision: bumped by every change to the settings or a workspace's theme. */
@@ -713,8 +723,14 @@ export class FakeBackend implements Backend, FakeControl {
       workspace: current ? this.summary(current) : null,
       workspaces: this.summaries(),
       primary: this.options.primary ?? true,
+      generation: this.generation,
       ...(this.options.agentTarget ? { agentTarget: this.options.agentTarget } : {}),
     });
+  }
+
+  /** As Rust: the window sent `generation`, the highest so far. */
+  private numbered(generation: number): void {
+    this.generation = Math.max(this.generation, generation);
   }
 
   /** A root as the library shows it: the fixtures' ready, the offline share's unavailable. */
@@ -747,8 +763,9 @@ export class FakeBackend implements Backend, FakeControl {
     };
   }
 
-  openDocument(path: string): Promise<OpenResult> {
-    return Promise.resolve(this.open(path));
+  openDocument(path: string, generation: number): Promise<OpenResult> {
+    this.numbered(generation);
+    return Promise.resolve(this.open(path, generation));
   }
 
   /**
@@ -756,10 +773,11 @@ export class FakeBackend implements Backend, FakeControl {
    * the library unless it nests with a root. In a blank window a folder opens and joins nothing,
    * and the answer says it is one.
    */
-  openUserPath(path: string): Promise<UserOpen> {
+  openUserPath(path: string, generation: number): Promise<UserOpen> {
+    this.numbered(generation);
     if (DOCUMENT_PATH.test(path) || this.docs.has(key(path))) {
       return Promise.resolve({
-        doc: this.open(path),
+        doc: this.open(path, generation),
         library: structuredClone(this.library),
         folder: false,
       });
@@ -772,7 +790,7 @@ export class FakeBackend implements Backend, FakeControl {
     }
     const readme = `${path}\\README.md`;
     return Promise.resolve({
-      doc: this.docs.has(key(readme)) ? this.open(readme) : null,
+      doc: this.docs.has(key(readme)) ? this.open(readme, generation) : null,
       library: structuredClone(this.library),
       folder: false,
     });
@@ -1489,10 +1507,27 @@ export class FakeBackend implements Backend, FakeControl {
     return replied;
   }
 
-  /** As Rust: the window left its document for none; nothing is on screen. */
-  leaveDocument(): Promise<void> {
+  /**
+   * As Rust: the window left its document for none, or it went missing; either way nothing is on
+   * screen to act on, and no open numbered below `generation` becomes the document. (The fake
+   * watches nothing: a test tells of a missing file's return.)
+   */
+  leaveDocument(_missing: boolean, generation: number): Promise<void> {
+    this.numbered(generation);
+    this.cutoff = generation;
     this.onScreen = null;
     return Promise.resolve();
+  }
+
+  /**
+   * As Rust: the window keeps `path` on screen, and no open numbered below `generation` becomes
+   * the document; false when another open became the document first (the fake's opens do at
+   * once, as asked).
+   */
+  keepDocument(path: string, generation: number): Promise<boolean> {
+    this.numbered(generation);
+    this.cutoff = generation;
+    return Promise.resolve(this.onScreen !== null && key(this.onScreen) === key(path));
   }
 
   /**
@@ -1683,9 +1718,16 @@ export class FakeBackend implements Backend, FakeControl {
     return this.docs.get(key(path))?.doc.html ?? null;
   }
 
-  private open(path: string): OpenResult {
+  /**
+   * As Rust opens `path`: the document, or why it didn't open. It becomes the fake's document at
+   * once (as Rust's can before the window drops it) unless the window left or kept its document
+   * since numbering it `generation` (`cutoff`); an open of the fake's own (startup's) always does.
+   */
+  private open(path: string, generation = Infinity): OpenResult {
     const found = this.docs.get(key(path));
-    this.onScreen = path;
+    if (generation >= this.cutoff) {
+      this.onScreen = path;
+    }
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };
     }

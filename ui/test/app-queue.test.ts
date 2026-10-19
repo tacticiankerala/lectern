@@ -43,8 +43,10 @@ describe("App startup and opening", () => {
   it("drops the startup document when a newer open started meanwhile", async () => {
     const { fake, app, opened } = setup(A);
     const started = app.start();
-    await app.open(B);
+    // Asked while the startup payload is on its way, the open waits for it, then wins.
+    const opening = app.open(B);
     fake.startupGate.resolve();
+    await opening;
     await started;
     expect(opened).toEqual([B]);
     expect(docText()).toBe("Bee");
@@ -244,7 +246,7 @@ describe("App navigations and background refreshes", () => {
     await app.open(A);
     expect(fake.titles.at(-1)).toBe("Aye — Lectern");
     // The same HTML with a new frontmatter title.
-    const current = await fake.openDocument(A);
+    const current = await fake.openDocument(A, 2);
     if (current.status !== "ok") throw new Error("A didn't open");
     fake.overrides[A] = { status: "ok", doc: { ...current.doc, title: "Aye, renamed" } };
     fake.emit("doc-changed", { path: A } satisfies DocChanged);

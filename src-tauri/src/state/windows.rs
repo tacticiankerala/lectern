@@ -1060,7 +1060,6 @@ mod tests {
         let garden = add(&mut profile, "Garden", &[], false);
         let f = fixture_in(dir, profile, FakeHost::default());
         // An open of the older note is rendering...
-        let seq = f.state.next_seq();
         let rendered = f.state.load(&older);
         // ...when the window turns to Garden, and Work opens in a new window, on the newer note.
         f.app
@@ -1071,7 +1070,7 @@ mod tests {
             .unwrap();
         opened_path(&window(&f, "win-1").open_document(&path_string(&newer)));
         // The older open finishes in the retired state.
-        opened_path(&f.state.finish_open(seq, &older, rendered));
+        opened_path(&f.state.finish_open(1, &older, rendered));
         let saved = saved_workspaces(&f);
         let work_ws = saved.get("w1").unwrap();
         assert_eq!(work_ws.last_doc, Some(path_string(&newer)));

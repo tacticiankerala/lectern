@@ -36,7 +36,7 @@ describe("FakeBackend documents", () => {
     const fake = new FakeBackend(fixtures());
     const before = (await fake.getLibrary()).roots.length;
     for (const path of ["C:\\Elsewhere\\brief.pdf", "C:\\Elsewhere\\page.HTML"]) {
-      const opened = await fake.openUserPath(path);
+      const opened = await fake.openUserPath(path, 1);
       expect(opened.folder, path).toBe(false);
       expect(opened.doc?.status, path).toBe("err");
       expect(opened.library.roots, path).toHaveLength(before);

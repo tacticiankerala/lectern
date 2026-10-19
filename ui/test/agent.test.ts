@@ -20,6 +20,8 @@ import {
   type PageText,
 } from "../src/agent";
 import { App } from "../src/app";
+import { buildTextIndex } from "../src/comments-text";
+import type { Passage } from "../src/doc-view";
 import type { AgentOpens } from "../src/generated/AgentOpens";
 import type { AgentRequest } from "../src/generated/AgentRequest";
 import type { CommentStatus } from "../src/generated/CommentStatus";
@@ -40,6 +42,7 @@ import {
   docPayload,
   type Deferred,
   fixtures,
+  GatedBackend,
   rendered,
   settle,
 } from "./helpers";
@@ -127,6 +130,12 @@ function textOf(id: string): Text {
   if (!(text instanceof Text)) throw new Error(`no text in #${id}`);
   return text;
 }
+
+// The text index, watched: a jump to a heading never builds one of the whole document.
+vi.mock("../src/comments-text", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/comments-text")>();
+  return { ...actual, buildTextIndex: vi.fn(actual.buildTextIndex) };
+});
 
 afterEach(() => {
   document.getSelection()?.removeAllRanges();
@@ -470,9 +479,9 @@ describe("an agent's show", () => {
     await fake.agentRequest(show(B));
     const opening = deferred();
     const open = fake.openDocument.bind(fake);
-    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
       await opening.promise;
-      return open(path);
+      return open(path, generation);
     });
     barButton("Show").click();
     await settle();
@@ -511,6 +520,350 @@ describe("an agent's show", () => {
       ask: null,
       answers: [{ path: B, answer: "shown" }],
     });
+  });
+});
+
+describe("an agent's open still on its way", () => {
+  /** The app with A on screen, whose opens of `slow` wait for its gate; agents' opens as `opens`. */
+  async function gated(slow: string, opens: AgentOpens = "switch") {
+    const fake = new GatedBackend(fixtures(), { initial: A });
+    fake.startupGate.resolve();
+    const app = new App(fake, appRoot());
+    await app.start();
+    fake.settingsElsewhere({ agentOpens: opens });
+    fake.slowPath = slow;
+    return { fake, app };
+  }
+
+  it("is dropped by a newer show of the file on screen, which stays", async () => {
+    const { fake, app } = await gated(B);
+    const opens = vi.spyOn(fake, "openDocument");
+    const keeps = vi.spyOn(fake, "keepDocument");
+    const first = fake.agentRequest(show(B));
+    await settle();
+    expect(await fake.agentRequest(show(A))).toEqual({ kind: "shown" });
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+    await settle();
+    expect(app.state.doc?.path).toBe(A);
+    // Rust had taken B's open as its document already (the fake does at once): A is opened again
+    // in place, so Rust's is the one on screen.
+    // The keep is numbered after B's open, so Rust refuses that open however late it runs, and
+    // the reopen after the keep.
+    expect(opens.mock.calls).toEqual([
+      [B, 1],
+      [A, 3],
+    ]);
+    expect(keeps.mock.calls).toEqual([[A, 2]]);
+  });
+
+  it("is dropped by a newer show that asks first, once Show on the bar sent it", async () => {
+    const { fake, app } = await gated(B, "ask");
+    expect(await fake.agentRequest(show(B))).toEqual({ kind: "asked" });
+    barButton("Show").click();
+    await settle();
+    expect(await fake.agentRequest(show(C))).toEqual({ kind: "asked" });
+    fake.openGate.resolve();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "replaced" }]);
+    });
+    await settle();
+    expect(app.state.doc?.path).toBe(A);
+    expect(bar()?.textContent).toContain("Claude wants to show c.md");
+  });
+
+  it("isn't the reader's own: a newer show leaves the file they open to land", async () => {
+    const { fake, app } = await gated(C);
+    const reading = app.open(C, { push: true });
+    await settle();
+    expect(await fake.agentRequest(show(A))).toEqual({ kind: "shown" });
+    fake.openGate.resolve();
+    await reading;
+    expect(app.state.doc?.path).toBe(C);
+  });
+
+  it("taken by Rust already, has the file on screen opened again before the newer target lands", async () => {
+    const { fake, app } = await gated(B);
+    const first = fake.agentRequest(show(B));
+    await settle();
+    // A changed on disk meanwhile, so opened again it renders afresh.
+    fake.setDoc(A, "<h1 id='aye' data-sourcepos='1:1-1:5'>Aye again</h1>");
+    const landedOn: (string | undefined)[] = [];
+    vi.spyOn(app.view, "scrollToLine").mockImplementation(() => {
+      landedOn.push(document.querySelector("#lx-doc h1")?.textContent);
+      return true;
+    });
+    // The fake takes B's open as its document at once, as Rust can before the drop.
+    expect(await fake.agentRequest(show(A, { line: 1 }), "Claude", [placed(1, 1)])).toEqual({
+      kind: "shown",
+    });
+    // The target went to the document that stays, not the one opened again over it.
+    expect(landedOn).toEqual(["Aye again"]);
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+
+  it("taken by Rust already, holds back a later show too until the file on screen is back", async () => {
+    const { fake, app } = await gated(B);
+    const first = fake.agentRequest(show(B));
+    await settle();
+    // A changed on disk meanwhile; opening it again waits, as a slow share would.
+    fake.setDoc(A, "<h1 id='aye' data-sourcepos='1:1-1:5'>Aye again</h1>");
+    const reopening = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
+      if (path === A) await reopening.promise;
+      return open(path, generation);
+    });
+    const reading: SavedPosition = { headingId: "aye", offset: 40, line: 1, fraction: 0.5 };
+    vi.spyOn(app.view, "captureAnchor").mockReturnValue(reading);
+    const moves: string[] = [];
+    vi.spyOn(app.view, "restore").mockImplementation(() => {
+      moves.push("restored");
+    });
+    vi.spyOn(app.view, "scrollToLine").mockImplementation((line) => {
+      moves.push(`line ${String(line)}`);
+      return true;
+    });
+    // The show that drops B's open starts opening A again; a later one drops nothing itself.
+    const second = fake.agentRequest(show(A));
+    await settle();
+    const third = fake.agentRequest(show(A, { line: 1 }), "Claude", [placed(1, 1)]);
+    await settle();
+    expect(moves).toEqual([]);
+    reopening.resolve();
+    expect(await third).toEqual({ kind: "shown" });
+    expect(await second).toEqual({ kind: "replaced" });
+    // The newest target lands last, over the place the reopened A was restored to.
+    expect(moves).toEqual(["restored", "line 1"]);
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+
+  it("leaves a change deferred behind the reader's own open for that open to settle, so Rust stays on their file", async () => {
+    const { fake, app } = await gated(B);
+    const first = fake.agentRequest(show(B));
+    await settle();
+    // Rust answers the keep slowly, and the reader's open of C is slow too.
+    const keeping = deferred();
+    const keep = fake.keepDocument.bind(fake);
+    vi.spyOn(fake, "keepDocument").mockImplementation(async (path, generation) => {
+      await keeping.promise;
+      return keep(path, generation);
+    });
+    const openingC = deferred();
+    const open = fake.openDocument.bind(fake);
+    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
+      if (path === C) await openingC.promise;
+      return open(path, generation);
+    });
+    // The show drops B's open; its recovery waits for Rust. The reader opens C meanwhile, and A
+    // changes on disk behind that open.
+    const second = fake.agentRequest(show(A));
+    await settle();
+    const reading = app.open(C, { push: true });
+    await settle();
+    fake.emit("doc-changed", { path: A });
+    keeping.resolve();
+    expect(await second).toEqual({
+      kind: "failed",
+      message: "a.md isn't on screen any more: another file took its place.",
+    });
+    openingC.resolve();
+    await reading;
+    await settle();
+    expect(app.state.doc?.path).toBe(C);
+    // The change waited for C to land, which dropped it: no refresh of A was numbered after C's
+    // open, so Rust's document is C too.
+    expect(opens.mock.calls.map(([path]) => path)).toEqual([C]);
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+
+  it("taken by nobody yet, refreshes the file on screen again when the drop lost a refresh on its way", async () => {
+    const { fake } = await gated(B);
+    // A changes on disk, and its refresh is slow, as a share can be.
+    fake.setDoc(A, "<h1 id='aye' data-sourcepos='1:1-1:5'>Aye again</h1>");
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
+      if (path === A) await refreshing.promise;
+      return open(path, generation);
+    });
+    fake.emit("doc-changed", { path: A });
+    await settle();
+    // An agent's open of B starts while that refresh is on its way, and a newer show of A drops
+    // it, which loses the refresh; Rust hadn't taken B's open, so A is kept as it is.
+    const first = fake.agentRequest(show(B));
+    await settle();
+    vi.spyOn(fake, "keepDocument").mockResolvedValue(true);
+    const second = fake.agentRequest(show(A));
+    await settle();
+    refreshing.resolve();
+    expect(await second).toEqual({ kind: "shown" });
+    await settle();
+    // Refreshed again after the keep: A shows its new text.
+    expect(opens.mock.calls.map(([path]) => path)).toEqual([A, B, A]);
+    expect(document.querySelector("#lx-doc h1")?.textContent).toBe("Aye again");
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+
+  it("taken by nobody yet, lands its target over a refresh deferred while that open was on its way", async () => {
+    const { fake, app } = await gated(B);
+    const first = fake.agentRequest(show(B));
+    await settle();
+    // A changed on disk while B's open was on its way: its refresh waits for that open to land.
+    fake.setDoc(A, "<h1 id='aye' data-sourcepos='1:1-1:5'>Aye again</h1>");
+    fake.emit("doc-changed", { path: A });
+    // Rust hadn't taken B's open, so A is kept; the deferred refresh is slow, as a share can be.
+    vi.spyOn(fake, "keepDocument").mockResolvedValue(true);
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
+      if (path === A) await refreshing.promise;
+      return open(path, generation);
+    });
+    const reading: SavedPosition = { headingId: "aye", offset: 40, line: 1, fraction: 0.5 };
+    vi.spyOn(app.view, "captureAnchor").mockReturnValue(reading);
+    const moves: string[] = [];
+    vi.spyOn(app.view, "restore").mockImplementation(() => {
+      moves.push("restored");
+    });
+    vi.spyOn(app.view, "scrollToLine").mockImplementation((line) => {
+      moves.push(`line ${String(line)}`);
+      return true;
+    });
+    // The show drops B's open, which lets the deferred refresh go; its target waits for that.
+    const second = fake.agentRequest(show(A, { line: 1 }), "Claude", [placed(1, 1)]);
+    await settle();
+    expect(moves).toEqual([]);
+    refreshing.resolve();
+    expect(await second).toEqual({ kind: "shown" });
+    // The refresh rendered the changed A back where the reader was; the target then landed over
+    // it, and holds.
+    expect(moves).toEqual(["restored", "line 1"]);
+    expect(document.querySelector("#lx-doc h1")?.textContent).toBe("Aye again");
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+
+  it("taken by Rust already, goes nowhere once the reader moves on while the file on screen opens again", async () => {
+    const { fake, app } = await gated(B);
+    const first = fake.agentRequest(show(B));
+    await settle();
+    // A changed on disk meanwhile; opening it again waits, as a slow share would.
+    fake.setDoc(A, "<h1 id='aye' data-sourcepos='1:1-1:5'>Aye again</h1>");
+    const reopening = deferred();
+    const open = fake.openDocument.bind(fake);
+    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
+      if (path === A) await reopening.promise;
+      return open(path, generation);
+    });
+    // The show drops B's open and starts opening A again; the reader opens C themselves meanwhile.
+    const second = fake.agentRequest(show(A, { line: 1 }), "Claude", [placed(1, 1)]);
+    await settle();
+    await app.open(C, { push: true });
+    expect(app.state.doc?.path).toBe(C);
+    reopening.resolve();
+    expect(await second).toEqual({
+      kind: "failed",
+      message: "a.md isn't on screen any more: another file took its place.",
+    });
+    await settle();
+    // The reader stays on C: neither the reopening nor the show put A back.
+    expect(app.state.doc?.path).toBe(C);
+    expect(opens.mock.calls.filter(([path]) => path === A)).toHaveLength(1);
+    fake.openGate.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+  });
+});
+
+describe("a newer show while the file on screen opens again", () => {
+  it("answers once its page's target is reached in the page that stays", async () => {
+    const page = reportPage();
+    const { host, move } = agentHost("html", REPORT, page);
+    const reopened = deferred();
+    const order: string[] = [];
+    host.dropOpen = async () => {
+      await reopened.promise;
+      order.push("opened again");
+    };
+    move.mockImplementation(() => {
+      order.push("moved");
+      return true;
+    });
+    const agent = new Agent(host);
+    let answered = false;
+    const answer = agent
+      .answer(call(show(REPORT, { quote: "Results", prefix: "Archive" })))
+      .then((reply) => {
+        answered = true;
+        return reply;
+      });
+    await settle();
+    expect(move).not.toHaveBeenCalled();
+    expect(answered).toBe(false);
+    reopened.resolve();
+    expect(await answer).toEqual({ kind: "shown" });
+    expect(order).toEqual(["opened again", "moved"]);
+  });
+
+  it("is replaced by a newer one that came meanwhile", async () => {
+    const { host, move } = agentHost("html", REPORT, reportPage());
+    const reopened = deferred();
+    host.dropOpen = () => reopened.promise;
+    const agent = new Agent(host);
+    const first = agent.answer(call(show(REPORT, { heading: "Archive" })));
+    await settle();
+    host.dropOpen = () => Promise.resolve();
+    expect(await agent.answer({ ...call(show(REPORT, { heading: "Results" })), id: 2 })).toEqual({
+      kind: "shown",
+    });
+    reopened.resolve();
+    expect(await first).toEqual({ kind: "replaced" });
+    expect(move).toHaveBeenCalledTimes(1);
+  });
+
+  it("goes nowhere once the reader moves on meanwhile, as a show on its way does", async () => {
+    // A show of another file, which switches at once, waits for the file on screen to be back.
+    const { host, move } = agentHost("markdown", PLAN);
+    host.opens = () => "switch";
+    const open = vi.fn<AgentHost["open"]>(() => Promise.resolve(null));
+    host.open = open;
+    const recovered = deferred();
+    host.recovered = () => recovered.promise;
+    let navigation = 1;
+    host.navigation = () => navigation;
+    const agent = new Agent(host);
+    const answer = agent.answer(call(show(REPORT, { heading: "Results" })));
+    await settle();
+    expect(open).not.toHaveBeenCalled();
+    // The reader opens another file themselves meanwhile.
+    navigation = 2;
+    recovered.resolve();
+    expect(await answer).toEqual({
+      kind: "failed",
+      message: "report.html isn't on screen any more: another file took its place.",
+    });
+    expect(open).not.toHaveBeenCalled();
+    expect(move).not.toHaveBeenCalled();
+  });
+});
+
+describe("a request that comes before startup's first document", () => {
+  it("waits for the launched file to show, and is judged against it: asked about", async () => {
+    const fake = new GatedBackend(fixtures(), { initial: A });
+    const app = new App(fake, appRoot());
+    const starting = app.start();
+    const reply = fake.agentRequest(show(B));
+    // Time for the request to act before startup has answered, were it not to wait.
+    await settle();
+    fake.startupGate.resolve();
+    await starting;
+    expect(await reply).toEqual({ kind: "asked" });
+    expect(app.state.doc?.path).toBe(A);
+    expect(bar()?.textContent).toContain("Claude wants to show b.md");
   });
 });
 
@@ -794,11 +1147,16 @@ describe("Preferences › Agents", () => {
 const PDF = "C:\\V\\brief.pdf";
 const REPORT = "C:\\V\\report.html";
 
-/** Where core found a target in a note: on lines `start` to `end`, at `text` in its text. */
-function placed(start: number, end: number, text?: [number, number]): TextPlace {
-  return text
+/**
+ * Where core found a target in a note: on lines `start` to `end`, at `text` in its text, `inBlock`
+ * into its own block's text when given.
+ */
+function placed(start: number, end: number, text?: [number, number], inBlock?: number): TextPlace {
+  const place: TextPlace = text
     ? { startLine: start, endLine: end, textStart: text[0], textEnd: text[1] }
     : { startLine: start, endLine: end };
+  if (inBlock !== undefined) place.blockOffset = inBlock;
+  return place;
 }
 
 /** The frame's URL, of the page or PDF on screen. */
@@ -823,16 +1181,32 @@ async function withPdf(options: FakeOptions = { initial: A }) {
   return { fake, app };
 }
 
+/**
+ * Where the app takes an agent's target whose own text core found: `scrollToPassage`, which
+ * measures the layout jsdom hasn't got, so it answers as landed.
+ */
+function passageLandings(app: App) {
+  return vi.spyOn(app.view, "scrollToPassage").mockReturnValue(true);
+}
+
+/** The text of the document on screen that the passage `landing` was given finds. */
+function passageText(call: [number, Passage] | undefined): string | undefined {
+  const doc = document.getElementById("lx-doc");
+  return doc ? call?.[1](doc)?.toString() : undefined;
+}
+
 describe("an agent's targets", () => {
   it("move within the file on screen to where core found them, and Back returns", async () => {
     const { fake, app } = await launched(B);
     const reading: SavedPosition = { headingId: "bee", offset: 4, line: 1, fraction: 0 };
     vi.spyOn(app.view, "captureAnchor").mockReturnValue(reading);
-    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const scrolled = passageLandings(app);
     expect(
-      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8])]),
+      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
     ).toEqual({ kind: "shown" });
-    expect(scrolled).toHaveBeenCalledWith(3);
+    // To its line, with its own text there, which the layout decides on.
+    expect(scrolled).toHaveBeenCalledWith(3, expect.any(Function));
+    expect(passageText(scrolled.mock.calls[0])).toBe("Buzz");
     // Back goes to where the reader was before the move.
     const restored = vi.spyOn(app.view, "restore");
     await app.nav.travel("back");
@@ -842,21 +1216,65 @@ describe("an agent's targets", () => {
 
   it("open another file at where core found them, at once or once the reader says Show", async () => {
     const { fake, app } = await launched(null);
-    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const scrolled = passageLandings(app);
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // A heading lands by its block.
     expect(
-      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8])]),
+      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
     ).toEqual({ kind: "shown" });
-    expect(scrolled).toHaveBeenLastCalledWith(3);
+    expect(byBlock).toHaveBeenLastCalledWith(3);
+    expect(scrolled).not.toHaveBeenCalled();
     await app.open(A, { push: true });
-    scrolled.mockClear();
     expect(
-      await fake.agentRequest(show(B, { quote: "Bee" }), "Claude", [placed(1, 1, [0, 3])]),
+      await fake.agentRequest(show(B, { quote: "Bee" }), "Claude", [placed(1, 1, [0, 3], 0)]),
     ).toEqual({ kind: "asked" });
     barButton("Show").click();
     await vi.waitFor(() => {
       expect(app.state.doc?.path).toBe(B);
     });
-    expect(scrolled).toHaveBeenCalledWith(1);
+    expect(scrolled).toHaveBeenCalledWith(1, expect.any(Function));
+    expect(passageText(scrolled.mock.calls[0])).toBe("Bee");
+  });
+
+  it("jump to a heading by its block, never indexing the whole document, however long", async () => {
+    const { fake, app } = await launched(B);
+    const entries = 3000;
+    const paragraphs = Array.from({ length: entries }, (_, i) => {
+      const line = String(3 + 2 * i);
+      return `<p data-sourcepos="${line}:1-${line}:40">Survey entry ${String(i)}: the lanternfish count.</p>`;
+    }).join("");
+    const last = 3 + 2 * entries;
+    fake.setDoc(
+      B,
+      `<h1 id="bee" data-sourcepos="1:1-1:5">Bee</h1>${paragraphs}` +
+        `<h2 id="results" data-sourcepos="${String(last)}:1-${String(last)}:10">Results</h2>`,
+    );
+    fake.emit("doc-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.getElementById("results")).not.toBeNull();
+    });
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    vi.mocked(buildTextIndex).mockClear();
+    // As core sends a heading's place: with its text, and where that starts in its block.
+    const place = placed(last, last, [130_000, 130_007], 0);
+    expect(await fake.agentRequest(show(B, { heading: "Results" }), "Claude", [place])).toEqual({
+      kind: "shown",
+    });
+    expect(scrolled).toHaveBeenCalledWith(last);
+    expect(buildTextIndex).not.toHaveBeenCalled();
+  });
+
+  it("find a quote's passage in its own block's text alone", async () => {
+    const { fake, app } = await launched(B);
+    const scrolled = passageLandings(app);
+    // "Bee Buzz.": "zz" is 6 in, and 2 into its paragraph.
+    await fake.agentRequest(show(B, { quote: "zz" }), "Claude", [placed(3, 3, [6, 8], 2)]);
+    vi.mocked(buildTextIndex).mockClear();
+    expect(passageText(scrolled.mock.calls[0])).toBe("zz");
+    const indexed = vi
+      .mocked(buildTextIndex)
+      .mock.calls.map(([roots]) => roots.map((root) => (root as Element).tagName));
+    expect(indexed).toEqual([["P"]]);
   });
 
   it("open a PDF at its page, and go to another page of it on screen, each with a new ?v", async () => {
@@ -879,16 +1297,17 @@ describe("a window started for an agent", () => {
           "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><p data-sourcepos='3:1-3:9'>Buzz.</p>",
         ),
       }),
-      { initial: B, agentTarget: { target: { quote: "Buzz" }, place: placed(3, 3, [4, 8]) } },
+      { initial: B, agentTarget: { target: { quote: "Buzz" }, place: placed(3, 3, [4, 8], 0) } },
     );
     // The reader left it at its top.
     await fake.savePosition(B, { headingId: "bee", offset: 0, line: 1, fraction: 0 });
     const app = new App(fake, appRoot());
-    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const scrolled = passageLandings(app);
     const restored = vi.spyOn(app.view, "restore");
     await app.start();
     expect(app.state.doc?.path).toBe(B);
-    expect(scrolled).toHaveBeenCalledWith(3);
+    expect(scrolled).toHaveBeenCalledWith(3, expect.any(Function));
+    expect(passageText(scrolled.mock.calls[0])).toBe("Buzz");
     expect(restored).not.toHaveBeenCalled();
   });
 
@@ -951,16 +1370,26 @@ describe("an agent's highlights", () => {
     stubHighlights();
     const { fake } = await launched(B);
     await fake.agentRequest(highlight([{ quote: "Buzz" }]), "Claude", [placed(3, 3, [4, 8])]);
-    for (let i = 0; i < 19; i++) {
-      await fake.agentRequest(highlight([{ heading: "Bee" }]), "Claude", [placed(1, 1, [0, 3])]);
+    // Twenty other passages of "Bee Buzz.", each its own: within "Bee", and within "Buzz.".
+    const spans: [number, number][] = [];
+    for (const [from, to] of [
+      [0, 3],
+      [4, 9],
+    ] as const) {
+      for (let s = from; s < to; s++) {
+        for (let e = s + 1; e <= to; e++) if (!(s === 4 && e === 8)) spans.push([s, e]);
+      }
     }
+    const mark = ([s, e]: [number, number]) =>
+      fake.agentRequest(highlight([{ quote: "Bee Buzz.".slice(s, e) }]), "Claude", [
+        placed(1, 3, [s, e]),
+      ]);
+    for (const span of spans.slice(0, 19)) await mark(span);
     expect(agentPainted()).toHaveLength(20);
     expect(agentPainted()[0]).toBe("Buzz");
     // The 21st.
-    expect(
-      await fake.agentRequest(highlight([{ heading: "Bee" }]), "Claude", [placed(1, 1, [0, 3])]),
-    ).toEqual({ kind: "highlighted", count: 20 });
-    expect(agentPainted()).toEqual(Array<string>(20).fill("Bee"));
+    expect(await mark(spans[19] ?? [0, 1])).toEqual({ kind: "highlighted", count: 20 });
+    expect(agentPainted()).toEqual(spans.map(([s, e]) => "Bee Buzz.".slice(s, e)));
   });
 
   it("paint a passage known only by its lines over their blocks, and clear on request", async () => {
@@ -998,6 +1427,27 @@ describe("an agent's highlights", () => {
       placed(1, 1),
     ]);
     expect(agentPainted()).toEqual(["Offline sync: the endpoint"]);
+  });
+
+  it("count a passage already painted once, however often it is asked for", async () => {
+    stubHighlights();
+    const { fake } = await launched(B);
+    const buzz = placed(3, 3, [4, 8]);
+    expect(
+      await fake.agentRequest(highlight([{ quote: "Buzz" }, { quote: "Buzz" }]), "Claude", [
+        buzz,
+        buzz,
+      ]),
+    ).toEqual({ kind: "highlighted", count: 1 });
+    expect(await fake.agentRequest(highlight([{ quote: "Buzz" }]), "Claude", [buzz])).toEqual({
+      kind: "highlighted",
+      count: 1,
+    });
+    expect(agentPainted()).toEqual(["Buzz"]);
+    // Another passage is another highlight.
+    expect(
+      await fake.agentRequest(highlight([{ heading: "Bee" }]), "Claude", [placed(1, 1, [0, 3])]),
+    ).toEqual({ kind: "highlighted", count: 2 });
   });
 
   it("are for the file on screen only", async () => {
@@ -1074,6 +1524,115 @@ describe("a target in an HTML page", () => {
 });
 
 /**
+ * A page as its bridge reported it: Weekly report › Rollout plan (its own id `plan`), then Results
+ * twice. The others have the ids the bridge makes up.
+ */
+function anchoredPage(): PageText {
+  const blocks = [
+    { text: "Weekly report", headingLevel: 1 },
+    { text: "Rollout plan", headingLevel: 2 },
+    { text: "Steps." },
+    { text: "Results", headingLevel: 2 },
+    { text: "Rows." },
+    { text: "Results", headingLevel: 3 },
+    { text: "More rows." },
+  ];
+  const ids = ["lx-heading-1", "plan", "", "lx-heading-2", "", "lx-heading-3", ""];
+  const page = reportPage();
+  const starts: number[] = [];
+  let at = 0;
+  for (const block of blocks) {
+    starts.push(at);
+    at += block.text.length + 1;
+  }
+  return Object.assign(page, {
+    text: blocks.map((b) => b.text).join(" "),
+    blocks,
+    starts,
+    headings: blocks.flatMap((b, i) =>
+      b.headingLevel === undefined
+        ? []
+        : [{ level: b.headingLevel, text: b.text, id: ids[i] ?? "", offset: starts[i] ?? 0 }],
+    ),
+  });
+}
+
+describe("an HTML page's #anchor", () => {
+  // "Weekly report Rollout plan Steps. Results Rows. Results More rows."
+  const rollout = { start: 14, end: 26 };
+
+  it("is the heading with that id, or whose text's slug it is, as Lectern's links find one", () => {
+    const page = anchoredPage();
+    expect(pageSpan(page, { anchor: "rollout-plan" })).toEqual(rollout);
+    expect(pageSpan(page, { anchor: "plan" })).toEqual(rollout);
+    expect(pageSpan(page, { anchor: "Rollout%20plan" })).toEqual(rollout);
+    expect(pageSpan(page, { anchor: "Rollout plan" })).toEqual(rollout);
+    // Two of a kind: the second's slug is numbered, as a note's heading ids are.
+    expect(pageSpan(page, { anchor: "results" })).toEqual({ start: 34, end: 41 });
+    expect(pageSpan(page, { anchor: "results-1" })).toEqual({ start: 48, end: 55 });
+    expect(pageSpan(page, { anchor: "lx-heading-3" })).toEqual({ start: 48, end: 55 });
+    expect(pageSpan(page, { anchor: "risks" })).toBeNull();
+  });
+
+  it("is shown in the page on screen, or is the error a missing heading is", async () => {
+    const page = anchoredPage();
+    const { host, move } = agentHost("html", REPORT, page);
+    const agent = new Agent(host);
+    expect(await agent.answer(call(show(REPORT, { anchor: "rollout-plan" })))).toEqual({
+      kind: "shown",
+    });
+    const landed = move.mock.calls[0]?.[0];
+    expect(landed && "aim" in landed ? landed.aim(page) : null).toBe(14);
+    const missing = { kind: "failed", message: "That passage isn't in report.html." };
+    expect(await agent.answer(call(show(REPORT, { anchor: "risks" })))).toEqual(missing);
+    expect(await agent.answer(call(show(REPORT, { heading: "Risks" })))).toEqual(missing);
+  });
+
+  it("is named on the bar that asks about it, as written", async () => {
+    const { host } = opening(anchoredPage(), true, "ask");
+    const agent = new Agent(host);
+    expect(await agent.answer(call(show(REPORT, { anchor: "rollout-plan" })))).toEqual({
+      kind: "asked",
+    });
+    expect(host.bar.textContent).toContain("Claude wants to show report.html › rollout-plan");
+  });
+});
+
+/** A page's session whose text is `text`, one block. */
+function onePage(text: string): Pick<PageText, "text" | "blocks" | "starts" | "headings"> {
+  return { text, blocks: [{ text }], starts: [0], headings: [] };
+}
+
+describe("a quote in an HTML page, told apart by long context", () => {
+  it("is found quickly on a long repetitive page, its context compared 256 characters at most", () => {
+    const page = onePage("a".repeat(200_000));
+    const started = performance.now();
+    const span = pageSpan(page, { quote: "a", prefix: "a".repeat(2000) });
+    const took = performance.now() - started;
+    expect(span).not.toBeNull();
+    expect(took).toBeLessThan(100);
+  });
+
+  it("is still told apart by 256 characters of context, before or after it", () => {
+    const same = "x".repeat(255);
+    // "Q" twice, the text before each differing only 256 characters back, and after each only
+    // 256 characters on.
+    const page = onePage(`A${same}Q${same}B C${same}Q${same}D`);
+    const second = 1 + 255 + 1 + 255 + 3 + 255;
+    expect(pageSpan(page, { quote: "Q", prefix: `C${same}` })).toEqual({
+      start: second,
+      end: second + 1,
+    });
+    expect(pageSpan(page, { quote: "Q", suffix: `${same}D` })).toEqual({
+      start: second,
+      end: second + 1,
+    });
+    // Without context, the first.
+    expect(pageSpan(page, { quote: "Q" })).toEqual({ start: 256, end: 257 });
+  });
+});
+
+/**
  * A window showing `doc` (with `page`, its session, for an HTML page), as `Agent` sees it. Its
  * comments save an operation as `review` does.
  */
@@ -1101,6 +1660,8 @@ function agentHost(
     answered: () => Promise.resolve(),
     review,
     forgetThreads: () => undefined,
+    dropOpen: () => Promise.resolve(),
+    recovered: () => Promise.resolve(),
     bar: document.createElement("div"),
   };
   return { host, move };
@@ -1130,6 +1691,15 @@ describe("an agent in an HTML page or a PDF", () => {
       count: 0,
     });
     expect(page.clear).toHaveBeenCalledWith("agent");
+  });
+
+  it("counts a page's passage already painted once", async () => {
+    const page = reportPage();
+    const agent = new Agent(agentHost("html", REPORT, page).host);
+    const twice = highlight([{ heading: "Archive" }, { quote: "Archive" }], REPORT);
+    expect(await agent.answer(call(twice))).toEqual({ kind: "highlighted", count: 1 });
+    expect(await agent.answer(call(twice))).toEqual({ kind: "highlighted", count: 1 });
+    expect(page.paint).toHaveBeenLastCalledWith("agent", [{ start: 41, end: 48 }]);
   });
 
   it("gives a page's text as its bridge reported it, once it has", async () => {
@@ -1208,6 +1778,8 @@ function opening(page: PageText, ready: boolean, opens: AgentOpens = "switch") {
     answered,
     review: () => Promise.reject(new Error("no comments here")),
     forgetThreads: () => undefined,
+    dropOpen: () => Promise.resolve(),
+    recovered: () => Promise.resolve(),
     bar: document.createElement("div"),
   };
   const leave = (): void => {
@@ -1218,7 +1790,16 @@ function opening(page: PageText, ready: boolean, opens: AgentOpens = "switch") {
   const reload = (): void => {
     shown = { ...shown };
   };
-  return { host, move, waited, landings, loading, leave, reload, answered, aimPage };
+  /** The reader opens `path` themselves. */
+  const visit = (path: string, kind: DocKind = "html"): void => {
+    navigation += 1;
+    shown = { ...docPayload(null), path, kind };
+  };
+  /** Opens fail from now on, as for a file that's gone. */
+  const fail = (): void => {
+    host.open = () => Promise.resolve("It was moved or deleted.");
+  };
+  return { host, move, waited, landings, loading, leave, reload, visit, fail, answered, aimPage };
 }
 
 /** Where `landing` goes in `page`, for one that finds a passage there once it has loaded. */
@@ -1292,6 +1873,69 @@ describe("a page's target, stale before the page loaded", () => {
       message: "report.html isn't on screen any more: another file took its place.",
     });
     expect(aimed(landings[0], page)).toBeNull();
+  });
+});
+
+describe("a page's target whose request ended unreached", () => {
+  /** The bar's button `name` in `host`'s bar. */
+  function click(host: AgentHost, name: string): void {
+    [...host.bar.querySelectorAll("button")].find((b) => b.textContent === name)?.click();
+  }
+
+  it("goes nowhere once the reader says Not now, nor when they open the page later", async () => {
+    const { host, visit, aimPage, answered } = opening(reportPage(), true, "ask");
+    const agent = new Agent(host);
+    expect(await agent.answer(call(show(REPORT, { quote: "Results" })))).toEqual({
+      kind: "asked",
+    });
+    click(host, "Not now");
+    await vi.waitFor(() => {
+      expect(answered).toHaveBeenCalledWith(1, "dismissed", undefined);
+    });
+    visit(REPORT);
+    agent.docShown();
+    expect(aimPage).not.toHaveBeenCalled();
+  });
+
+  it("goes nowhere once a newer request takes its place", async () => {
+    const { host, visit, aimPage } = opening(reportPage(), true, "ask");
+    const agent = new Agent(host);
+    await agent.answer(call(show(REPORT, { quote: "Results" })));
+    expect(await agent.answer({ ...call(show(C)), id: 2 })).toEqual({ kind: "asked" });
+    visit(REPORT);
+    agent.docShown();
+    expect(aimPage).not.toHaveBeenCalled();
+  });
+
+  it("goes nowhere when Show on the bar fails to open the page", async () => {
+    const { host, visit, fail, aimPage, answered } = opening(reportPage(), true, "ask");
+    const agent = new Agent(host);
+    await agent.answer(call(show(REPORT, { quote: "Results" })));
+    fail();
+    click(host, "Show");
+    await vi.waitFor(() => {
+      expect(answered).toHaveBeenCalledWith(
+        1,
+        "failed",
+        "report.html didn't open: It was moved or deleted.",
+      );
+    });
+    visit(REPORT);
+    agent.docShown();
+    expect(aimPage).not.toHaveBeenCalled();
+  });
+
+  it("goes nowhere when an immediate open of the page fails", async () => {
+    const { host, visit, fail, aimPage } = opening(reportPage(), true, "switch");
+    const agent = new Agent(host);
+    fail();
+    expect(await agent.answer(call(show(REPORT, { quote: "Results" })))).toEqual({
+      kind: "failed",
+      message: "report.html didn't open: It was moved or deleted.",
+    });
+    visit(REPORT);
+    agent.docShown();
+    expect(aimPage).not.toHaveBeenCalled();
   });
 });
 
@@ -1712,17 +2356,20 @@ describe("an agent's show at a thread whose review is still loading", () => {
       return load(path, page);
     });
     const scrolled = vi.spyOn(app.view, "scrollToLine");
+    const passages = passageLandings(app);
     expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
     expect(
-      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8])]),
+      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
     ).toEqual({ kind: "shown" });
-    expect(scrolled).toHaveBeenLastCalledWith(3);
+    expect(passages).toHaveBeenLastCalledWith(3, expect.any(Function));
     held.resolve();
     await vi.waitFor(() => {
       expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
     });
     await settle();
-    expect(scrolled.mock.calls).toEqual([[3]]);
+    // The thread's passage on line 1 never took the reader back there.
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(passages).toHaveBeenCalledTimes(1);
     expect(
       document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
     ).toBe(false);
@@ -1825,9 +2472,9 @@ describe("an agent's open at a thread, overtaken by the reader", () => {
     // Hold the agent's own open of B, so the reader can overtake it before it lands.
     const held = deferred();
     const open = fake.openDocument.bind(fake);
-    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
       await held.promise;
-      return open(path);
+      return open(path, generation);
     });
     const scrolled = vi.spyOn(app.view, "scrollToLine");
     const request = fake.agentRequest(show(B, { comment: "C1" }));
@@ -1873,9 +2520,9 @@ describe("two overlapping agent opens of the same file at threads", () => {
     // The older show's open of B is held; the newer one's goes through and lands first.
     const heldOpen = deferred();
     const open = fake.openDocument.bind(fake);
-    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path) => {
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
       await heldOpen.promise;
-      return open(path);
+      return open(path, generation);
     });
     // B's review is held, so the newer thread waits for the comments.
     const heldReview = deferred();

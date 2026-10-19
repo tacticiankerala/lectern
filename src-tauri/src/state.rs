@@ -138,8 +138,9 @@ impl Default for Timings {
 /// The document on screen.
 struct Current {
     path: PathBuf,
-    /// The `open_document` call that made it current; an older call never replaces it.
-    seq: u64,
+    /// The generation of the open that made it current, as the UI numbered it (`open_numbered`):
+    /// an older open never replaces it.
+    generation: u64,
     /// Rendered without its root in the index, or with wikilinks the index couldn't resolve:
     /// worth rendering again once the index changes.
     stale: bool,
@@ -699,11 +700,17 @@ pub struct WindowState {
     cache: Mutex<RenderCache>,
     content: ContentCache,
     current: Mutex<Option<Current>>,
-    /// Numbers opens, so only the latest becomes the current document.
+    /// Counts opens, launches, and the UI's leaves and keeps of its document, since startup: a
+    /// boot render landing late stays quiet once anything came (`early_landed_late`).
     open_seq: AtomicU64,
-    /// The number the UI last left its document at, for none (`leave_document`): an open numbered
-    /// before it never becomes current.
-    left_at: AtomicU64,
+    /// The UI's latest generation. The UI numbers its opens, and its leaves and keeps of its
+    /// document, in the order it sends them, which the blocking pool may run in another, so the
+    /// numbers order them (`make_current`). An open of Rust's own (startup's) takes the latest.
+    generation: AtomicU64,
+    /// The generation the UI last left or kept its document at (`leave_document`,
+    /// `document_missing`, `keep_document`): an open numbered below it never becomes current,
+    /// however late it runs.
+    cutoff: AtomicU64,
     snapshots_loaded: Gate,
     /// The window's ready gate: it is showing its first document, so scans may start.
     ui_shown: Gate,
@@ -765,7 +772,8 @@ impl WindowState {
             content: ContentCache::new(),
             current: Mutex::new(None),
             open_seq: AtomicU64::new(0),
-            left_at: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            cutoff: AtomicU64::new(0),
             snapshots_loaded: Gate::default(),
             ui_shown: Gate::default(),
             early,
@@ -828,8 +836,16 @@ impl WindowState {
         self.app.mapper()
     }
 
-    fn next_seq(&self) -> u64 {
-        self.open_seq.fetch_add(1, Ordering::SeqCst) + 1
+    /// Counts an open (from its start, before anything slow), a launch, or a leave or keep of
+    /// the document (`open_seq`). A user path's file counts twice, which changes nothing: only
+    /// whether anything came since startup is read.
+    fn count_open(&self) {
+        self.open_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The UI's latest generation (`generation`), for an open of Rust's own.
+    fn ui_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Whether Lectern may touch `path`: local, or on a network host the user chose.
@@ -1424,11 +1440,15 @@ mod tests {
         let page = dir.file("vault/artifacts/report.html", "<h1>Report</h1>");
         let other = dir.file("vault/artifacts/other.html", "<h1>Other</h1>");
         let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
-        let stale: Vec<u64> = (0..6).map(|_| f.state.next_seq()).collect();
-        let path = open_page(&f, &page);
-        for seq in stale {
+        // The page is numbered after the six opens that finish late.
+        let OpenResult::Ok { doc } = f.state.open_numbered(7, &path_string(&page)) else {
+            panic!("the page didn't open");
+        };
+        let url = doc.frame_url.expect("a frame URL");
+        let path = url.strip_prefix(PAGE_ORIGIN).unwrap().to_owned();
+        for generation in 1..=6 {
             let rendered = f.state.load(&other);
-            f.state.finish_open(seq, &other, rendered);
+            f.state.finish_open(generation, &other, rendered);
         }
         assert_eq!(current(&f).0, page);
         assert_eq!(get(&f, &path).status, 200);

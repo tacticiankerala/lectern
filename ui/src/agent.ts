@@ -14,20 +14,31 @@
 //   window closing once its unsaved comment text is let go) dismisses it. What became of each
 //   request asked about (shown, dismissed, replaced or failed) is told to Rust as an `answered`
 //   reply to it, and kept for `status`. Agent opens go on the history, so Back returns, and so
-//   does a move within the file on screen.
+//   does a move within the file on screen. A newer request that opens nothing itself (of the file
+//   on screen, or asked about) drops an older one's open still on its way, whatever file it
+//   names, which answers `replaced`; the reader's own navigation is left be. A request held while
+//   the file on screen is opened again (Rust had taken a dropped open) goes nowhere, failed, once
+//   the reader moves on meanwhile, as one on its way does.
 // - Targets (`landing`): in a note or a text file, Rust's core found the target and sends where
-//   (`places`), so the window goes to its line. In an HTML page the window finds it in what the
-//   page's bridge reported (`pageSpan`): a quote by its text, whitespace aside, told apart from
-//   others like it by the text before and after it; a heading by its whole text or its path, in
-//   the page's blocks (the outline's list shortens them). A `show`
+//   (`places`), so the window goes to its line; to its own text instead (a line's, a quote's,
+//   found in its block's text alone, never the whole document's) when that is far down a block
+//   longer than the view, while a heading lands by its block. In an HTML page the window finds it
+//   in what the page's bridge reported (`pageSpan`): a quote by its text, whitespace aside, told
+//   apart from others like it by the text before and after it (256 characters of each at most); a
+//   heading by its whole text or its path, in the page's blocks (the outline's list shortens
+//   them); the `#anchor` after the page's path by a heading's id, or the slug of its text, as
+//   Lectern's links find one. A `show`
 //   waits for a page still loading as long as Rust waits for its answer, and so does Show on the
 //   bar: a passage that isn't there fails, and one the page hadn't loaded in time for is
 //   `pending`, gone to once it has, the page aimed at again should it load afresh meanwhile (a
 //   change on disk). A newer request meanwhile (`replaced`), or another file on screen (failed),
-//   leaves it going nowhere; so does a newer request for a target the window started with. In a
-//   PDF, its page. `show` only moves there; `highlight` paints.
+//   leaves it going nowhere; so does a newer request for a target the window started with, and a
+//   request that ends unreached (dismissed, replaced, or its file failing to open), so the reader
+//   opening that page later isn't taken there. In a PDF, its page. `show` only moves there;
+//   `highlight` paints.
 // - `highlight`: the agent's highlights, on a layer of their own (`agent`) over the comments' and
-//   under find's, at most 20, the oldest dropped first: in a note or a text file where core found
+//   under find's, at most 20, the oldest dropped first, a passage painted already not added again
+//   (the count is of distinct passages): in a note or a text file where core found
 //   them (else over the blocks on their lines), in an HTML page through its bridge. Each keeps its
 //   target: when the text changes (the file shown afresh, a page's text reported again), they are
 //   found again, a note's by core, and painted where they are now, never at the old places; one
@@ -57,6 +68,7 @@ import {
   textOnly,
   type TextIndex,
 } from "./comments-text";
+import type { Passage } from "./doc-view";
 import { h, HEADINGS, samePath } from "./dom";
 import type { Span } from "./find";
 import type { AgentCall } from "./generated/AgentCall";
@@ -91,6 +103,9 @@ const HIGHLIGHTS_KEPT = 20;
 
 /** Where an agent's highlights paint over the comments' (0 and 1), under find's (3 and 4). */
 const HIGHLIGHT_PRIORITY = 2;
+
+/** How much of a quote's context, before it and after it, is compared, at most. */
+const CONTEXT_COMPARED = 256;
 
 /** The answer while an HTML page hasn't reported its text yet. */
 const PAGE_LOADING = "The page hasn't loaded yet; try again in a moment.";
@@ -127,23 +142,35 @@ export type PageText = Pick<
 
 /**
  * Where an open lands in its file, or a move within it goes: a source line, where Rust's core found
- * the target in a note or a text file; a PDF's page; a passage of an HTML page, found once the
- * page has reported its text; or a comment thread, by its number, whose card and passage show once
- * the file's comments have loaded.
+ * the target in a note or a text file, with the target's own text there when core found that, gone
+ * to instead of its block when it is far down a long one; a PDF's page; a passage of an HTML page,
+ * found once the page has reported its text; or a comment thread, by its number, whose card and
+ * passage show once the file's comments have loaded.
  */
 export type Landing =
-  | { line: number }
+  | { line: number; passage?: Passage }
   | { page: number }
   | { aim: (page: PageText) => number | null }
   | { comment: number };
 
 /**
- * Where `target` takes the reader, found by core at `place` in a note or a text file; null for
+ * Where `target` takes the reader, found by core at `place` in a note or a text file: its line,
+ * and a line's or a quote's own text there (`passageIn`); a heading lands by its block. Null for
  * none.
  */
 export function landing(target: Target | undefined, place: TextPlace | undefined): Landing | null {
   if (place !== undefined) {
-    return { line: place.startLine };
+    const { textStart, textEnd, blockOffset } = place;
+    return target !== undefined &&
+      !("heading" in target) &&
+      textStart !== undefined &&
+      textEnd !== undefined &&
+      blockOffset !== undefined
+      ? {
+          line: place.startLine,
+          passage: passageIn(place.startLine, blockOffset, textEnd - textStart),
+        }
+      : { line: place.startLine };
   }
   if (target === undefined) {
     return null;
@@ -158,6 +185,22 @@ export function landing(target: Target | undefined, place: TextPlace | undefined
     return { page: target.page };
   }
   return { aim: (page) => pageSpan(page, target)?.start ?? null };
+}
+
+/**
+ * The passage `length` long, `offset` into the text of the block holding source line `line`,
+ * found in that block's own text alone, never the whole document's (a long passage ends with its
+ * block). Null when no one block holds the line (a table's row of cells), or the text isn't there.
+ */
+function passageIn(line: number, offset: number, length: number): Passage {
+  return (doc) => {
+    const [block, ...others] = blocksOnLines(doc, line, line);
+    if (block === undefined || others.length > 0) {
+      return null;
+    }
+    const index = buildTextIndex([block]);
+    return rangeAt(index, offset, Math.min(offset + Math.max(1, length), index.text.length));
+  };
 }
 
 /**
@@ -253,6 +296,18 @@ export interface AgentHost extends DocHost {
    */
   forgetThreads(): void;
   /**
+   * A newer `show` has come that opens nothing itself: an agent's open still on its way is
+   * dropped, so it never takes the screen, before this returns (the drop's own navigation is
+   * `navigation()` then). The reader's own navigation is left be. Resolves once the file on
+   * screen is the one that stays (`recovered`).
+   */
+  dropOpen(): Promise<void>;
+  /**
+   * Resolves once the file on screen is the one that stays: opened again in place, should Rust
+   * have taken a dropped open already, whichever show dropped it; at once when it isn't being.
+   */
+  recovered(): Promise<void>;
+  /**
    * Saves an agent's `op` to the comments of `path`, the HTML page on screen, with its text, after
    * the operations before it, and shows it: the review as saved, or why it wasn't, as an error.
    */
@@ -267,7 +322,7 @@ interface Ask {
   path: string;
   /** The agent's name, as the reader sees it. */
   agent: string;
-  /** The heading it is about, as its target names it. */
+  /** The heading it is about, as its target names it (or the anchor after a page's path). */
   heading: string | null;
   /** Where the file opens. */
   landing: Landing | null;
@@ -386,7 +441,7 @@ export class Agent {
    */
   startedWith(at: ShowAt, path: string, navigation: number): Landing | null {
     const target = at.target;
-    if (at.place !== undefined || !("quote" in target || "heading" in target)) {
+    if (at.place !== undefined || !foundInPage(target)) {
       return landing(target, at.place);
     }
     return this.pageLanding(target, { id: STARTED_WITH, navigation }, path);
@@ -463,13 +518,29 @@ export class Agent {
     const target = args.target;
     const showing: Showing = { id, navigation: null };
     const inPage =
-      target !== undefined && places.length === 0 && ("quote" in target || "heading" in target)
-        ? target
-        : null;
+      target !== undefined && places.length === 0 && foundInPage(target) ? target : null;
     const land = inPage ? this.pageLanding(inPage, showing, args.path) : landing(target, places[0]);
     void this.settle("replaced");
+    // The file on screen stays unless this opens another: an older request's open on its way is
+    // dropped. Either way, should Rust have taken a dropped open already, the file on screen opens
+    // again first, so the target goes to the document that stays.
+    const settling =
+      this.route(args.path) === "open" ? this.host.recovered() : this.host.dropOpen();
+    // The drop has made its own navigation by now: any other from here on is the reader's.
+    const navigation = this.host.navigation();
+    await settling;
+    if (this.lastShow !== id) {
+      this.ended(showing);
+      return { kind: "replaced" };
+    }
+    if (this.host.navigation() !== navigation) {
+      // The reader moved on meanwhile: this goes nowhere, as a show on its way does.
+      this.ended(showing);
+      return { kind: "failed", message: notOnScreen(args.path) };
+    }
+    const route = this.route(args.path);
     const doc = this.host.doc();
-    if (doc && samePath(doc.path, args.path)) {
+    if (route === "here" && doc) {
       if (inPage && land && doc.kind === "html") {
         showing.navigation = this.host.navigation();
         return this.reach(showing, args.path, inPage, land, by, true);
@@ -479,22 +550,47 @@ export class Agent {
       }
       return { kind: "shown" };
     }
-    const shown = this.host.shownPath();
-    if (shown === null || samePath(shown, args.path) || this.host.opens() === "switch") {
+    if (route === "open") {
       const opened = await this.open(args.path, land);
       if (!inPage || !land || opened.kind !== "shown" || !this.pageShown()) {
-        return opened;
+        // Not on its way to a page's passage: a failed open's target goes nowhere, later either.
+        this.ended(showing);
+        // One a newer request dropped on its way was replaced by it.
+        return opened.kind === "failed" && this.lastShow !== id ? { kind: "replaced" } : opened;
       }
       showing.navigation = this.host.navigation();
       this.aimed(showing, land);
       return this.reach(showing, args.path, inPage, land, by, false);
     }
-    const heading = target && "heading" in target ? target.heading : null;
+    const heading =
+      target === undefined
+        ? null
+        : "heading" in target
+          ? target.heading
+          : "anchor" in target
+            ? target.anchor
+            : null;
     // Rust waits for the reader's answer `wait` seconds, when it waits.
     const answerBy = args.wait > 0 ? Date.now() + args.wait * 1000 : 0;
     this.asking = { id, path: args.path, agent, heading, landing: land, inPage, showing, answerBy };
     this.renderBar();
     return { kind: "asked" };
+  }
+
+  /**
+   * How a `show` of `path` takes the reader there: `here`, the document on screen already; `open`,
+   * opening it at once (the window shows nothing, or that path failed to open, or the setting is
+   * to switch); else `ask`, the reader first.
+   */
+  private route(path: string): "here" | "open" | "ask" {
+    const doc = this.host.doc();
+    if (doc && samePath(doc.path, path)) {
+      return "here";
+    }
+    const shown = this.host.shownPath();
+    return shown === null || samePath(shown, path) || this.host.opens() === "switch"
+      ? "open"
+      : "ask";
   }
 
   /**
@@ -521,7 +617,10 @@ export class Agent {
     }
   }
 
-  /** `showing` came to an end: reached, failed or replaced. Nothing is aimed at for it again. */
+  /**
+   * `showing` came to an end: reached, failed, replaced or dismissed. Nothing is aimed at for it
+   * again.
+   */
   private ended(showing: Showing): void {
     if (this.pending?.showing === showing) {
       this.pending = null;
@@ -593,8 +692,8 @@ export class Agent {
   /**
    * `highlight`: the agent's highlights in the file on screen, its earlier ones cleared first when
    * `clear`, each target where core found it (`places`) in a note or a text file, or found in an
-   * HTML page's text, all of them or none. A PDF can't be painted. Answers how many the window
-   * shows now.
+   * HTML page's text, all of them or none; one on a passage painted already isn't added again. A
+   * PDF can't be painted. Answers how many the window shows now.
    */
   private highlight(args: HighlightArgs, places: TextPlace[]): AgentReply {
     const doc = this.host.doc();
@@ -633,7 +732,10 @@ export class Agent {
       this.marks = [];
     }
     this.marked = doc.path;
-    this.marks.push(...added);
+    // A passage painted already isn't painted twice, so a retry changes nothing.
+    for (const mark of added) {
+      if (!this.marks.some((m) => samePlace(m, mark))) this.marks.push(mark);
+    }
     this.marks.splice(0, Math.max(0, this.marks.length - HIGHLIGHTS_KEPT));
     this.paint();
     return { kind: "highlighted", count: this.marks.length };
@@ -780,7 +882,10 @@ export class Agent {
     }
     const failure = await this.host.open(ask.path, ask.landing);
     if (failure !== null) {
-      await this.record(ask, "failed", didNotOpen(ask.path, failure));
+      // Dropped on its way by a newer request, it was replaced.
+      await (this.lastShow === ask.id
+        ? this.record(ask, "failed", didNotOpen(ask.path, failure))
+        : this.record(ask, "replaced"));
       return;
     }
     if (ask.inPage === null || ask.landing === null || !this.pageShown()) {
@@ -791,9 +896,10 @@ export class Agent {
     this.aimed(ask.showing, ask.landing);
     const by = Math.max(ask.answerBy, Date.now() + ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
     const reply = await this.reach(ask.showing, ask.path, ask.inPage, ask.landing, by, false);
+    // `reach` ended the target, unless it is still on its way to the page once it loads.
     await (reply.kind === "failed"
-      ? this.record(ask, "failed", reply.message)
-      : this.record(ask, reply.kind === "replaced" ? "replaced" : "shown"));
+      ? this.record(ask, "failed", reply.message, true)
+      : this.record(ask, reply.kind === "replaced" ? "replaced" : "shown", undefined, true));
   }
 
   /** The request being asked about, if any, settles as `answer` (see `take` and `record`). */
@@ -814,9 +920,14 @@ export class Agent {
 
   /**
    * What became of `ask`, with why when it `failed`: `status` keeps it, and Rust is told; resolves
-   * once it is.
+   * once it is. Its page's passage, if any, ends with it, so the reader opening that page later
+   * isn't taken there; unless Show `reached` for it, which has settled it already, leaving it on
+   * its way to a page still loading.
    */
-  private record(ask: Ask, answer: AskAnswer, message?: string): Promise<void> {
+  private record(ask: Ask, answer: AskAnswer, message?: string, reached = false): Promise<void> {
+    if (!reached) {
+      this.ended(ask.showing);
+    }
     const outcome: AskOutcome = { path: ask.path, answer };
     if (message !== undefined) outcome.message = message;
     this.answers.push(outcome);
@@ -856,6 +967,21 @@ export class Agent {
       ),
     );
   }
+}
+
+/** Whether two highlights cover the same passage: where core found them, or the window did. */
+function samePlace(a: Mark, b: Mark): boolean {
+  if (a.span !== null && b.span !== null) {
+    return a.span.start === b.span.start && a.span.end === b.span.end;
+  }
+  return (
+    a.place !== null &&
+    b.place !== null &&
+    a.place.startLine === b.place.startLine &&
+    a.place.endLine === b.place.endLine &&
+    a.place.textStart === b.place.textStart &&
+    a.place.textEnd === b.place.textEnd
+  );
 }
 
 /** The number of the comment thread `id` names: `C3` is 3. */
@@ -904,16 +1030,21 @@ function rangesOf(place: TextPlace, el: HTMLElement, index: TextIndex | null): R
   });
 }
 
+/** Whether `target` is one an HTML page's window finds itself: a quote, a heading or an anchor. */
+function foundInPage(target: Target): boolean {
+  return "quote" in target || "heading" in target || "anchor" in target;
+}
+
 /**
  * Where `target` is in an HTML page's text, as its bridge reported it; null when it isn't there.
  * A quote by its text, whitespace aside, and of two or more, the one the text just before and after
  * it agrees with most, then the first. A heading by its text, or a path of headings each under the
  * one before (`Report › Results`, with headings between left out), in any letter case: of those
- * that match, the one whose own path is nearest the target's length, then the first. Nothing else
- * is in a page.
+ * that match, the one whose own path is nearest the target's length, then the first. An anchor by
+ * a heading's id, or the slug of its text (`anchorSpan`). Nothing else is in a page.
  */
 export function pageSpan(
-  page: Pick<PageText, "text" | "blocks" | "starts">,
+  page: Pick<PageText, "text" | "blocks" | "starts" | "headings">,
   target: Target,
 ): Span | null {
   if ("quote" in target) {
@@ -922,23 +1053,33 @@ export function pageSpan(
   if ("heading" in target) {
     return headingSpan(page, target.heading);
   }
+  if ("anchor" in target) {
+    return anchorSpan(page, target.anchor);
+  }
   return null;
 }
 
-/** The occurrence of `quote` in `text` that agrees most with `prefix` and `suffix`, then the first. */
+/**
+ * The occurrence of `quote` in `text` that agrees most with `prefix` and `suffix`, then the first.
+ * Only the `CONTEXT_COMPARED` characters of each next to the quote count, and the first occurrence
+ * that agrees with all of them is taken at once, so a long context on a page of repeated text
+ * costs little.
+ */
 function quoteSpan(text: string, quote: string, prefix: string, suffix: string): Span | null {
   const needle = normalize(quote);
   if (needle === "") {
     return null;
   }
-  const before = normalize(prefix);
-  const after = normalize(suffix);
+  const before = normalize(prefix).slice(-CONTEXT_COMPARED);
+  const after = normalize(suffix).slice(0, CONTEXT_COMPARED);
+  const whole = before.length + after.length;
   let best: { span: Span; agreement: number } | null = null;
   for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
     const end = at + needle.length;
     const agreement = agreesBefore(text, at, before) + agreesAfter(text, end, after);
     if (best === null || agreement > best.agreement) {
       best = { span: { start: at, end }, agreement };
+      if (agreement === whole) break;
     }
   }
   return best?.span ?? null;
@@ -1005,6 +1146,74 @@ function headingSpan(page: Pick<PageText, "blocks" | "starts">, wanted: string):
   const { block } = best;
   const start = page.starts[block] ?? 0;
   return { start, end: start + (page.blocks[block]?.text.length ?? 0) };
+}
+
+/**
+ * The span of the heading block an `#anchor` (after the page's path in a `show`) names in a page,
+ * as Lectern's links find one: the anchor as written, then percent-decoded, then its slug, each
+ * tried against the headings' ids (the page's own, else the bridge's made-up ones, for those the
+ * outline lists) and then the slugs of their text, GitHub's, a repeat numbered `-1`, `-2`, … as
+ * a note's heading ids are. Null when no heading has it.
+ */
+function anchorSpan(
+  page: Pick<PageText, "blocks" | "starts" | "headings">,
+  anchor: string,
+): Span | null {
+  const ids = new Map(page.headings.map((h) => [h.offset, h.id]));
+  const slugs = new Slugs();
+  const named = page.blocks.flatMap((block, i) => {
+    if (block.headingLevel === undefined) return [];
+    const start = page.starts[i] ?? 0;
+    const span = { start, end: start + block.text.length };
+    return [{ span, id: ids.get(start) ?? "", slug: slugs.next(block.text) }];
+  });
+  const decoded = decodeAnchor(anchor);
+  for (const wanted of [anchor, decoded, slugify(decoded)]) {
+    const found =
+      named.find((h) => h.id !== "" && h.id === wanted) ??
+      named.find((h) => h.slug !== "" && h.slug === wanted);
+    if (found) return found.span;
+  }
+  return null;
+}
+
+/** `anchor` percent-decoded; as written when it isn't valid encoding. */
+function decodeAnchor(anchor: string): string {
+  try {
+    return decodeURIComponent(anchor);
+  } catch {
+    return anchor;
+  }
+}
+
+/**
+ * A heading's text as a GitHub-style id, as core's `slugify` makes one: lower case, its letters,
+ * marks, numbers and connector punctuation (`_`) kept, each space and `-` a `-`, all else dropped.
+ */
+function slugify(text: string): string {
+  let slug = "";
+  for (const c of text.toLowerCase()) {
+    if (c === " " || c === "-") slug += "-";
+    else if (/[\p{L}\p{M}\p{N}\p{Pc}]/u.test(c)) slug += c;
+  }
+  return slug;
+}
+
+/** Hands out headings' slugs in order, a repeat with `-1`, `-2`, … as core's `Slugger` does. */
+class Slugs {
+  private readonly seen = new Map<string, number>();
+
+  next(text: string): string {
+    const base = slugify(text);
+    let slug = base;
+    while (this.seen.has(slug)) {
+      const n = (this.seen.get(base) ?? 0) + 1;
+      this.seen.set(base, n);
+      slug = `${base}-${String(n)}`;
+    }
+    this.seen.set(slug, 0);
+    return slug;
+  }
 }
 
 /** Whether each of `wanted` is in `path`, in the same order, others between them or not. */

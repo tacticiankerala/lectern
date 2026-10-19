@@ -38,6 +38,12 @@ workspaces: Array<WorkspaceSummary>,
  */
 primary: boolean, 
 /**
+ * The highest number this window's UI has given an open, or a leave or keep of its document
+ * (`open_document`'s `generation`), so a page loaded over the same window state (a reload)
+ * numbers from above it; 0 for a fresh window.
+ */
+generation: number, 
+/**
  * Where an agent's `show` takes the reader in `initial`, when the window opened it for an
  * agent while starting.
  */

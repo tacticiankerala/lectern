@@ -2,9 +2,17 @@
 // and back and forward.
 //
 // - Navigations (startup's `initial`, opens, links, launches) are numbered, and the answer to an
-//   older one is dropped rather than rendered.
+//   older one is dropped rather than rendered. One on its way can be dropped with nothing in its
+//   place, the document on screen staying (an agent's open that a newer show took the place of).
+// - Every open sent to Rust, refreshes included, and every leave or keep of the document, is
+//   numbered too (`nextGeneration`), in the order sent: Rust may run them in another, and orders
+//   them by the number, so an open numbered below the last leave or keep never becomes its
+//   document, and a newer open stays it. The numbering starts from what Rust has seen (the
+//   startup payload's `generation`), so a page reloaded over the same window state numbers above
+//   everything the page before sent; nothing is sent before startup has seeded it.
 // - Leaving the document for none (home, or a file deleted while open) tells Rust, so nothing acts
-//   on that document any more.
+//   on that document any more. A file deleted while open is still watched, so once it comes back
+//   it shows again by itself.
 // - `doc-changed` for the open document reloads it in place, keeping the reading position; when
 //   the file changed on disk, the properties strip notes the time. Refreshes are numbered apart
 //   from navigations: one never cancels a navigation, and one that arrives while a navigation is
@@ -35,8 +43,18 @@ export class Navigation {
   private refreshes = 0;
   /** Paths changed or removed while a navigation was in flight, settled once it lands. */
   private readonly deferred = new Set<string>();
+  /** Numbers every open, leave and keep sent to Rust, in that order (see the top of this file). */
+  private generation = 0;
+  /** Resolves once `numberFrom` has seeded the numbering from the startup payload. */
+  private readonly seeded: Promise<void>;
+  private seed: () => void = () => undefined;
+  /** The latest refresh while it is on its way: its number and path (`drop` requeues it). */
+  private refreshing: { refresh: number; path: string } | null = null;
 
   constructor(private readonly app: App) {
+    this.seeded = new Promise((resolve) => {
+      this.seed = resolve;
+    });
     this.backButton = iconButton("lx-back", "Back", ICONS.back, "Alt+←");
     this.forwardButton = iconButton("lx-forward", "Forward", ICONS.forward, "Alt+→");
     this.backButton.addEventListener("click", () => void this.travel("back"));
@@ -68,8 +86,32 @@ export class Navigation {
     return this.navigations;
   }
 
+  /**
+   * The number of the open, leave or keep about to be sent to Rust: the next in order, once
+   * startup has seeded the numbering (`numberFrom`). Nothing is numbered, or sent, before: an
+   * open asked meanwhile waits for it.
+   */
+  async nextGeneration(): Promise<number> {
+    await this.seeded;
+    return ++this.generation;
+  }
+
+  /**
+   * Numbers from `generation` on: what Rust has seen from this window already, when its page
+   * loaded over the same window state (WebView2's own reload, a renderer failure), so the first
+   * open sent is numbered above everything before it, and an open still on its way from the page
+   * before never becomes Rust's document. Seeds the numbering: nothing is sent before it runs.
+   */
+  numberFrom(generation: number): void {
+    this.generation = Math.max(this.generation, generation);
+    this.seed();
+  }
+
   async open(path: string, opts: OpenOptions = {}): Promise<void> {
-    await this.load(() => this.app.backend.openDocument(path), opts);
+    await this.load(
+      async () => this.app.backend.openDocument(path, await this.nextGeneration()),
+      opts,
+    );
   }
 
   /**
@@ -84,7 +126,7 @@ export class Navigation {
     const outcome = { added: null as string | null, opened: false, folder: false };
     await this.load(
       async () => {
-        const result = await this.app.backend.openUserPath(path);
+        const result = await this.app.backend.openUserPath(path, await this.nextGeneration());
         this.app.library.setLibrary(result.library);
         outcome.added =
           result.library.roots.find((r) => !before.has(r.path.toLowerCase()))?.path ?? null;
@@ -135,7 +177,7 @@ export class Navigation {
     }
     this.app.state.updated = null;
     this.app.show(null);
-    this.settleDeferred();
+    void this.settleDeferred();
   }
 
   /**
@@ -156,7 +198,7 @@ export class Navigation {
     } catch (e) {
       if (this.endNavigation(navigation)) {
         this.app.toast(String(e));
-        this.settleDeferred();
+        void this.settleDeferred();
       }
       return false;
     }
@@ -165,14 +207,14 @@ export class Navigation {
     }
     if (result === null) {
       // Nothing to open (a folder without a README): the document on screen stays.
-      this.settleDeferred();
+      void this.settleDeferred();
       return false;
     }
     landed?.();
     this.leave(result, opts.push === true);
     this.app.state.updated = null;
     this.app.show(result, opts, opts.position);
-    this.settleDeferred();
+    void this.settleDeferred();
     await nextPaint();
     this.app.backend.perfMark("doc-switch", performance.now() - t0);
     return true;
@@ -192,10 +234,31 @@ export class Navigation {
     return true;
   }
 
+  /**
+   * Drops `navigation` while it is still on its way and the latest, as a newer one would: its
+   * answer is never shown, and the document on screen stays. True when it did; one that has
+   * landed, or that a newer navigation took the place of, is left be. A path changed meanwhile,
+   * and one whose refresh on its way is lost to the drop, are left for the caller to settle
+   * (`settleDeferred`), once Rust has been told what the window keeps, so that refresh is
+   * numbered after the keep and the caller can wait for it.
+   */
+  drop(navigation: number): boolean {
+    if (this.pendingNavigation !== navigation) {
+      return false;
+    }
+    const lost = this.refreshing;
+    if (lost !== null && lost.refresh === this.refreshes) {
+      this.deferred.add(lost.path);
+    }
+    this.endNavigation(this.beginNavigation());
+    return true;
+  }
+
   async openRequested(request: OpenRequest): Promise<void> {
-    const shown = await this.load(() => this.app.backend.openDocument(request.path), {
-      push: true,
-    });
+    const shown = await this.load(
+      async () => this.app.backend.openDocument(request.path, await this.nextGeneration()),
+      { push: true },
+    );
     if (shown && request.t0Ms !== null) {
       this.app.backend.perfMark("warm-open", Date.now() - request.t0Ms);
     }
@@ -258,7 +321,7 @@ export class Navigation {
       opts.position = target.position;
     }
     const landing = this.load(
-      () => this.app.backend.openDocument(target.path),
+      async () => this.app.backend.openDocument(target.path, await this.nextGeneration()),
       opts,
       () => {
         this.history = draft;
@@ -316,21 +379,23 @@ export class Navigation {
     }
     // Any refresh still in flight is now out of date.
     ++this.refreshes;
-    this.app.leaveDocument();
+    // Missing, not left: Rust still watches it, so its return reloads it (`changed`).
+    this.app.leaveDocument(true);
     this.app.show({
       status: "err",
       error: { kind: "notFound", message: "It was moved or deleted while open.", path },
     });
   }
 
-  /** Refreshes a path changed during the navigation that just landed, if it landed there. */
-  settleDeferred(): void {
+  /**
+   * Refreshes a path changed during the navigation that just landed, if it landed there; resolves
+   * once that refresh has rendered, or been dropped, or at once for none.
+   */
+  settleDeferred(): Promise<void> {
     const paths = [...this.deferred];
     this.deferred.clear();
     const path = paths.find((p) => this.isCurrent(p));
-    if (path !== undefined) {
-      void this.refresh(path);
-    }
+    return path === undefined ? Promise.resolve() : this.refresh(path);
   }
 
   /**
@@ -344,11 +409,17 @@ export class Navigation {
     const navigation = this.navigations;
     const before = this.app.state.doc;
     const position = before ? (this.app.view.captureAnchor() ?? undefined) : undefined;
+    // This fetches the latest, so a change deferred for the path is covered by it.
+    this.deferred.delete(path);
+    const refreshing = { refresh, path };
+    this.refreshing = refreshing;
     let result: OpenResult;
     try {
-      result = await this.app.backend.openDocument(path);
+      result = await this.app.backend.openDocument(path, await this.nextGeneration());
     } catch {
       return;
+    } finally {
+      if (this.refreshing === refreshing) this.refreshing = null;
     }
     if (refresh !== this.refreshes || navigation !== this.navigations) {
       return;

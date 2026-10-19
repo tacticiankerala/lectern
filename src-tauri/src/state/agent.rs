@@ -32,7 +32,9 @@
 //!   page's from what its window's page reported, read as incomplete when its bridge cut it short
 //!   at its limit. A PDF has none.
 //! - **The file shown** is the one the window's UI last opened, until it leaves it for none
-//!   (`WindowState::leave_document`): then no agent acts on it.
+//!   (`WindowState::leave_document`), or it goes missing while open (`document_missing`, still
+//!   watched for its return): then no agent acts on it. An open the UI dropped on its way (an
+//!   agent's, that a newer show took the place of) never becomes it (`keep_document`).
 //!
 //! Each answers within the pipe's time (`ANSWER_WITHIN`, and the reader's `wait`), a second to
 //! spare: each step that waits waits only as long as is left of it (`Budget`).
@@ -352,7 +354,11 @@ impl App {
         );
         // An HTML page's passage, which its window finds once the page has loaded.
         let found_by_page = at.as_ref().is_some_and(|at| {
-            at.place.is_none() && matches!(at.target, Target::Heading { .. } | Target::Quote { .. })
+            at.place.is_none()
+                && matches!(
+                    at.target,
+                    Target::Heading { .. } | Target::Quote { .. } | Target::Anchor { .. }
+                )
         });
         let front = read(&self.settings).agent_focus == AgentFocus::Front;
         let request = OpenRequest {
@@ -600,8 +606,9 @@ impl App {
 
     /// Where a `show` of `file`, given no target, goes for the `#anchor` after its path: in a note,
     /// the heading the anchor names, found as the reader's own links find one (`show_anchor`), else
-    /// the tool's error naming it; in an HTML page, the heading of that text, which its window
-    /// finds. (A PDF's is its page: `show_at_path`.)
+    /// the tool's error naming it; in an HTML page, the anchor itself (`Target::Anchor`), which its
+    /// window finds as Lectern's links find one, by a heading's id or the slug of its text. (A
+    /// PDF's is its page: `show_at_path`.)
     fn show_anchored(&self, file: &Path, anchor: &str, budget: Budget) -> Result<ShowAt, String> {
         match opened_kind(file) {
             DocKind::Markdown | DocKind::Text => {
@@ -610,8 +617,8 @@ impl App {
                 show_anchor(&text, &source, &name, anchor)
             }
             DocKind::Html | DocKind::Pdf => {
-                let heading = anchor.to_owned();
-                self.show_at(file, Target::Heading { heading }, budget)
+                let anchor = anchor.to_owned();
+                self.show_at(file, Target::Anchor { anchor }, budget)
             }
         }
     }
@@ -2254,12 +2261,14 @@ mod tests {
         }
     }
 
-    fn place(lines: (u32, u32), text: (u32, u32)) -> TextPlace {
+    /// A place core found: its lines, its text, and where it starts in its block's own text.
+    fn place(lines: (u32, u32), text: (u32, u32), in_block: u32) -> TextPlace {
         TextPlace {
             start_line: lines.0,
             end_line: lines.1,
             text_start: Some(text.0),
             text_end: Some(text.1),
+            block_offset: Some(in_block),
         }
     }
 
@@ -2310,7 +2319,7 @@ mod tests {
         assert_eq!(answer["state"], "shown");
         assert_eq!(
             shown_target(call),
-            (Some(quote("Roll back")), vec![place((5, 5), (13, 22))])
+            (Some(quote("Roll back")), vec![place((5, 5), (13, 22), 0)])
         );
         // The path's own line (`plan.md:3`) is a line target, found as any is.
         let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
@@ -2321,7 +2330,7 @@ mod tests {
             shown_target(call),
             (
                 Some(AgentTarget::Line { line: 3 }),
-                vec![place((3, 3), (5, 12))]
+                vec![place((3, 3), (5, 12), 0)]
             )
         );
     }
@@ -2340,12 +2349,12 @@ mod tests {
             .agent_answer(show_at(&steps, AgentTarget::Line { line: 4 }), &claude())
             .unwrap();
         let (_, call) = answering.join().unwrap();
-        // "Steps Freeze the writes. " is 25 units, then the line's 24.
+        // "Steps Freeze the writes. " is 25 units, then the line's 24; its paragraph starts at 6.
         assert_eq!(
             shown_target(call),
             (
                 Some(AgentTarget::Line { line: 4 }),
-                vec![place((4, 4), (25, 49))]
+                vec![place((4, 4), (25, 49), 19)]
             )
         );
     }
@@ -2367,7 +2376,7 @@ mod tests {
                 shown_target(call),
                 (
                     Some(heading("Plan › Rollout")),
-                    vec![place((3, 3), (5, 12))]
+                    vec![place((3, 3), (5, 12), 0)]
                 ),
                 "{anchor}"
             );
@@ -2389,6 +2398,31 @@ mod tests {
         f.app.agent_answer(with_target, &claude()).unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(shown_target(call).0, Some(AgentTarget::Line { line: 1 }));
+    }
+
+    /// An HTML page's `#anchor`, with no target, goes to its window as an anchor, not as a
+    /// heading's text: the window finds it as Lectern's links find one, by a heading's id or the
+    /// slug of its text.
+    #[test]
+    fn a_pages_anchor_goes_to_its_window_as_an_anchor() {
+        let (f, _) = shown_plan();
+        let report = f.dir.file(
+            "vault/report.html",
+            "<h1>Report</h1>\n<h2 id=\"plan\">Rollout plan</h2>\n",
+        );
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
+        let anchored = format!("{}#rollout-plan", path_string(&report));
+        f.app.agent_answer(show(&anchored, 0), &claude()).unwrap();
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(
+            shown_target(call),
+            (
+                Some(AgentTarget::Anchor {
+                    anchor: "rollout-plan".to_owned()
+                }),
+                vec![]
+            )
+        );
     }
 
     /// A PDF's `#page=N` (in any letter case), with no target, goes to that page, as a page
@@ -2518,7 +2552,7 @@ mod tests {
             payload.agent_target,
             Some(ShowAt {
                 target: heading("rollout"),
-                place: Some(place((3, 3), (5, 12))),
+                place: Some(place((3, 3), (5, 12), 0)),
             })
         );
         // A PDF no workspace holds, in a new window, at its page.
@@ -2585,7 +2619,7 @@ mod tests {
             assert!(same_path(Path::new(args.path.as_deref().unwrap()), &plan));
             assert_eq!(
                 call.places,
-                [place((3, 3), (5, 12)), place((5, 5), (27, 36))]
+                [place((3, 3), (5, 12), 0), place((5, 5), (27, 36), 14)]
             );
             assert_eq!(answer["window"], "main");
             assert_eq!(answer["highlights"], 2);
@@ -2852,8 +2886,8 @@ mod tests {
         assert_eq!(
             f.state.agent_places(&path, &targets),
             Ok(vec![
-                Some(place((5, 5), (13, 22))),
-                Some(place((3, 3), (5, 12))),
+                Some(place((5, 5), (13, 22), 0)),
+                Some(place((3, 3), (5, 12), 0)),
                 None
             ])
         );
@@ -2868,8 +2902,8 @@ mod tests {
             f.state.agent_places(&path, &targets),
             Ok(vec![
                 None,
-                Some(place((5, 5), (12, 19))),
-                Some(place((7, 7), (20, 32)))
+                Some(place((5, 5), (12, 19), 0)),
+                Some(place((7, 7), (20, 32), 0))
             ])
         );
         // Only for the file the window shows.
@@ -2887,8 +2921,8 @@ mod tests {
     fn a_window_that_leaves_its_document_shows_none() {
         let (f, plan) = shown_plan();
         let path = path_string(&plan);
-        let begun = f.state.next_seq();
-        f.state.leave_document();
+        // An open numbered 1 is on its way as the window leaves, numbered 2.
+        f.state.leave_document(2);
         assert_eq!(f.state.known_view().path, None);
         assert_eq!(
             f.app.agent_answer(read_from(None, None, None), &claude()),
@@ -2903,11 +2937,93 @@ mod tests {
         );
         assert!(f.state.load_review(&path, None).is_err());
         assert!(f.state.agent_places(&path, &[quote("Roll back")]).is_err());
-        // The open begun before it left lands after: it isn't on screen.
-        assert!(!f.state.make_current(begun, &plan, None));
+        // The open numbered before it left lands after: it isn't on screen.
+        assert!(!f.state.make_current(1, &plan, None));
         assert_eq!(f.state.known_view().path, None);
         // A new open is.
         let _ = f.state.open_document(&path);
         assert!(f.state.shown_file().is_some());
+    }
+
+    /// A window whose file was deleted while open, and says so, shows no file to an agent either,
+    /// and an open begun before doesn't take its place afterwards; but Rust still watches the
+    /// file, so its return reloads the window, which then shows it again.
+    #[test]
+    fn a_window_whose_file_went_missing_shows_none_but_watches_for_its_return() {
+        let (f, plan) = shown_plan();
+        let path = path_string(&plan);
+        // An open numbered 1 is on its way as the file goes missing, which the window says,
+        // numbered 2.
+        fs::remove_file(&plan).unwrap();
+        lock(&f.watched).clear();
+        f.state.document_missing(2);
+        assert_eq!(
+            f.app
+                .agent_answer(read_from(Some(&plan), None, None), &claude()),
+            Err("plan.md isn't shown in Lectern. Show it first.".to_owned())
+        );
+        assert_eq!(
+            f.app.agent_answer(read_from(None, None, None), &claude()),
+            Err("Lectern isn't showing a file. Show one first.".to_owned())
+        );
+        assert!(f.state.agent_places(&path, &[quote("Roll back")]).is_err());
+        // Still watched: the watcher was never told to stop.
+        assert_eq!(*lock(&f.watched), Vec::new());
+        // The open numbered before it went missing lands after: it isn't on screen.
+        assert!(!f.state.make_current(1, &plan, None));
+        // It comes back, and the window opens it again: it's shown.
+        fs::write(&plan, ROLLOUT).unwrap();
+        let _ = f.state.open_document(&path);
+        assert_eq!(f.state.shown_file(), Some(plan.clone()));
+    }
+
+    /// A window that drops an open on its way and keeps the file it shows (an agent's newer show
+    /// of that file) keeps it as Rust's document too: an open begun before doesn't take its place.
+    /// When one already had, it says so, for the window to open its file again.
+    #[test]
+    fn a_window_that_keeps_its_file_takes_no_open_begun_before() {
+        let (f, plan) = shown_plan();
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        // An open numbered 1 is on its way as the window keeps its file, numbered 2.
+        let rendered = f.state.load(&notes).ok();
+        assert!(f.state.keep_document(&plan, 2));
+        assert!(!f.state.make_current(1, &notes, rendered.as_ref()));
+        assert_eq!(f.state.shown_file(), Some(plan.clone()));
+        // One that became the document first: the file on screen isn't kept.
+        let _ = f.state.open_document(&path_string(&notes));
+        assert!(!f.state.keep_document(&plan, 3));
+        // Opened again, it is.
+        let _ = f.state.open_document(&path_string(&plan));
+        assert!(f.state.keep_document(&plan, 4));
+        assert_eq!(f.state.shown_file(), Some(plan));
+    }
+
+    /// The window's UI numbers its opens, and its leaves and keeps of its document, in the order
+    /// it sends them; Rust may run them in another (an open's command runs once the pool gets to
+    /// it, a keep at once). An open numbered below the window's last keep never becomes current,
+    /// whichever ran first: one run after the keep is refused, and one run before it is current
+    /// until then, which the keep says, so the window opens its file again.
+    #[test]
+    fn an_open_numbered_before_the_window_kept_its_file_never_becomes_current() {
+        let (f, plan) = shown_plan();
+        let notes = f.dir.file("vault/notes.md", "# Notes\n");
+        let other = f.dir.file("vault/other.md", "# Other\n");
+        // Sent before the keep (1 and 2), run after it (3): neither becomes current.
+        assert!(f.state.keep_document(&plan, 3));
+        let opened = f.state.open_numbered(1, &path_string(&notes));
+        assert!(matches!(opened, OpenResult::Ok { .. }));
+        assert_eq!(f.state.shown_file(), Some(plan.clone()));
+        let opened = f.state.open_user_path_numbered(2, &path_string(&other));
+        assert!(opened.doc.is_some());
+        assert_eq!(f.state.shown_file(), Some(plan.clone()));
+        assert!(f.state.keep_document(&plan, 4));
+        // Run before the keep sent after it (5, then 6): current until the keep, which says the
+        // plan isn't, so the window opens it again (7), and that is.
+        let _ = f.state.open_numbered(5, &path_string(&notes));
+        assert_eq!(f.state.shown_file(), Some(notes));
+        assert!(!f.state.keep_document(&plan, 6));
+        let _ = f.state.open_numbered(7, &path_string(&plan));
+        assert!(f.state.keep_document(&plan, 8));
+        assert_eq!(f.state.shown_file(), Some(plan));
     }
 }

@@ -1,8 +1,9 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
-// buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
-// after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
-// instead (frame-view.ts): a page keeps its scroll fraction as its reading position, its headings
-// are its anchors, and its links go through Lectern's link rules; a PDF keeps no reading position.
+// buttons, tags and images, scrolling to anchors, lines (an agent's target far down a long block to
+// its own text) and saved positions (position.ts), and room after the text for its last heading to
+// reach the top. An HTML page or a PDF shows in a frame instead (frame-view.ts): a page keeps its
+// scroll fraction as its reading position, its headings are its anchors, and its links go through
+// Lectern's link rules; a PDF keeps no reading position.
 // A page whose frame another page fills is opened again, with a toast; one that keeps doing so is
 // let go, the document area saying so.
 //
@@ -20,9 +21,15 @@ import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
 import type { PageAim, PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
-import { placeAt } from "./reflow";
+import { placeAt, stopPlacing } from "./reflow";
 import { effectiveTheme } from "./themes";
 import { renderNavigatingAway } from "./welcome";
+
+/**
+ * Where a target's own text is in the document `doc` once it is on screen (an agent's line or
+ * quote, which core found there), found in its block's own text; null when it isn't there.
+ */
+export type Passage = (doc: HTMLElement) => Range | null;
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
@@ -109,8 +116,12 @@ export class DocView {
     }
   }
 
-  /** Shows `doc`; a PDF at its page `pdfPage` when given, else its first. */
+  /**
+   * Shows `doc`; a PDF at its page `pdfPage` when given, else its first. A placement still settling
+   * in the document it replaces stops, so it never scrolls this one.
+   */
   render(doc: DocPayload, pdfPage?: number): void {
+    stopPlacing(this.app.scroller);
     if (doc.frameUrl !== null) {
       // A page or a PDF shows in a frame, in place of the document.
       this.host.replaceChildren();
@@ -206,6 +217,32 @@ export class DocView {
       placeAt(this.app.scroller, block, TOP_GAP);
     }
     return block !== null;
+  }
+
+  /**
+   * Scrolls an agent's target on source line `line` to the top of the pane: its own text there,
+   * `passage`, when that is inside a block longer than the view, past where the block's landing
+   * would show it (a line or a quote far down a long paragraph or code block); else, as for a
+   * passage in a short block, or when it isn't found, the block (`scrollToLine`).
+   */
+  scrollToPassage(line: number, passage: Passage): boolean {
+    const block = blockAt(this.host, line);
+    const text = block === null ? null : passage(this.host);
+    if (block === null || text === null || !this.belowLanding(block, text)) {
+      return this.scrollToLine(line);
+    }
+    placeAt(this.app.scroller, text, TOP_GAP);
+    return true;
+  }
+
+  /**
+   * Whether `text`, in `block`, would end below the pane were the block landed at its top. Its
+   * offset into the block is measured, not the block's height, which content-visibility may still
+   * estimate off screen.
+   */
+  private belowLanding(block: HTMLElement, text: Range): boolean {
+    const bottom = text.getBoundingClientRect().bottom;
+    return bottom - block.getBoundingClientRect().top > this.app.scroller.clientHeight - TOP_GAP;
   }
 
   /**

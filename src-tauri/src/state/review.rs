@@ -390,8 +390,7 @@ mod tests {
         );
         assert!(!note.with_file_name("tide.review.md").exists());
         // A relative path is refused even when it is the current one, which no open makes it.
-        f.state
-            .make_current(f.state.next_seq(), Path::new("tide.md"), None);
+        f.state.make_current(1, Path::new("tide.md"), None);
         assert_eq!(f.state.load_review("tide.md", None).unwrap_err(), NOT_OPEN);
         assert_eq!(
             f.state
@@ -947,8 +946,7 @@ mod tests {
         let doc = r"\\lectern-untrusted.invalid\share\a.md";
         let refusal = trust::refusal(doc);
         // Current as a failed open would leave it, so only the trust check stands in the way.
-        f.state
-            .make_current(f.state.next_seq(), Path::new(doc), None);
+        f.state.make_current(1, Path::new(doc), None);
         let started = Instant::now();
         assert_eq!(f.state.load_review(doc, None).unwrap_err(), refusal);
         assert_eq!(

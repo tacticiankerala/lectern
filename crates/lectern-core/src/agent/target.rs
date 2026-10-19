@@ -45,6 +45,12 @@ pub struct TextPlace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub text_end: Option<u32>,
+    /// Where `text_start` is in the text of the block holding it (its paragraph, code block or
+    /// list item), in UTF-16 code units: the window finds the passage in that block alone,
+    /// without indexing the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub block_offset: Option<u32>,
 }
 
 /// Where an agent's `show` takes the reader once its file has opened in a window that was still
@@ -72,14 +78,18 @@ pub struct HighlightAnswer {
 }
 
 /// Whether a file of kind `kind`, named `file`, takes `target`: a note or a text file a heading,
-/// a line or a quote; an HTML page a heading or a quote, as its lines aren't shown; a PDF only a
-/// page. A comment thread is any file's that takes comments, which a PDF doesn't.
+/// a line or a quote; an HTML page a heading or a quote, as its lines aren't shown, or the anchor
+/// after its path; a PDF only a page. A comment thread is any file's that takes comments, which a
+/// PDF doesn't.
 pub fn check_target(kind: DocKind, target: &Target, file: &str) -> Result<(), String> {
     match (kind, target) {
         (DocKind::Pdf, Target::Page { .. }) => Ok(()),
         (DocKind::Pdf, _) => Err(format!("{file} is a PDF: give a page target.")),
         (_, Target::Comment { .. }) => Ok(()),
-        (DocKind::Html, Target::Heading { .. } | Target::Quote { .. }) => Ok(()),
+        (DocKind::Html, Target::Heading { .. } | Target::Quote { .. } | Target::Anchor { .. }) => {
+            Ok(())
+        }
+        (_, Target::Anchor { anchor }) => Err(not_a_page_anchor(anchor, file)),
         (DocKind::Html, _) => Err(format!(
             "{file} is an HTML page: give a heading or a quote."
         )),
@@ -152,7 +162,8 @@ impl Found {
         }
     }
 
-    /// As the window's UI is sent it: its offsets in UTF-16 code units.
+    /// As the window's UI is sent it: its offsets in UTF-16 code units, and where it starts in
+    /// its own block's text.
     fn place(&self, text: &TextMap) -> TextPlace {
         let units = self
             .span
@@ -163,8 +174,23 @@ impl Found {
             end_line: self.end_line,
             text_start: units.first().copied(),
             text_end: units.get(1).copied(),
+            block_offset: self.span.and_then(|(start, _)| block_offset(text, start)),
         }
     }
+}
+
+/// Where byte `start` of `text` is in the text of the block holding it, in UTF-16 code units;
+/// none when it is in no block.
+fn block_offset(text: &TextMap, start: usize) -> Option<u32> {
+    let blocks = text.blocks();
+    let block = &blocks[blocks
+        .partition_point(|b| b.start <= start)
+        .checked_sub(1)?];
+    let within = text
+        .text()
+        .get(block.start..start)
+        .filter(|_| start <= block.end)?;
+    u32::try_from(within.encode_utf16().count()).ok()
 }
 
 /// Where `target` is, as [`resolve_target`] finds it, in bytes of the text.
@@ -200,7 +226,14 @@ pub(crate) fn find_target(
             Err("A page target is for PDFs; give a heading, a line or a quote.".to_owned())
         }
         Target::Comment { .. } => Err("A comment thread isn't a passage of the text.".to_owned()),
+        Target::Anchor { anchor } => Err(not_a_page_anchor(anchor, file)),
     }
+}
+
+/// Why the file named `file`, not an HTML page, can't take `#anchor` as a target: a note's anchor
+/// is found as its heading (`show_anchor`).
+fn not_a_page_anchor(anchor: &str, file: &str) -> String {
+    format!("Only an HTML page takes #{anchor} as a target, not {file}.")
 }
 
 /// A heading's text as a target is matched against it: without Markdown's marks for emphasis and

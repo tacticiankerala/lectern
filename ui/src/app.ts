@@ -6,7 +6,9 @@
 // - The `open-request` and `doc-changed` listeners are registered before `startup`: Rust holds
 //   second launches until then and sends them as events. One arriving before startup finishes is
 //   applied after the first document.
-// - Navigations are numbered, refreshes apart from them (navigation.ts).
+// - Navigations are numbered, refreshes apart from them (navigation.ts). Every open, leave and
+//   keep sent to Rust is numbered too, from the startup payload's `generation` on, so a page
+//   reloaded over the same window state numbers above what the page before sent.
 // - `startupNotice` shows once, as a toast.
 // - The library sidebar renders after the first paint, so it never holds it up. Quick open,
 //   Preferences, the menus, find in page, full-text search, update checks, About, the breadcrumb
@@ -25,11 +27,15 @@
 //   one, and sends Lectern's shortcuts pressed there as `frame-key`, which run as keydowns do. It
 //   tells what an open page has loaded from the web as `page-loads`.
 // - An agent's request for this window (`agent-request`) is answered from agent.ts, loaded on the
-//   first, with `replyToAgent`; it is listened for before `startup`, like the others. An agent's
+//   first, with `replyToAgent`; it is listened for before `startup`, like the others, and waits
+//   for startup's first document, so the launched file is never displaced by it. An agent's
 //   `show` opens as a link does, on the history, so unsaved comment text is kept as on any other
 //   switch; asked about first, the bar over the document waits for the reader, and is dismissed
 //   as the window leaves: before its page reloads into another workspace, or before it closes. A
-//   show within the file on screen marks where the reader was on the history first. A window that
+//   show within the file on screen marks where the reader was on the history first. A newer show
+//   that opens nothing drops an agent's open still on its way, and Rust is told the window keeps
+//   its file (`keepDocument`, numbered after that open as navigation.ts numbers every open), so
+//   that open never becomes Rust's document either, however late it runs. A window that
 //   started for an agent (`agentTarget` in the startup payload) opens at its target. A comment
 //   thread as the target shows its card in the Comments tab, and its passage, once the comments
 //   have started and loaded and, in an HTML page, the page is ready; not once another navigation
@@ -51,7 +57,7 @@ import { Actions } from "./actions";
 import type { Backend } from "./backend";
 import { renderBreadcrumbs } from "./breadcrumbs";
 import type { CommentsController, PendingReveal } from "./comments";
-import { DocView } from "./doc-view";
+import { DocView, type Passage } from "./doc-view";
 import { buildLayout, h, nextPaint, quietly, samePath, type Layout } from "./dom";
 import { trackFrameFocus } from "./frame-view";
 import type { Agent, Landing } from "./agent";
@@ -162,6 +168,11 @@ export interface OpenOptions {
   slug?: string;
   /** A source line to scroll to. */
   line?: number;
+  /**
+   * An agent's target's own text on `line` (`DocView.scrollToPassage`): scrolled to instead of
+   * its block when it is far down a long one.
+   */
+  passage?: Passage;
   /** A PDF's page to open at. */
   page?: number;
   /** A passage of an HTML page to scroll to once it is ready, found in its text then. */
@@ -242,6 +253,12 @@ export class App {
   private title = "";
   private docTitle: string | null = null;
   private started = false;
+  /**
+   * Resolves once startup has shown its first document (or none): an agent's request waits for
+   * it, so it never takes the launched file's place, and a `show` is judged against that file.
+   */
+  private readonly firstShown: Promise<void>;
+  private markFirstShown: () => void = () => undefined;
   /** The latest `open-request` that arrived before startup finished. */
   private queued: OpenRequest | null = null;
   /** Set once the first paint is done: modules loaded after it may load. */
@@ -267,12 +284,22 @@ export class App {
    * (`PendingReveal`).
    */
   private agentLandings = 0;
+  /** The navigation of the latest agent's open (`openForAgent`); null before the first. */
+  private agentOpening: number | null = null;
+  /**
+   * The file on screen being opened again, while it is, because Rust took an agent's open that
+   * was dropped on its way (`dropAgentOpen`): every agent's show waits for it before landing.
+   */
+  private recovering: Promise<void> | null = null;
 
   constructor(
     readonly backend: Backend,
     root: HTMLElement,
   ) {
     this.layout = buildLayout(root);
+    this.firstShown = new Promise((resolve) => {
+      this.markFirstShown = resolve;
+    });
     this.toasts = new Toasts(this.layout.toasts);
     this.view = new DocView(this.layout.doc, this);
     this.rightPanel = new RightPanel(this.layout.outline);
@@ -396,12 +423,14 @@ export class App {
     let initial: OpenResult | null = null;
     let landing: OpenOptions = {};
     let primary = false;
+    let generation = 0;
     // The fonts selected last time load while the startup payload is on its way.
     const earlyFonts = loadRememberedFonts();
     try {
       const payload = await this.backend.startup();
       this.fromRust = payload.settings;
       this.rev = payload.settingsRev;
+      generation = payload.generation;
       Object.assign(this.state, {
         settings: payload.settings,
         library: payload.library,
@@ -422,13 +451,16 @@ export class App {
       this.workspaces.begin(null, false, []);
       void this.workspaces.refresh();
     }
+    // Nothing is numbered, or sent to Rust, before this: an open asked meanwhile waits for it.
+    this.nav.numberFrom(generation);
     // The theme and fonts are in place before the first paint, so nothing flashes.
     this.applySettings();
     const fonts = Promise.all([earlyFonts, loadFonts(this.state.settings)]);
     if (this.nav.endNavigation(navigation)) {
       this.show(initial, landing);
-      this.nav.settleDeferred();
+      void this.nav.settleDeferred();
     }
+    this.markFirstShown();
     // Showing something sets the title; otherwise it names the workspace alone.
     this.syncTitle();
     // A workspace with no folders yet, new or emptied, offers to add one.
@@ -495,9 +527,17 @@ export class App {
     await this.nav.open(path, opts);
   }
 
-  /** Tells Rust the window left its document for none, so nothing acts on that document any more. */
-  leaveDocument(): void {
-    quietly(this.backend.leaveDocument());
+  /**
+   * Tells Rust the window left its document for none, so nothing acts on that document any more;
+   * or, when `missing`, that it was deleted or moved away while open: nothing acts on it either,
+   * but Rust still watches it, so its return reloads the window.
+   */
+  leaveDocument(missing = false): void {
+    quietly(
+      this.nav
+        .nextGeneration()
+        .then((generation) => this.backend.leaveDocument(missing, generation)),
+    );
   }
 
   /** Asks for a file and opens it, trusting its host: the user chose it. */
@@ -882,7 +922,12 @@ export class App {
       this.view.restore(position);
     } else if (opts.anchor !== undefined && this.view.scrollToAnchor(opts.anchor, opts.slug)) {
       // Scrolled to the anchor.
-    } else if (opts.line !== undefined && this.view.scrollToLine(opts.line)) {
+    } else if (
+      opts.line !== undefined &&
+      (opts.passage === undefined
+        ? this.view.scrollToLine(opts.line)
+        : this.view.scrollToPassage(opts.line, opts.passage))
+    ) {
       // Scrolled to the line.
     } else if (doc.position) {
       // Where the reader left it last time.
@@ -1058,10 +1103,14 @@ export class App {
     await this.agent?.leave();
   }
 
-  /** Answers an agent's request for this window (agent.ts, loaded on the first). */
+  /**
+   * Answers an agent's request for this window (agent.ts, loaded on the first), once startup has
+   * shown its first document.
+   */
   private async agentRequested(call: AgentCall): Promise<void> {
     let reply: AgentReply;
     try {
+      await this.firstShown;
       const agent = await this.agentHere();
       reply = await agent.answer(call);
     } catch (e) {
@@ -1095,6 +1144,8 @@ export class App {
       forgetThreads: () => {
         this.agentLanded();
       },
+      dropOpen: () => this.dropAgentOpen(),
+      recovered: () => this.recovered(),
       answered: (id, answer, message) =>
         this.backend
           .replyToAgent(id, {
@@ -1147,6 +1198,7 @@ export class App {
     // so it never jumps back here once the reader's file has taken the screen.
     const opening = this.open(path, { push: true, ...at });
     const navigation = this.navigation;
+    this.agentOpening = navigation;
     await opening;
     const { doc, error } = this.state;
     if (doc && samePath(doc.path, path)) {
@@ -1154,6 +1206,60 @@ export class App {
       return null;
     }
     return error && samePath(error.path, path) ? error.message : "Another file opened first.";
+  }
+
+  /**
+   * A newer agent's show has come: an agent's open still on its way is dropped, so it never takes
+   * the screen; the reader's own navigation is left be (`Navigation.drop`). Rust is told the
+   * window keeps what it shows, so the dropped open never becomes Rust's document either; one that
+   * had already is put right by opening what's on screen again, in place (`recover`). Resolves
+   * once that's done, whether this drop started it or an earlier one did, so the newer show's
+   * target goes to the document that stays.
+   */
+  private dropAgentOpen(): Promise<void> {
+    if (this.agentOpening !== null && this.nav.drop(this.agentOpening)) {
+      const recovery = this.recover();
+      this.recovering = recovery;
+      void recovery.finally(() => {
+        if (this.recovering === recovery) this.recovering = null;
+      });
+    }
+    return this.recovered();
+  }
+
+  /** Resolves once the file on screen is back, should it be being opened again (`recover`). */
+  private recovered(): Promise<void> {
+    return this.recovering ?? Promise.resolve();
+  }
+
+  /**
+   * After an agent's open was dropped: Rust is told the window keeps the path on screen, and when
+   * it had taken the dropped open already, that path is opened again in place; not over a
+   * navigation the reader made meanwhile, which `refresh` drops too, so it stands down instead.
+   * Then a change to the file that waited while the dropped open was on its way renders, so it is
+   * numbered after the keep, and a show's target lands over it, never under it; unless the reader
+   * has moved on meanwhile: a change waits for their navigation to land, which settles it as any
+   * navigation does, dropping one for a file that isn't theirs.
+   */
+  private async recover(): Promise<void> {
+    const navigation = this.navigation;
+    const path = this.nav.currentPath();
+    if (path === null) {
+      this.leaveDocument();
+    } else {
+      let kept = true;
+      try {
+        kept = await this.backend.keepDocument(path, await this.nav.nextGeneration());
+      } catch (e) {
+        warn(e);
+      }
+      if (!kept && this.navigation === navigation) {
+        await this.nav.refresh(path);
+      }
+    }
+    if (this.navigation === navigation) {
+      await this.nav.settleDeferred();
+    }
   }
 
   /**
@@ -1209,7 +1315,11 @@ export class App {
     }
     this.nav.markHere();
     if ("line" in landing) {
-      this.view.scrollToLine(landing.line);
+      if (landing.passage === undefined) {
+        this.view.scrollToLine(landing.line);
+      } else {
+        this.view.scrollToPassage(landing.line, landing.passage);
+      }
     } else if ("page" in landing) {
       this.view.toPdfPage(landing.page);
     } else if (found !== undefined) {

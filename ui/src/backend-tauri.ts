@@ -66,12 +66,12 @@ export class TauriBackend implements Backend {
     return invoke<StartupPayload>("startup");
   }
 
-  openDocument(path: string): Promise<OpenResult> {
-    return invoke("open_document", { path });
+  openDocument(path: string, generation: number): Promise<OpenResult> {
+    return invoke("open_document", { path, generation });
   }
 
-  openUserPath(path: string): Promise<UserOpen> {
-    return invoke("open_user_path", { path });
+  openUserPath(path: string, generation: number): Promise<UserOpen> {
+    return invoke("open_user_path", { path, generation });
   }
 
   removeRecent(path: string): Promise<RecentEntry[]> {
@@ -247,8 +247,12 @@ export class TauriBackend implements Backend {
     return invoke("agent_reply", { id, reply });
   }
 
-  leaveDocument(): Promise<void> {
-    return invoke("leave_document");
+  leaveDocument(missing: boolean, generation: number): Promise<void> {
+    return invoke("leave_document", { missing, generation });
+  }
+
+  keepDocument(path: string, generation: number): Promise<boolean> {
+    return invoke("keep_document", { path, generation });
   }
 
   agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {

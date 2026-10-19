@@ -1036,6 +1036,11 @@ fn a_request_on_the_pipe_is_checked_against_its_tools_limits() {
     assert!(refused(show(0, Some(quote(&"q".repeat(2001), None)))).contains("2,000"));
     assert!(refused(show(0, Some(quote("q", Some(&"p".repeat(2001)))))).contains("prefix"));
     assert!(refused(show(0, Some(Target::Line { line: 0 }))).contains("line"));
+    // An anchor target is Lectern's own, from a page's path: never an agent's.
+    let anchor = Target::Anchor {
+        anchor: "rollout".to_owned(),
+    };
+    assert!(refused(show(0, Some(anchor))).contains("names no place"));
     let highlight = |targets: Vec<Target>| {
         AgentRequest::Highlight(HighlightArgs {
             path: None,

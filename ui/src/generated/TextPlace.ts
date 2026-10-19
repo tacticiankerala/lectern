@@ -6,4 +6,10 @@
  * from `text_start` up to `text_end`, counted in UTF-16 code units. Only the lines are known for
  * a quote found in the source, or a line with no text.
  */
-export type TextPlace = { startLine: number, endLine: number, textStart?: number, textEnd?: number, };
+export type TextPlace = { startLine: number, endLine: number, textStart?: number, textEnd?: number, 
+/**
+ * Where `text_start` is in the text of the block holding it (its paragraph, code block or
+ * list item), in UTF-16 code units: the window finds the passage in that block alone,
+ * without indexing the whole document.
+ */
+blockOffset?: number, };

@@ -104,8 +104,8 @@ export class GatedBackend extends FakeBackend {
     return { ...(await super.startup()), startupNotice: this.notice };
   }
 
-  override async openDocument(path: string): Promise<OpenResult> {
-    const result = this.overrides[path] ?? (await super.openDocument(path));
+  override async openDocument(path: string, generation: number): Promise<OpenResult> {
+    const result = this.overrides[path] ?? (await super.openDocument(path, generation));
     if (path === this.slowPath) {
       await this.openGate.promise;
     }

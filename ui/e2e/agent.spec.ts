@@ -1,12 +1,21 @@
 // An agent's requests (src/agent.ts), through the fake backend: `status` names the heading the
 // outline marks as being read, which a navigation lands a little below the pane's top; `show` asks
 // with a bar over the document, and an agent's switch keeps a half-written comment. A target lands
-// at the top, with Back to where the reader was; an agent's highlights paint on their own layer in
+// at the top, with Back to where the reader was, and a line target inside a long paragraph or code
+// block lands that line, not the block's top; an agent's highlights paint on their own layer in
 // a note, and through its bridge in an HTML page, whose text `read` takes from the page. An agent's
 // comment on a page on screen is its own card, painted in the page, and `show` at a thread opens
 // the Comments tab on it.
 import { expect, test, type Page } from "@playwright/test";
-import { expectLandedOn, fixturePath, headingOffset, openFixture } from "./util";
+import type { Backend } from "../src/backend";
+import {
+  expectLandedOn,
+  fixturePath,
+  headingOffset,
+  LANDING_PX,
+  LANDING_SLACK_PX,
+  openFixture,
+} from "./util";
 
 const BIG_PLAN = "work/alpha/plans/2026-01-01-big-plan.md";
 
@@ -176,6 +185,264 @@ test("an agent's highlights paint a note's passages on their layer, and go with 
   }, fixturePath(ALPHA));
   await expect(page).toHaveTitle("Alpha — Lectern");
   expect(await agentPainted(page)).toEqual([]);
+});
+
+const README_TXT = "notes/readme.txt";
+
+/** The survey's 300 lines, which `surveyFile` makes the text file of. */
+const SURVEY = Array.from(
+  { length: 300 },
+  (_, i) => `Survey entry ${String(i + 1).padStart(3, "0")}: the lanternfish count.`,
+);
+
+/** Opens the text file and makes it one paragraph of the survey's 300 lines, as core renders it. */
+async function surveyFile(page: Page): Promise<string> {
+  await openFixture(page, README_TXT);
+  const path = fixturePath(README_TXT);
+  await page.evaluate(
+    ({ path, lines }) => {
+      const last = lines[lines.length - 1] ?? "";
+      const html = `<p class="lx-plain" data-sourcepos="1:1-${String(lines.length)}:${String(last.length)}">${lines.join("\n")}</p>`;
+      window.__fake.setDoc(path, html);
+      window.__fake.emit("doc-changed", { path });
+    },
+    { path, lines: SURVEY },
+  );
+  await expect(page.locator("#lx-doc p.lx-plain")).toContainText("Survey entry 300");
+  return path;
+}
+
+/**
+ * Where core finds `text` on line `line` of the survey: its lines, its place in the text, and
+ * where it starts in its paragraph's own.
+ */
+function surveyPlace(page: Page, line: number, text: string) {
+  return page.evaluate(
+    ({ line, text }) => {
+      const start = window.__lxDocText().indexOf(text);
+      const blockOffset = window.__lxDocText("p.lx-plain").indexOf(text);
+      return {
+        startLine: line,
+        endLine: line,
+        textStart: start,
+        textEnd: start + text.length,
+        blockOffset,
+      };
+    },
+    { line, text },
+  );
+}
+
+/** How far `text` of the survey sits below the pane's top, once lazy layout has settled. */
+async function surveyTop(page: Page, text: string): Promise<number | null> {
+  await page.waitForTimeout(1000);
+  return page.evaluate((text) => {
+    const pane = document.getElementById("lx-doc-pane");
+    const node = document.querySelector("#lx-doc p.lx-plain")?.firstChild;
+    if (!pane || !(node instanceof Text)) return null;
+    const at = node.data.indexOf(text);
+    const range = document.createRange();
+    range.setStart(node, at);
+    range.setEnd(node, at + text.length);
+    return Math.round(range.getBoundingClientRect().top - pane.getBoundingClientRect().top);
+  }, text);
+}
+
+test("a line target in a long paragraph of a text file lands that line at the top, and paints it alone", async ({
+  page,
+}) => {
+  const path = await surveyFile(page);
+  const line = SURVEY[249] ?? "";
+  // Where core finds line 250 of it: that line's own text.
+  const place = await surveyPlace(page, 250, line);
+  expect(place.textStart).toBeGreaterThan(0);
+  const shown = await page.evaluate(
+    ({ path, place }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { line: 250 }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      ),
+    { path, place },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  // Line 250 at the top of the pane, where a heading lands, not the paragraph's first line.
+  expect(Math.abs(((await surveyTop(page, line)) ?? Infinity) - LANDING_PX)).toBeLessThanOrEqual(
+    LANDING_SLACK_PX,
+  );
+  // A highlight of the line paints that line alone.
+  const highlighted = await page.evaluate(
+    ({ path, place }) =>
+      window.__fake.agentRequest(
+        { tool: "highlight", path, targets: [{ line: 250 }], clear: false },
+        "Claude",
+        [place],
+      ),
+    { path, place },
+  );
+  expect(highlighted).toEqual({ kind: "highlighted", count: 1 });
+  expect(await agentPainted(page)).toEqual([line]);
+});
+
+test("a quote near the end of a long paragraph of a text file lands at the quote", async ({
+  page,
+}) => {
+  const path = await surveyFile(page);
+  // Far enough from the end that the text after it lets it reach the top.
+  const quote = "Survey entry 260: the lanternfish";
+  // Where core finds it: on line 260, at its text.
+  const place = await surveyPlace(page, 260, quote);
+  expect(place.textStart).toBeGreaterThan(0);
+  const shown = await page.evaluate(
+    ({ path, place, quote }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { quote }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      ),
+    { path, place, quote },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  expect(Math.abs(((await surveyTop(page, quote)) ?? Infinity) - LANDING_PX)).toBeLessThanOrEqual(
+    LANDING_SLACK_PX,
+  );
+  // One the paragraph's own landing shows already lands the paragraph, as before.
+  const near = "Survey entry 003: the lanternfish";
+  const nearPlace = await surveyPlace(page, 3, near);
+  expect(
+    await page.evaluate(
+      ({ path, place, quote }) =>
+        window.__fake.agentRequest(
+          { tool: "show", path, target: { quote }, newWindow: false, wait: 0 },
+          "Claude",
+          [place],
+        ),
+      { path, place: nearPlace, quote: near },
+    ),
+  ).toEqual({ kind: "shown" });
+  const first = SURVEY[0] ?? "";
+  expect(Math.abs(((await surveyTop(page, first)) ?? Infinity) - LANDING_PX)).toBeLessThanOrEqual(
+    LANDING_SLACK_PX,
+  );
+});
+
+test("a passage's landing ends when another document takes its place, which keeps its own position", async ({
+  page,
+}) => {
+  const path = await surveyFile(page);
+  const plan = fixturePath(BIG_PLAN);
+  await page.evaluate((plan) => {
+    window.__fake.settingsElsewhere({ agentOpens: "switch" });
+    // The plan was left halfway down, its place saved only as a fraction.
+    const backend = window.__fake as unknown as Pick<Backend, "savePosition">;
+    void backend.savePosition(plan, { headingId: null, offset: 0, line: null, fraction: 0.5 });
+  }, plan);
+  const quote = "Survey entry 260: the lanternfish";
+  const place = await surveyPlace(page, 260, quote);
+  // Two shows in a row: the passage in the file on screen, then the plan, before the passage's
+  // landing has settled. What the plan shows at the top of the pane is noted as it opens.
+  const opened = await page.evaluate(
+    async ({ path, place, quote, plan }) => {
+      const fake = window.__fake;
+      const first = await fake.agentRequest(
+        { tool: "show", path, target: { quote }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      );
+      const second = await fake.agentRequest({
+        tool: "show",
+        path: plan,
+        newWindow: false,
+        wait: 0,
+      });
+      return { replies: [first, second], top: window.__lxViewTop() };
+    },
+    { path, place, quote, plan },
+  );
+  expect(opened.replies).toEqual([{ kind: "shown" }, { kind: "shown" }]);
+  expect(opened.top?.line).toBeGreaterThan(1);
+  await page.waitForTimeout(1500);
+  // The same block at the top, where it was: the passage's landing never moved the plan.
+  const settled = await page.evaluate(() => window.__lxViewTop());
+  expect(settled?.line).toBe(opened.top?.line);
+  expect(Math.abs((settled?.offset ?? Infinity) - (opened.top?.offset ?? 0))).toBeLessThanOrEqual(
+    LANDING_SLACK_PX,
+  );
+});
+
+test("a line target in a long code block of a note lands that line at the top", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  const path = fixturePath(ALPHA);
+  // A fenced block of 60 lines of code, on lines 4 to 63, between its fences on 3 and 64.
+  const lines = Array.from(
+    { length: 60 },
+    (_, i) => `let tally_${String(i + 1).padStart(2, "0")} = count("lanternfish");`,
+  );
+  await page.evaluate(
+    ({ path, lines }) => {
+      const code = lines.join("\n");
+      // As core renders a fenced block without a language.
+      const html =
+        `<h1 id="alpha" data-sourcepos="1:1-1:7">Alpha</h1>` +
+        `<div class="code-block" data-sourcepos="3:1-64:3"><div class="code-head">` +
+        `<span class="code-lang"></span><button type="button" class="code-copy">Copy</button>` +
+        `</div><pre><code>${code}\n</code></pre></div>` +
+        // Enough after it for its last lines to reach the top.
+        Array.from(
+          { length: 40 },
+          (_, i) =>
+            `<p data-sourcepos="${String(66 + 2 * i)}:1-${String(66 + 2 * i)}:9">After.</p>`,
+        ).join("");
+      window.__fake.setDoc(path, html);
+      window.__fake.emit("doc-changed", { path });
+    },
+    { path, lines },
+  );
+  await expect(page.locator("#lx-doc pre")).toContainText("tally_60");
+  // Line 54 is the code's 51st line.
+  const wanted = lines[50] ?? "";
+  const place = await page.evaluate((line) => {
+    const start = window.__lxDocText().indexOf(line);
+    const blockOffset = window.__lxDocText(".code-block").indexOf(line);
+    return {
+      startLine: 54,
+      endLine: 54,
+      textStart: start,
+      textEnd: start + line.length,
+      blockOffset,
+    };
+  }, wanted);
+  expect(place.textStart).toBeGreaterThan(0);
+  const shown = await page.evaluate(
+    ({ path, place }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { line: 54 }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      ),
+    { path, place },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await page.waitForTimeout(1000);
+  const top = await page.evaluate((line) => {
+    const pane = document.getElementById("lx-doc-pane");
+    const code = document.querySelector("#lx-doc pre code");
+    if (!pane || !code) return null;
+    const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node as Text;
+      const at = text.data.indexOf(line);
+      if (at === -1) continue;
+      const range = document.createRange();
+      range.setStart(text, at);
+      range.setEnd(text, at + line.length);
+      return Math.round(range.getBoundingClientRect().top - pane.getBoundingClientRect().top);
+    }
+    return null;
+  }, wanted);
+  expect(Math.abs((top ?? Infinity) - LANDING_PX)).toBeLessThanOrEqual(LANDING_SLACK_PX);
 });
 
 const REPORT = "artifacts/report.html";

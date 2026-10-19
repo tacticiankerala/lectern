@@ -88,7 +88,7 @@ describe("App user paths", () => {
     await vi.waitFor(() => {
       expect(app.state.doc?.path).toBe(B);
     });
-    expect(user).toHaveBeenCalledWith(B);
+    expect(user).toHaveBeenCalledWith(B, expect.any(Number));
     expect(button("Back").disabled).toBe(false);
   });
 
@@ -367,10 +367,97 @@ describe("leaving the document for none", () => {
     await app.open(B, { push: true });
     expect(left).not.toHaveBeenCalled();
     app.nav.home();
+    // Sent once numbered, a moment later.
+    await settle();
     expect(left).toHaveBeenCalledTimes(1);
+    expect(left).toHaveBeenLastCalledWith(false, expect.any(Number));
     await app.open(A, { push: true });
     fake.emit("doc-removed", { path: A });
     expect(app.state.error?.kind).toBe("notFound");
+    await settle();
     expect(left).toHaveBeenCalledTimes(2);
+    // Missing, not left: Rust keeps watching it for its return.
+    expect(left).toHaveBeenLastCalledWith(true, expect.any(Number));
+  });
+
+  it("numbers every open, leave and keep in the order they are sent, for Rust to order them so", async () => {
+    const { fake, app } = await started(null);
+    const open = vi.spyOn(fake, "openDocument");
+    const user = vi.spyOn(fake, "openUserPath");
+    const left = vi.spyOn(fake, "leaveDocument");
+    await app.open(A, { push: true });
+    await app.openUserPath(B);
+    // A refresh is an open too.
+    fake.emit("doc-changed", { path: B });
+    await settle();
+    app.nav.home();
+    await app.open(C, { push: true });
+    fake.emit("doc-removed", { path: C });
+    await settle();
+    expect(open.mock.calls).toEqual([
+      [A, 1],
+      [B, 3],
+      [C, 5],
+    ]);
+    expect(user.mock.calls).toEqual([[B, 2]]);
+    expect(left.mock.calls).toEqual([
+      [false, 4],
+      [true, 6],
+    ]);
+  });
+
+  it("numbers from where Rust is, so a page reloaded over the same window state can still open", async () => {
+    const fake = new GatedBackend(fixtures(), { initial: A });
+    fake.startupGate.resolve();
+    // The page before this one numbered up to 50, an open and a keep, which Rust kept.
+    await fake.openDocument(A, 49);
+    await fake.keepDocument(A, 50);
+    const app = new App(fake, appRoot());
+    await app.start();
+    const open = vi.spyOn(fake, "openDocument");
+    await app.open(B, { push: true });
+    expect(open).toHaveBeenCalledWith(B, 51);
+    // Numbered above the keep, it became Rust's document too.
+    expect(await fake.keepDocument(B, 52)).toBe(true);
+  });
+
+  it("numbers nothing before startup seeds the counter: an open asked meanwhile waits for it", async () => {
+    const fake = new GatedBackend(fixtures(), { initial: A });
+    // The page before this one numbered up to 50, which Rust kept.
+    await fake.openDocument(A, 49);
+    await fake.keepDocument(A, 50);
+    const app = new App(fake, appRoot());
+    const starting = app.start();
+    const open = vi.spyOn(fake, "openDocument");
+    // The reader opens B while the startup payload is still on its way.
+    const opening = app.open(B, { push: true });
+    await settle();
+    expect(open).not.toHaveBeenCalled();
+    fake.startupGate.resolve();
+    await opening;
+    expect(open).toHaveBeenCalledWith(B, 51);
+    expect(app.state.doc?.path).toBe(B);
+    // Numbered above the keep, it became Rust's document too: Rust and the window agree.
+    expect(await fake.keepDocument(B, 52)).toBe(true);
+    await starting;
+  });
+
+  it("shows a file deleted while open again once it comes back", async () => {
+    const { fake, app } = await started(A);
+    const left = vi.spyOn(fake, "leaveDocument");
+    const html = fake.html(A) ?? "";
+    fake.remove(A);
+    fake.emit("doc-removed", { path: A });
+    expect(app.state.error?.kind).toBe("notFound");
+    await settle();
+    expect(left).toHaveBeenCalledWith(true, expect.any(Number));
+    // It comes back: Rust, still watching it, says it changed.
+    fake.setDoc(A, html);
+    fake.emit("doc-changed", { path: A });
+    await vi.waitFor(() => {
+      expect(app.state.doc?.path).toBe(A);
+    });
+    expect(app.state.error).toBeNull();
+    expect(document.querySelector("#lx-doc h1")?.textContent).toBe("Aye");
   });
 });

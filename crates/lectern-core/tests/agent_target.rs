@@ -49,16 +49,25 @@ fn at_(source: &str, found: &str, nth: usize, lines: (u32, u32)) -> TextPlace {
 }
 
 /// The place of the text `found` in the note's text, at its `nth` occurrence (from 0), counted as
-/// the UI counts it, in UTF-16 code units, on the lines given.
+/// the UI counts it, in UTF-16 code units, on the lines given; and where it starts in its block.
 fn at(source: &str, found: &str, nth: usize, lines: (u32, u32)) -> TextPlace {
-    let text = TextMap::build(source).text().to_owned();
+    let map = TextMap::build(source);
+    let text = map.text();
     let start = text.match_indices(found).nth(nth).expect("in the text").0;
-    let units = |bytes: usize| u32::try_from(text[..bytes].encode_utf16().count()).unwrap();
+    let units =
+        |from: usize, to: usize| u32::try_from(text[from..to].encode_utf16().count()).unwrap();
+    let block = map
+        .blocks()
+        .iter()
+        .rev()
+        .find(|b| b.start <= start)
+        .expect("in a block");
     TextPlace {
         start_line: lines.0,
         end_line: lines.1,
-        text_start: Some(units(start)),
-        text_end: Some(units(start + found.len())),
+        text_start: Some(units(0, start)),
+        text_end: Some(units(0, start + found.len())),
+        block_offset: Some(units(block.start, start)),
     }
 }
 
@@ -343,6 +352,8 @@ fn a_line_of_a_long_text_file_paragraph_is_that_line_alone() {
             end_line: 250,
             text_start: Some(u32::try_from(start).unwrap()),
             text_end: Some(u32::try_from(start + wanted.len()).unwrap()),
+            // The file is one paragraph, from the text's start.
+            block_offset: Some(u32::try_from(start).unwrap()),
         }
     );
 }
@@ -367,6 +378,7 @@ fn a_line_of_a_code_block_is_that_line_alone() {
                 end_line: fence,
                 text_start: None,
                 text_end: None,
+                block_offset: None,
             }),
             "line {fence}"
         );
@@ -382,6 +394,7 @@ fn a_line_without_text_has_only_its_line_and_one_past_the_end_is_an_error() {
             end_line: 6,
             text_start: None,
             text_end: None,
+            block_offset: None,
         })
     );
     assert_eq!(
@@ -437,6 +450,7 @@ fn a_quote_with_markdown_marks_is_found_in_the_source_by_its_lines() {
             end_line: 11,
             text_start: None,
             text_end: None,
+            block_offset: None,
         })
     );
     // Over a soft line break, and told apart by its prefix in the source.
@@ -448,6 +462,7 @@ fn a_quote_with_markdown_marks_is_found_in_the_source_by_its_lines() {
             end_line: 5,
             text_start: None,
             text_end: None,
+            block_offset: None,
         })
     );
 }
@@ -572,6 +587,64 @@ fn each_kind_of_file_takes_its_own_targets() {
     }
 }
 
+/// Where a passage starts in the text of its own block, in UTF-16 code units, so the window finds
+/// it in that block alone, never indexing the whole document: a line of a long paragraph, a quote
+/// starting a later paragraph, a line of a code block, past a character UTF-16 counts as two.
+#[test]
+fn a_place_says_where_it_starts_in_its_own_block() {
+    let source =
+        "# Plan\n\nIntro.\n\nHi 😀 there\nsecond line.\n\n```\nlet a = 1;\nlet b = 2;\n```\n";
+    let text = TextMap::build(source);
+    let found = |target: &Target| resolve_target(&text, source, "plan.md", target).unwrap();
+    // "Hi 😀 there second line.": "second" is 12 units in.
+    assert_eq!(found(&Target::Line { line: 6 }).block_offset, Some(12));
+    assert_eq!(found(&Target::Line { line: 5 }).block_offset, Some(0));
+    assert_eq!(found(&quote("Intro", None, None)).block_offset, Some(0));
+    assert_eq!(
+        found(&quote("there second", None, None)).block_offset,
+        Some(6)
+    );
+    // The code "let a = 1; let b = 2;": line 10 is 11 in.
+    assert_eq!(found(&Target::Line { line: 10 }).block_offset, Some(11));
+    // Only the lines of a quote found in the source: no text, so no offset either.
+    let marked = "# Plan\n\nThe plan **must** ship.\n";
+    let place = resolve_target(
+        &TextMap::build(marked),
+        marked,
+        "plan.md",
+        &quote("plan **must** ship", None, None),
+    )
+    .unwrap();
+    assert_eq!((place.text_start, place.block_offset), (None, None));
+}
+
+/// An `#anchor` after an HTML page's path is a target of its own, which its window finds; a note
+/// resolves its anchor to the heading, so no other file takes one.
+#[test]
+fn only_an_html_page_takes_an_anchor_target() {
+    let anchor = Target::Anchor {
+        anchor: "rollout-plan".to_owned(),
+    };
+    assert_eq!(check_target(DocKind::Html, &anchor, "report.html"), Ok(()));
+    for (kind, file) in [(DocKind::Markdown, "plan.md"), (DocKind::Text, "notes.txt")] {
+        assert_eq!(
+            check_target(kind, &anchor, file),
+            Err(format!(
+                "Only an HTML page takes #rollout-plan as a target, not {file}."
+            ))
+        );
+    }
+    assert_eq!(
+        check_target(DocKind::Pdf, &anchor, "brief.pdf"),
+        Err("brief.pdf is a PDF: give a page target.".to_owned())
+    );
+    let text = TextMap::of_note("plan.md", "# Plan\n\n## Rollout plan\n").unwrap();
+    assert_eq!(
+        resolve_target(&text, "# Plan\n", "plan.md", &anchor),
+        Err("Only an HTML page takes #rollout-plan as a target, not plan.md.".to_owned())
+    );
+}
+
 /// What follows a PDF's path is its page when it is the standard `#page=N` (in any letter case),
 /// checked as a page target is, with its messages; anything else is an error saying what a PDF
 /// takes.
@@ -619,6 +692,7 @@ fn a_window_is_sent_the_places_core_found_and_answers_how_many_highlights_it_sho
         end_line: 8,
         text_start: Some(24),
         text_end: Some(53),
+        block_offset: Some(5),
     };
     let call = AgentCall {
         id: 4,
@@ -634,7 +708,7 @@ fn a_window_is_sent_the_places_core_found_and_answers_how_many_highlights_it_sho
     let sent = serde_json::to_value(&call).unwrap();
     assert_eq!(
         sent["places"],
-        json!([{"startLine": 7, "endLine": 8, "textStart": 24, "textEnd": 53}])
+        json!([{"startLine": 7, "endLine": 8, "textStart": 24, "textEnd": 53, "blockOffset": 5}])
     );
     assert_eq!(serde_json::from_value::<AgentCall>(sent).unwrap(), call);
     // A call with no places leaves them out, and is read without them.
@@ -646,6 +720,7 @@ fn a_window_is_sent_the_places_core_found_and_answers_how_many_highlights_it_sho
         serde_json::to_value(TextPlace {
             text_start: None,
             text_end: None,
+            block_offset: None,
             ..place
         })
         .unwrap(),
@@ -703,6 +778,7 @@ fn a_target_held_for_a_starting_window_keeps_its_place() {
             end_line: 7,
             text_start: Some(24),
             text_end: Some(33),
+            block_offset: None,
         }),
     };
     assert_eq!(

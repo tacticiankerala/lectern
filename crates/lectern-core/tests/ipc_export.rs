@@ -690,10 +690,13 @@ fn startup_payload_carries_a_notice() {
         workspace: None,
         workspaces: vec![],
         primary: true,
+        generation: 50,
         agent_target: None,
     })
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
+    assert_eq!(j["generation"], 50);
+    assert!(decl::<StartupPayload>().contains("generation: number,"));
     assert!(j["initial"].is_null());
     assert_eq!(j["settings"]["measure"], 100);
     assert_eq!(j["settingsRev"], 7);
@@ -719,6 +722,7 @@ fn startup_payload_carries_an_agents_target() {
         workspace: None,
         workspaces: vec![],
         primary: false,
+        generation: 0,
         agent_target,
     };
     let held = ShowAt {
@@ -730,6 +734,7 @@ fn startup_payload_carries_an_agents_target() {
             end_line: 5,
             text_start: Some(17),
             text_end: Some(24),
+            block_offset: None,
         }),
     };
     let j = serde_json::to_value(payload(Some(held))).unwrap();
@@ -775,6 +780,7 @@ fn startup_payload_names_the_window_workspace() {
         workspace: Some(personal.clone()),
         workspaces: vec![work, personal],
         primary: false,
+        generation: 0,
         agent_target: None,
     })
     .unwrap();
