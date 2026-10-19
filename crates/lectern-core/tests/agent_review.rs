@@ -204,8 +204,9 @@ fn an_agent_comment_on_a_text_file_is_saved_as_the_agents() {
         save(&quote("lanternfish survey"), "Which survey?", None).unwrap(),
         1
     );
+    // On the line its words are on, of the paragraph's two.
     let saved = fs::read_to_string(&sidecar).unwrap();
-    assert!(saved.contains("\n## C1 · open · L4–L5\n"), "{saved}");
+    assert!(saved.contains("\n## C1 · open · L4\n"), "{saved}");
     assert!(
         saved.contains("\n> lanternfish survey\n\n**Claude (question):** Which survey?\n"),
         "{saved}"
@@ -221,13 +222,131 @@ fn an_agent_comment_on_a_text_file_is_saved_as_the_agents() {
         .unwrap(),
         2
     );
+    // A line of a paragraph over two: that line alone.
     let saved = fs::read_to_string(&sidecar).unwrap();
-    assert!(saved.contains("\n## C2 · open · L1–L2\n"), "{saved}");
+    assert!(saved.contains("\n## C2 · open · L1\n"), "{saved}");
     assert!(
-        saved.contains("\n**Claude (pushback):** Which vault?\n"),
+        saved.contains("\n> Readme for the vault.\n\n**Claude (pushback):** Which vault?\n"),
         "{saved}"
     );
     assert_eq!(fs::read_to_string(&readme).unwrap(), README);
+}
+
+/// A comment on a line of a long paragraph (a text file with no blank line in 300) is on that
+/// line, quoting it alone, and stays there as saved; a code fence has no text to comment on.
+#[test]
+fn a_comment_on_a_line_of_a_long_paragraph_is_on_that_line() {
+    let survey: String = (1..=300)
+        .map(|n| format!("Survey entry {n:03}: the lanternfish count.\n"))
+        .collect();
+    let text = TextMap::of_note("survey.txt", &survey).unwrap();
+    let line = "Survey entry 250: the lanternfish count.";
+    let start = text.text().find(line).unwrap();
+    let at = comment_anchor(&text, &survey, "survey.txt", &Target::Line { line: 250 }).unwrap();
+    assert_eq!(
+        at,
+        anchor_at(
+            (250, 250),
+            line,
+            &text.text()[start - 32..start],
+            u32::try_from(start).unwrap()
+        )
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("survey.txt");
+    fs::write(&path, &survey).unwrap();
+    let op = comment_op(at, "Why so few?".to_owned(), "Claude", None);
+    let (review, _) =
+        store::apply_op(&sidecar_path(&path), "survey.txt", &survey, &op, NOW).unwrap();
+    let c1 = review.comments().next().unwrap();
+    assert_eq!((c1.start_line, c1.end_line), (250, 250));
+    let saved = fs::read_to_string(sidecar_path(&path)).unwrap();
+    assert!(saved.contains("\n## C1 · open · L250\n"), "{saved}");
+    assert!(saved.contains(&format!("\n> {line}\n")), "{saved}");
+
+    let note = "# Plan\n\n```sh\ncargo test\ncargo build\n```\n";
+    let text = TextMap::of_note("plan.md", note).unwrap();
+    assert_eq!(
+        comment_anchor(&text, note, "plan.md", &Target::Line { line: 4 }).map(|at| (
+            at.start_line,
+            at.end_line,
+            at.quote
+        )),
+        Ok((4, 4, "cargo test".to_owned()))
+    );
+    assert_eq!(
+        comment_anchor(&text, note, "plan.md", &Target::Line { line: 3 }),
+        Err("Line 3 of plan.md has no text to comment on.".to_owned())
+    );
+}
+
+/// Plan, with a three-line paragraph on lines 3 to 5.
+const STEPS: &str = "# Plan\n\nFreeze the writes.\nRoll back the migration.\nThaw the writes.\n";
+
+/// The comments' lines, in file order.
+fn comment_lines(review: &lectern_core::review::Review) -> Vec<(u32, u32)> {
+    review
+        .comments()
+        .map(|c| (c.start_line, c.end_line))
+        .collect()
+}
+
+/// `STEPS` with a paragraph added at its end, and a comment on it saved: the save finds every
+/// comment again in the changed note.
+fn add_a_paragraph_and_save(sidecar: &std::path::Path) -> lectern_core::review::Review {
+    let changed = format!("{STEPS}\nA new paragraph, unrelated.\n");
+    let op = ReviewOp::Add {
+        anchor: anchor((7, 7), "unrelated", "A new paragraph, "),
+        text: "New?".to_owned(),
+        author: None,
+    };
+    store::apply_op(sidecar, "plan.md", &changed, &op, NOW)
+        .unwrap()
+        .0
+}
+
+/// A comment on the second line of a three-line paragraph stays on that line once the note
+/// changes elsewhere: the next save finds it again where its quote sits, line by line.
+#[test]
+fn a_comment_on_a_line_of_a_paragraph_keeps_its_line_when_the_note_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_path(&dir.path().join("plan.md"));
+    let text = TextMap::of_note("plan.md", STEPS).unwrap();
+    let at = comment_anchor(&text, STEPS, "plan.md", &Target::Line { line: 4 }).unwrap();
+    let op = comment_op(at, "Why roll back?".to_owned(), "Claude", None);
+    store::apply_op(&sidecar, "plan.md", STEPS, &op, NOW).unwrap();
+    let review = add_a_paragraph_and_save(&sidecar);
+    assert_eq!(comment_lines(&review), [(4, 4), (7, 7)]);
+    let saved = fs::read_to_string(&sidecar).unwrap();
+    assert!(saved.contains("\n## C1 · open · L4 · Plan\n"), "{saved}");
+}
+
+/// The reader's own selection within one line of a longer paragraph is on that line, as saved and
+/// once the note changes.
+#[test]
+fn the_readers_selection_within_a_line_of_a_paragraph_is_on_that_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_path(&dir.path().join("plan.md"));
+    // As the UI sends it: the paragraph's lines, and the words chosen.
+    let yours = ReviewOp::Add {
+        anchor: anchor((3, 5), "the migration", "Roll back "),
+        text: "Which one?".to_owned(),
+        author: None,
+    };
+    let (review, _) = store::apply_op(&sidecar, "plan.md", STEPS, &yours, NOW).unwrap();
+    assert_eq!(comment_lines(&review), [(4, 4)]);
+    let review = add_a_paragraph_and_save(&sidecar);
+    assert_eq!(comment_lines(&review), [(4, 4), (7, 7)]);
+}
+
+/// A code span that runs over a line break: the line it ends on shows text, so a line target there
+/// is never "no text"; the paragraph, whole, when its lines can't be told apart.
+#[test]
+fn a_line_a_code_span_runs_onto_has_text() {
+    let note = "a `foo\nbar`\nlast\n";
+    let text = TextMap::of_note("plan.md", note).unwrap();
+    let at = comment_anchor(&text, note, "plan.md", &Target::Line { line: 2 }).unwrap();
+    assert!(at.quote.contains("bar"), "{at:?}");
 }
 
 /// A file named as the note's sidecar that Lectern didn't make (no frontmatter) is refused, and the

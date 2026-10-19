@@ -873,7 +873,8 @@ mod tests {
             panic!("{:?}", loaded.comments);
         };
         assert_eq!(agents.state, AnchorState::Anchored);
-        assert_eq!((agents.start_line, agents.end_line), (1, 2));
+        // On the line its quote is on, of its paragraph's two.
+        assert_eq!((agents.start_line, agents.end_line), (1, 1));
 
         let add = ReviewOp::Add {
             anchor: NewAnchor {
@@ -889,10 +890,10 @@ mod tests {
         let payload = f.state.review_op(&path, add, None).unwrap();
         let ours = &payload.comments[1];
         assert_eq!(ours.state, AnchorState::Anchored);
-        assert_eq!((ours.start_line, ours.end_line), (4, 5));
+        assert_eq!((ours.start_line, ours.end_line), (4, 4));
         assert!(ours.heading_path.is_empty());
         let saved = fs::read_to_string(&sidecar).unwrap();
-        assert!(saved.contains("\n## C2 · open · L4–L5\n"), "{saved}");
+        assert!(saved.contains("\n## C2 · open · L4\n"), "{saved}");
         assert!(
             saved.contains("\n> lanternfish survey is plain text\n"),
             "{saved}"
@@ -908,13 +909,13 @@ mod tests {
         let loaded = f.state.load_review(&path, None).unwrap();
         let moved = &loaded.comments[1];
         assert_eq!(moved.state, AnchorState::Anchored);
-        assert_eq!((moved.start_line, moved.end_line), (6, 7));
+        assert_eq!((moved.start_line, moved.end_line), (6, 6));
         // Reworded: found again by its words, as moved.
         fs::write(&text, TEXT.replace("is plain text", "is now plain text")).unwrap();
         let loaded = f.state.load_review(&path, None).unwrap();
         let reworded = &loaded.comments[1];
         assert_eq!(reworded.state, AnchorState::Moved);
-        assert_eq!((reworded.start_line, reworded.end_line), (4, 5));
+        assert_eq!((reworded.start_line, reworded.end_line), (4, 4));
     }
 
     #[test]

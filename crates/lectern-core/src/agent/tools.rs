@@ -604,7 +604,7 @@ fn path(value: &Value, key: &str) -> Result<String, String> {
 }
 
 /// `value` as a whole number from `min` to `max`.
-fn number(value: &Value, key: &str, min: u32, max: u32) -> Result<u32, String> {
+pub(crate) fn number(value: &Value, key: &str, min: u32, max: u32) -> Result<u32, String> {
     value
         .as_u64()
         .and_then(|n| u32::try_from(n).ok())

@@ -330,6 +330,63 @@ fn a_detached_comment_falls_back_to_the_deepest_surviving_heading() {
     assert_eq!(s.pinned_heading, Some(("Tide sync".to_owned(), 4)));
 }
 
+/// A comment's lines are its quote's own: L49, the last line of a paragraph over L1–L49. When the
+/// passage is reworded and one like it sits just below (L53, its own block), the reworded one wins:
+/// a candidate is as near as its lines are to the stored lines, no distance at all within them,
+/// not as near as its block's first line is. (A short block between keeps a window over both
+/// passages from holding more of the quote's words than either.)
+#[test]
+fn a_reworded_passage_in_the_comments_own_paragraph_beats_one_just_below() {
+    let filler: String = (1..=48)
+        .map(|n| format!("Filler line number {n} of the paragraph.\n"))
+        .collect();
+    let src = format!(
+        "{filler}Roll back the migration before the batch runs.\n\nNote: see below.\n\nRoll back the migration before the batch starts.\n"
+    );
+    let r = add(
+        &src,
+        "Roll back the migration before the batch runs.",
+        49,
+        49,
+    );
+    let c = r.comments().next().unwrap();
+    assert_eq!((c.start_line, c.end_line), (49, 49));
+    let edited = src.replace("before the batch runs", "before each batch runs");
+    let s = state(&r, &edited);
+    assert_eq!(
+        (s.state, s.start_line, s.end_line),
+        (AnchorState::Moved, 49, 49)
+    );
+    assert_eq!(
+        s.current_text.as_deref(),
+        Some("Roll back the migration before each batch runs")
+    );
+}
+
+/// An older sidecar stores a comment's lines at its block's (L10–L49 for a quote on L49). With no
+/// context to tell two occurrences apart, the one within those lines wins over one just above
+/// their first line: within is no distance at all.
+#[test]
+fn an_occurrence_within_the_stored_lines_beats_one_nearer_their_first_line() {
+    let early: String = (3..=6)
+        .map(|n| format!("Early line number {n}.\n"))
+        .collect();
+    let filler: String = (10..=48)
+        .map(|n| format!("Filler line number {n} of the paragraph.\n"))
+        .collect();
+    // L8 holds the first occurrence; the paragraph is L10–L49 and holds the second, on L49.
+    let src =
+        format!("Intro.\n\n{early}\nSee: check the gauge.\n\n{filler}Then check the gauge.\n");
+    assert_eq!(src.lines().nth(7), Some("See: check the gauge."));
+    assert_eq!(src.lines().nth(48), Some("Then check the gauge."));
+    let r = format::parse("## C1 · open · L10–L49\n> check the gauge\n\n**You:** x\n");
+    let s = state(&r, &src);
+    assert_eq!(
+        (s.state, s.start_line, s.end_line),
+        (AnchorState::Anchored, 49, 49)
+    );
+}
+
 #[test]
 fn equal_matches_go_to_the_one_nearest_the_stored_line() {
     // No anchor line, so no context to tell the two apart.
@@ -639,7 +696,11 @@ fn a_long_selection_of_repeated_text_anchors_without_a_quadratic_search() {
     let r = add(&src, &run[..64_000], 3, 5);
     let took = started.elapsed();
     let c = r.comments().next().unwrap();
-    assert_eq!((c.start_line, c.end_line), (3, 5), "the code block's lines");
+    assert_eq!(
+        (c.start_line, c.end_line),
+        (4, 4),
+        "the code line it sits on"
+    );
     assert_eq!(c.quote.chars().count(), 501);
     let a = c.anchor.as_ref().unwrap();
     assert_eq!(a.fp, fingerprint(&src), "found, not the fallback");

@@ -64,9 +64,10 @@ pub fn thread_number(id: &str) -> Option<u32> {
 /// `text`, that a comment on `target` is about, as the window would send a selection of it: its
 /// lines, its text as shown and the text just before it.
 ///
-/// A quote is the passage it names. A heading or a line gives the text of its block, and a quote
-/// found only in the source (with Markdown marks) the text of the blocks on its lines. An error, a
-/// sentence for the agent, when the target isn't there, or a line has no text.
+/// A quote is the passage it names. A heading gives the text of its block, and a line its own text
+/// (on that line alone, in a block over more lines), as the target finds them; a quote found only
+/// in the source (with Markdown marks) the text of the blocks on its lines. An error, a sentence
+/// for the agent, when the target isn't there, or a line has no text.
 pub fn comment_anchor(
     text: &TextMap,
     source: &str,
@@ -74,12 +75,13 @@ pub fn comment_anchor(
     target: &Target,
 ) -> Result<NewAnchor, String> {
     let found = find_target(text, source, file, target)?;
-    let (start, end) = match found.span {
-        Some(span) => span,
-        None => blocks_on(text, found.start_line, found.end_line).ok_or_else(|| match target {
-            Target::Line { line } => format!("Line {line} of {file} has no text to comment on."),
-            _ => format!("That passage isn't in {file}."),
-        })?,
+    let (start, end) = match (found.span, target) {
+        (Some(span), _) => span,
+        (None, Target::Line { line }) => {
+            return Err(format!("Line {line} of {file} has no text to comment on."))
+        }
+        (None, _) => blocks_on(text, found.start_line, found.end_line)
+            .ok_or_else(|| format!("That passage isn't in {file}."))?,
     };
     let (start_line, end_line) = text.lines_of(start, end);
     // Where it starts too, so the occurrence chosen here is the one anchored, whatever the text

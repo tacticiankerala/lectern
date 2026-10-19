@@ -7,7 +7,10 @@
 //!   handing it any of this process's handles or its console, and outside this process's job:
 //!   otherwise the MCP client would wait on the stdio Lectern held, and stopping the server would
 //!   end Lectern.
-//!   A connection that fails is made again at the next call.
+//!   A connection that fails, or that Lectern closed as idle, is made again at the next call, and
+//!   so is one unused for longer than Lectern keeps an idle one open, before it would close it.
+//!   When no pipe answers but Lectern runs (its boot mutex is there), Lectern isn't started
+//!   again: each call says agent control is off.
 //! - **Calls** each run on a thread of their own, so a slow one doesn't hold up the others, nor the
 //!   protocol's own messages.
 //! - **The pipe's owner:** before anything is written, the pipe's server must run as this user.
@@ -32,7 +35,7 @@ use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::mcp::{code, Handled, Mcp};
 use lectern_core::agent::request::ClientInfo;
 use lectern_core::agent::{
-    answer_within, mcp_distro, pipe_name, same_user, AgentRequest, Answer, PipeReply, PipeRequest,
+    answer_within, mcp_distro, same_user, AgentRequest, Answer, PipeReply, PipeRequest,
     FOREIGN_PIPE, MAX_LINE,
 };
 use serde_json::{json, Value};
@@ -43,15 +46,24 @@ use windows::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOW,
 };
 
-use crate::logging;
 use crate::pipe::{self, Pipe};
+use crate::{logging, win};
 
 /// How long a started Lectern has to open its pipe.
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 /// How often the pipe is tried while Lectern starts.
 const LAUNCH_POLL: Duration = Duration::from_millis(100);
+/// How long a running Lectern's pipe, which isn't there, is waited for: it may be starting.
+const RUNNING_WAIT: Duration = Duration::from_secs(3);
 /// How much longer than Lectern's own limit an answer is waited for.
 const GRACE: Duration = Duration::from_secs(5);
+/// How long a connection may go unused and still be used: well within the time Lectern keeps an
+/// idle one open (10 minutes), so a call never goes out on one Lectern is closing.
+const REUSE_WITHIN: Duration = Duration::from_secs(5 * 60);
+
+/// The answer to every tool call while Lectern runs without its pipe.
+const AGENT_CONTROL_OFF: &str = "Lectern is running, but agent control is off. Restart Lectern; \
+    if it stays off, its log says why.";
 
 /// What relays a request to Lectern, as the client named itself.
 pub type Relay =
@@ -63,15 +75,21 @@ pub fn run(identifier: &str) -> i32 {
     logging::init_stderr_logging();
     let relay = match mcp_distro(std::env::args().skip(2)) {
         Ok(distro) => {
-            let sid = match pipe::user_sid() {
-                Ok(sid) => sid,
+            let (name, sid) = match pipe::agent_pipe(identifier) {
+                Ok(named) => named,
                 Err(e) => {
-                    log::error!("can't name Lectern's pipe without the user's SID: {e}");
+                    log::error!("can't name Lectern's pipe: {e}");
                     return 1;
                 }
             };
-            let name = pipe_name(identifier, &sid);
-            let lectern = Lectern::new(name, sid, distro, Box::new(launch_lectern));
+            let running = identifier.to_owned();
+            let lectern = Lectern::new(
+                name,
+                sid,
+                distro,
+                Box::new(launch_lectern),
+                Box::new(move || win::lectern_runs(&running)),
+            );
             Arc::new(move |request, client| lectern.call(request, client))
         }
         Err(refusal) => {
@@ -154,14 +172,17 @@ fn write_line(output: &Mutex<dyn Write + Send>, line: &str) {
 }
 
 /// The running Lectern, reached over its pipe `name`, served as the user `user` (a SID), and
-/// started with `launch` when it isn't running; told the agent runs in the WSL distribution
-/// `distro`, when `mcp` was given one.
+/// started with `launch` when it isn't running, which `running` tells (its boot mutex); told the
+/// agent runs in the WSL distribution `distro`, when `mcp` was given one.
 pub struct Lectern {
     name: String,
     user: String,
     distro: Option<String>,
     launch: Box<dyn Fn() -> io::Result<()> + Send + Sync>,
+    running: Box<dyn Fn() -> bool + Send + Sync>,
     connection: Mutex<Option<Arc<Connection>>>,
+    /// How long a connection may go unused and still be used ([`REUSE_WITHIN`]).
+    reuse_within: Duration,
 }
 
 impl Lectern {
@@ -170,13 +191,16 @@ impl Lectern {
         user: String,
         distro: Option<String>,
         launch: Box<dyn Fn() -> io::Result<()> + Send + Sync>,
+        running: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
         Self {
             name,
             user,
             distro,
             launch,
+            running,
             connection: Mutex::new(None),
+            reuse_within: REUSE_WITHIN,
         }
     }
 
@@ -191,15 +215,20 @@ impl Lectern {
         }
     }
 
-    /// The connection, made when there is none or the last one is lost, starting Lectern when it
-    /// isn't running. A new connection says hello for `client`, in the agent's distribution.
+    /// The connection, made when there is none, the last one is lost (Lectern closes one that has
+    /// been idle), or it has gone unused for longer than `reuse_within` (it is let go, before
+    /// Lectern would close it under a call), starting Lectern when it isn't running. A new
+    /// connection says hello for `client`, in the agent's distribution.
     fn connection(&self, client: Option<ClientInfo>) -> Result<Arc<Connection>, String> {
         let mut slot = self
             .connection
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(connection) = slot.as_ref().filter(|c| c.alive()) {
-            return Ok(Arc::clone(connection));
+            if connection.used_within(self.reuse_within) {
+                return Ok(Arc::clone(connection));
+            }
+            connection.close();
         }
         let connection = Connection::start(self.open()?)
             .map_err(|e| format!("Couldn't talk to Lectern: {e}"))?;
@@ -213,24 +242,33 @@ impl Lectern {
         Ok(connection)
     }
 
-    /// The pipe, once Lectern has it open: started first when it isn't running. A pipe served
-    /// as another user is let go at once, with nothing written to it.
+    /// The pipe, once Lectern has it open: started first when it isn't running. A Lectern that runs
+    /// without it (its boot mutex is there) is never started again, which would only bring it
+    /// forward: it is given a moment, as it may be starting, and then the answer is that agent
+    /// control is off. A pipe served as another user is let go at once, with nothing written to
+    /// it.
     fn open(&self) -> Result<Pipe, String> {
         match pipe::connect(&self.name) {
             Ok(pipe) => return self.ours(pipe),
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(format!("Couldn't reach Lectern: {e}")),
         }
+        if (self.running)() {
+            return self.open_within(RUNNING_WAIT, AGENT_CONTROL_OFF);
+        }
         (self.launch)().map_err(|e| format!("Couldn't start Lectern: {e}"))?;
-        let deadline = Instant::now() + LAUNCH_WAIT;
+        self.open_within(LAUNCH_WAIT, "Lectern didn't start within 10 seconds.")
+    }
+
+    /// The pipe, tried until it is there or `wait` has passed: then the error `missing`.
+    fn open_within(&self, wait: Duration, missing: &str) -> Result<Pipe, String> {
+        let deadline = Instant::now() + wait;
         loop {
             thread::sleep(LAUNCH_POLL);
             match pipe::connect(&self.name) {
                 Ok(pipe) => return self.ours(pipe),
                 Err(e) if e.kind() == ErrorKind::NotFound && Instant::now() < deadline => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => {
-                    return Err("Lectern didn't start within 10 seconds.".to_owned())
-                }
+                Err(e) if e.kind() == ErrorKind::NotFound => return Err(missing.to_owned()),
                 Err(e) => return Err(format!("Couldn't reach Lectern: {e}")),
             }
         }
@@ -272,6 +310,8 @@ struct Connection {
     next: AtomicU64,
     waiting: Mutex<HashMap<u64, Sender<Answer>>>,
     alive: AtomicBool,
+    /// When a request was last sent or an answer read.
+    used: Mutex<Instant>,
 }
 
 impl Connection {
@@ -282,6 +322,7 @@ impl Connection {
             next: AtomicU64::new(0),
             waiting: Mutex::new(HashMap::new()),
             alive: AtomicBool::new(true),
+            used: Mutex::new(Instant::now()),
         });
         let reading = Arc::clone(&connection);
         thread::Builder::new()
@@ -294,6 +335,18 @@ impl Connection {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// Whether the connection has been used within `within`, or waits on an answer.
+    fn used_within(&self, within: Duration) -> bool {
+        !lock(&self.waiting).is_empty() || lock(&self.used).elapsed() < within
+    }
+
+    /// Lets the connection go: no request goes out on it again, and its reads stop, which closes
+    /// it.
+    fn close(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+        self.pipe.cancel();
+    }
+
     /// Hands each answer to whoever waits on its id, until the pipe ends; then everyone still
     /// waiting learns the connection is lost.
     fn read_answers(&self) {
@@ -303,6 +356,7 @@ impl Connection {
                 log::warn!("Lectern sent a line that isn't an answer");
                 break;
             };
+            *lock(&self.used) = Instant::now();
             let waiter = lock(&self.waiting).remove(&id);
             if let Some(waiter) = waiter {
                 let _ = waiter.send(answer);
@@ -357,6 +411,7 @@ impl Connection {
         };
         line.push('\n');
         let _writing = lock(&self.writing);
+        *lock(&self.used) = Instant::now();
         match self.pipe.write_all(line.as_bytes()) {
             Ok(()) => true,
             Err(e) => {
@@ -577,6 +632,7 @@ mod tests {
                     *lock(&launched) = Some(pid);
                     Ok(())
                 }),
+                Box::new(|| false),
             )
         };
         let answer = lectern.call(AgentRequest::Status, None).unwrap();
@@ -610,6 +666,7 @@ mod tests {
                     launched.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }),
+                Box::new(|| false),
             )
         };
         let client = Some(ClientInfo {
@@ -639,11 +696,104 @@ mod tests {
             pipe::user_sid().unwrap(),
             Some("Debian".to_owned()),
             Box::new(|| panic!("Lectern is running")),
+            Box::new(|| true),
         );
         assert_eq!(
             lectern.call(AgentRequest::Status, None),
             Ok(json!("Debian"))
         );
+    }
+
+    /// A Lectern for the pipe `name`, running, served as this user: never to be started.
+    fn running_lectern(name: String) -> Lectern {
+        Lectern::new(
+            name,
+            pipe::user_sid().unwrap(),
+            None,
+            Box::new(|| panic!("Lectern is running")),
+            Box::new(|| true),
+        )
+    }
+
+    fn claude_code() -> Option<ClientInfo> {
+        Some(ClientInfo {
+            name: "claude-code".to_owned(),
+            version: "2.1.0".to_owned(),
+        })
+    }
+
+    /// The connection `lectern` holds now.
+    fn held(lectern: &Lectern) -> Arc<Connection> {
+        lock(&lectern.connection).clone().expect("a connection")
+    }
+
+    /// Lectern closes a connection that has been idle; the next call connects again, saying hello
+    /// again, and is answered: the agent sees no error.
+    #[test]
+    fn a_call_after_lectern_closed_an_idle_connection_connects_again() {
+        let name = format!(r"\\.\pipe\lectern-test-idle-{}", std::process::id());
+        let handler: agent::Handler = Arc::new(|_, agent| Ok(json!(agent.name)));
+        let _server = agent::serve_idle(&name, handler, Duration::from_millis(200)).unwrap();
+        let lectern = running_lectern(name);
+        assert_eq!(
+            lectern.call(AgentRequest::Status, claude_code()),
+            Ok(json!("Claude"))
+        );
+        let first = held(&lectern);
+        wait_for("Lectern to close the idle connection", || !first.alive());
+        assert_eq!(
+            lectern.call(AgentRequest::Status, claude_code()),
+            Ok(json!("Claude"))
+        );
+        assert!(!Arc::ptr_eq(&first, &held(&lectern)));
+    }
+
+    /// A connection unused for longer than `mcp` reuses one is let go and a new one made, well
+    /// before Lectern would close it, so no call goes out on one Lectern is closing.
+    #[test]
+    fn a_connection_unused_too_long_is_not_used_again() {
+        let name = format!(r"\\.\pipe\lectern-test-reuse-{}", std::process::id());
+        let handler: agent::Handler = Arc::new(|_, agent| Ok(json!(agent.name)));
+        let _server = agent::serve(&name, handler).unwrap();
+        let mut lectern = running_lectern(name);
+        lectern.reuse_within = Duration::from_millis(100);
+        assert!(lectern.call(AgentRequest::Status, claude_code()).is_ok());
+        let first = held(&lectern);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            lectern.call(AgentRequest::Status, claude_code()),
+            Ok(json!("Claude"))
+        );
+        assert!(!Arc::ptr_eq(&first, &held(&lectern)));
+        wait_for("the old connection to close", || !first.alive());
+    }
+
+    /// No pipe, but Lectern running (its boot mutex is held): `mcp` never starts a second one,
+    /// which would only bring the running one forward. Each call says agent control is off.
+    #[test]
+    fn mcp_never_starts_lectern_while_one_runs_without_agent_control() {
+        let name = format!(r"\\.\pipe\lectern-test-off-{}", std::process::id());
+        let launched = Arc::new(AtomicU64::new(0));
+        let lectern = {
+            let launched = Arc::clone(&launched);
+            Lectern::new(
+                name,
+                pipe::user_sid().unwrap(),
+                None,
+                Box::new(move || {
+                    launched.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+                Box::new(|| true),
+            )
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                lectern.call(AgentRequest::Status, None),
+                Err(AGENT_CONTROL_OFF.to_owned())
+            );
+        }
+        assert_eq!(launched.load(Ordering::SeqCst), 0);
     }
 
     /// An `mcp` given a distribution that can't be one answers the protocol as ever, and refuses

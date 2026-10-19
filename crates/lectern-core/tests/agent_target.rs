@@ -7,11 +7,12 @@ use lectern_core::agent::read::{
     read_page, ReadBlock, ReadText, PAGE_TEXT_CUT, READ_BYTES, READ_DEFAULT,
 };
 use lectern_core::agent::request::{HighlightArgs, Target};
+use lectern_core::agent::review::comment_anchor;
 use lectern_core::agent::status::{AgentCall, AgentReply};
 use lectern_core::agent::target::{
-    check_target, resolve_target, HighlightAnswer, ShowAt, TextPlace,
+    check_target, pdf_suffix_page, resolve_target, show_anchor, HighlightAnswer, ShowAt, TextPlace,
 };
-use lectern_core::agent::tools::READ_MAX;
+use lectern_core::agent::tools::{parse_call, CallError, READ_MAX};
 use lectern_core::agent::AgentRequest;
 use lectern_core::ipc::PathForms;
 use lectern_core::library::DocKind;
@@ -40,6 +41,11 @@ fn quote(text: &str, prefix: Option<&str>, suffix: Option<&str>) -> Target {
 /// Where `target` is in the note `source`, named plan.md.
 fn place(source: &str, target: &Target) -> Result<TextPlace, String> {
     resolve_target(&TextMap::build(source), source, "plan.md", target)
+}
+
+/// `at`, for a test whose own `at` is a closure.
+fn at_(source: &str, found: &str, nth: usize, lines: (u32, u32)) -> TextPlace {
+    at(source, found, nth, lines)
 }
 
 /// The place of the text `found` in the note's text, at its `nth` occurrence (from 0), counted as
@@ -127,25 +133,244 @@ fn a_heading_that_is_not_there_is_an_error() {
 // Lines.
 
 #[test]
-fn a_line_is_its_block_in_the_text() {
+fn a_line_that_is_its_own_block_is_that_block() {
     assert_eq!(
         place(PLAN, &Target::Line { line: 7 }),
-        Ok(TextPlace {
-            start_line: 7,
-            end_line: 7,
-            ..at(PLAN, "Roll back the migration first.", 0, (7, 7))
-        })
+        Ok(at(PLAN, "Roll back the migration first.", 0, (7, 7)))
     );
-    // A paragraph over two lines, from its second.
+    // A heading is its block, whatever its line.
+    assert_eq!(
+        place(PLAN, &Target::Line { line: 5 }),
+        Ok(at(PLAN, "Rollout", 0, (5, 5)))
+    );
+    let setext = "Rollout\n=======\n\nText.\n";
+    assert_eq!(
+        place(setext, &Target::Line { line: 2 }),
+        Ok(at(setext, "Rollout", 0, (2, 2)))
+    );
+}
+
+/// A line inside a longer paragraph is that line, as shown: its own text, Markdown marks aside,
+/// not the paragraph's.
+#[test]
+fn a_line_inside_a_paragraph_is_that_line_alone() {
     let source = "First line\nsecond line.\n";
     assert_eq!(
         place(source, &Target::Line { line: 2 }),
-        Ok(TextPlace {
-            start_line: 2,
-            end_line: 2,
-            ..at(source, "First line second line.", 0, (2, 2))
-        })
+        Ok(at(source, "second line.", 0, (2, 2)))
     );
+    assert_eq!(
+        place(source, &Target::Line { line: 1 }),
+        Ok(at(source, "First line", 0, (1, 1)))
+    );
+    let marked = "# Plan\n\nThe plan **must**\nship with [the guide](guide.md)\nand `cargo   test`\n- a list item\n  that wraps.\n";
+    assert_eq!(
+        place(marked, &Target::Line { line: 4 }),
+        Ok(at(marked, "ship with the guide", 0, (4, 4)))
+    );
+    assert_eq!(
+        place(marked, &Target::Line { line: 5 }),
+        Ok(at(marked, "and cargo test", 0, (5, 5)))
+    );
+    assert_eq!(
+        place(marked, &Target::Line { line: 7 }),
+        Ok(at(marked, "that wraps.", 0, (7, 7)))
+    );
+}
+
+/// A line is found by the line breaks a paragraph holds, a link's title and raw HTML over a break
+/// included, after which comrak's own positions of the text are off.
+#[test]
+fn a_line_after_a_title_or_raw_html_over_a_break_is_that_line() {
+    let titled = "See [the guide](guide.md \"one\ntwo\") first.\nThen this.\n";
+    assert_eq!(
+        place(titled, &Target::Line { line: 3 }),
+        Ok(at(titled, "Then this.", 0, (3, 3)))
+    );
+    let html = "Text <span\nclass=\"x\">inside</span> after\nlast line\n";
+    assert_eq!(
+        place(html, &Target::Line { line: 2 }),
+        Ok(at(html, "inside after", 0, (2, 2)))
+    );
+    assert_eq!(
+        place(html, &Target::Line { line: 3 }),
+        Ok(at(html, "last line", 0, (3, 3)))
+    );
+}
+
+/// A word that runs over a line break (raw HTML between its halves, no space shown): the lines
+/// can't be told apart, so the paragraph's lines stand, whole, never a wrong line or none.
+#[test]
+fn a_word_across_a_line_break_makes_its_paragraph_whole() {
+    let source = "one<span\nclass=\"x\">two</span>\n";
+    assert_eq!(
+        place(source, &Target::Line { line: 2 }),
+        Ok(at(source, "onetwo", 0, (2, 2)))
+    );
+    assert_eq!(
+        place(source, &quote("two", None, None)).map(|p| (p.start_line, p.end_line)),
+        Ok((1, 2))
+    );
+    let text = TextMap::build(source);
+    let at_line = comment_anchor(&text, source, "plan.md", &Target::Line { line: 2 }).unwrap();
+    assert_eq!(
+        (at_line.start_line, at_line.end_line, at_line.quote.as_str()),
+        (1, 2, "onetwo")
+    );
+    // A paragraph whose words keep to their lines is still taken line by line.
+    let plain = "one <span\nclass=\"x\">two</span>\n";
+    assert_eq!(
+        place(plain, &Target::Line { line: 2 }),
+        Ok(at(plain, "two", 0, (2, 2)))
+    );
+}
+
+/// A line map whose count comes out right can still be wrong: a reference link's title holds a
+/// line break that is in its definition, not in the paragraph, and the parse drops a comment that
+/// runs over a line break, whose break then goes uncounted. The map is checked against the source,
+/// word by word, and a paragraph whose words aren't on the lines it says is taken whole: never a
+/// line with no text while it shows some, and never a quote on the wrong line.
+#[test]
+fn a_line_map_whose_words_are_not_on_their_lines_is_not_trusted() {
+    let source =
+        "alpha [beta][ref]\ngamma <!--\n-->delta\nepsilon\n\n[ref]: /x \"two-line\ntitle\"\n";
+    let whole = "alpha beta gamma delta epsilon";
+    for line in 1..=4 {
+        assert_eq!(
+            place(source, &Target::Line { line }),
+            Ok(at(source, whole, 0, (line, line))),
+            "line {line}"
+        );
+    }
+    assert_eq!(
+        place(source, &quote("gamma", None, None)).map(|p| (p.start_line, p.end_line)),
+        Ok((1, 4))
+    );
+    let text = TextMap::build(source);
+    let at_line = comment_anchor(&text, source, "plan.md", &Target::Line { line: 2 }).unwrap();
+    assert_eq!(
+        (at_line.start_line, at_line.end_line, at_line.quote.as_str()),
+        (1, 4, whole)
+    );
+}
+
+/// A line shows other characters than it holds where it has an entity or a backslash escape. The
+/// check reads an escape, and `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, as what they show, so
+/// such a line is still its own; a code span's backslashes are as written. Any other entity makes
+/// the paragraph whole: never a wrong line.
+#[test]
+fn a_line_with_an_entity_or_an_escape_is_its_own_or_its_paragraph_whole() {
+    let source =
+        "First line\nsecond &lt;line&gt; with snake\\_case &amp; \\\\ more\nthird `\\.\\d+` line\n";
+    assert_eq!(
+        place(source, &Target::Line { line: 2 }),
+        Ok(at(
+            source,
+            "second <line> with snake_case & \\ more",
+            0,
+            (2, 2)
+        ))
+    );
+    assert_eq!(
+        place(source, &Target::Line { line: 3 }),
+        Ok(at(source, "third \\.\\d+ line", 0, (3, 3)))
+    );
+    let other = "one\n&copy; two\nthree\n";
+    let whole = "one © two three";
+    for line in 1..=3 {
+        assert_eq!(
+            place(other, &Target::Line { line }),
+            Ok(at(other, whole, 0, (line, line))),
+            "line {line}"
+        );
+    }
+    assert_eq!(
+        place(other, &quote("three", None, None)).map(|p| (p.start_line, p.end_line)),
+        Ok((1, 3))
+    );
+}
+
+/// An attribute and a visible word that share a long prefix (160 KB of it, twice) don't make the
+/// source check retry at every character: a line with an entity or an escape is read once, and
+/// the build stays linear. The lines are their own, or the block's: never wrong.
+#[test]
+fn a_long_shared_prefix_in_an_attribute_keeps_the_source_check_linear() {
+    let a = "a".repeat(160 * 1024);
+    let source = format!("first line\nprefix <span title=\"{a}\">{a}&amp;Z</span>\nlast line\n");
+    let started = std::time::Instant::now();
+    let text = TextMap::build(&source);
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    let line = |n| resolve_target(&text, &source, "plan.md", &Target::Line { line: n });
+    assert_eq!(line(1), Ok(at(&source, "first line", 0, (1, 1))));
+    assert_eq!(
+        line(2),
+        Ok(at(&source, &format!("prefix {a}&Z"), 0, (2, 2)))
+    );
+    assert_eq!(line(3), Ok(at(&source, "last line", 0, (3, 3))));
+}
+
+/// Markup glued to a word (`` `Vec`s ``, `**bold**text`, `*really*.`) makes a word of the text that
+/// is nowhere in the source as one: each run of text between marks is checked on its own, so the
+/// lines stay their own.
+#[test]
+fn a_word_glued_to_its_markup_keeps_its_line() {
+    let source = "The `Vec`s are **bold**text,\n*really*. See [the guide](guide.md).\n";
+    assert_eq!(
+        place(source, &Target::Line { line: 1 }),
+        Ok(at(source, "The Vecs are boldtext,", 0, (1, 1)))
+    );
+    assert_eq!(
+        place(source, &Target::Line { line: 2 }),
+        Ok(at(source, "really. See the guide.", 0, (2, 2)))
+    );
+}
+
+/// A text file of one long paragraph (no blank line in 300): a line far down it is that line.
+#[test]
+fn a_line_of_a_long_text_file_paragraph_is_that_line_alone() {
+    let source: String = (1..=300)
+        .map(|n| format!("Survey entry {n:03}: the lanternfish count.\n"))
+        .collect();
+    let text = TextMap::from_plain(&source);
+    let found = resolve_target(&text, &source, "survey.txt", &Target::Line { line: 250 }).unwrap();
+    let wanted = "Survey entry 250: the lanternfish count.";
+    let start = text.text().find(wanted).unwrap();
+    assert_eq!(
+        found,
+        TextPlace {
+            start_line: 250,
+            end_line: 250,
+            text_start: Some(u32::try_from(start).unwrap()),
+            text_end: Some(u32::try_from(start + wanted.len()).unwrap()),
+        }
+    );
+}
+
+/// A line of a fenced code block is that line of code; its fences have no text.
+#[test]
+fn a_line_of_a_code_block_is_that_line_alone() {
+    // The fence on line 3, code on lines 4 to 63, the closing fence on line 64.
+    let code: String = (4..=63)
+        .map(|n| format!("    step_{n}(  batch );\n"))
+        .collect();
+    let source = format!("# Plan\n\n```rust\n{code}```\n\nAfter.\n");
+    assert_eq!(
+        place(&source, &Target::Line { line: 50 }),
+        Ok(at(&source, "step_50( batch );", 0, (50, 50)))
+    );
+    for fence in [3, 64] {
+        assert_eq!(
+            place(&source, &Target::Line { line: fence }),
+            Ok(TextPlace {
+                start_line: fence,
+                end_line: fence,
+                text_start: None,
+                text_end: None,
+            }),
+            "line {fence}"
+        );
+    }
 }
 
 #[test]
@@ -245,13 +470,66 @@ fn offsets_are_counted_as_the_ui_counts_them() {
     assert_eq!(found.text_end, Some(before + 9));
 }
 
+// Anchors.
+
+/// A `#anchor` after a path names a heading as the reader's own links do: the heading whose id is
+/// the anchor as written, else its slug. The show goes to that heading, by its path.
+#[test]
+fn an_anchor_names_a_heading_by_its_id_or_its_slug() {
+    let source = "# Plan\n\n## Rollout plan\n\nText.\n\n## Notes\n\n## Notes\n";
+    let text = TextMap::build(source);
+    let at = |anchor: &str| show_anchor(&text, source, "plan.md", anchor);
+    let rollout = ShowAt {
+        target: heading("Plan › Rollout plan"),
+        place: Some(at_(source, "Rollout plan", 0, (3, 3))),
+    };
+    assert_eq!(at("rollout-plan"), Ok(rollout.clone()));
+    // Not an id, the anchor is slugged as the reader's links slug it.
+    assert_eq!(at("Rollout Plan"), Ok(rollout));
+    // Two headings alike: the second's id has a number after it.
+    assert_eq!(
+        at("notes").map(|a| a.place),
+        Ok(Some(at_(source, "Notes", 0, (7, 7))))
+    );
+    assert_eq!(
+        at("notes-1").map(|a| a.place),
+        Ok(Some(at_(source, "Notes", 1, (9, 9))))
+    );
+    assert_eq!(
+        at("risks"),
+        Err("There's no heading #risks in plan.md.".to_owned())
+    );
+    // A text file has no headings.
+    let notes = "Rollout plan\n\nText.\n";
+    assert_eq!(
+        show_anchor(
+            &TextMap::from_plain(notes),
+            notes,
+            "notes.txt",
+            "rollout-plan"
+        ),
+        Err("There's no heading #rollout-plan in notes.txt.".to_owned())
+    );
+}
+
 #[test]
 fn a_text_file_has_its_paragraphs_and_no_headings() {
     let source = "Notes\n\nRoll back first.\nThen call.\n";
     let text = TextMap::from_plain(source);
+    // On the line it sits on, of its paragraph's two; across both, on both.
     assert_eq!(
         resolve_target(&text, source, "notes.txt", &quote("Then call", None, None))
             .map(|p| (p.start_line, p.end_line)),
+        Ok((4, 4))
+    );
+    assert_eq!(
+        resolve_target(
+            &text,
+            source,
+            "notes.txt",
+            &quote("first. Then", None, None)
+        )
+        .map(|p| (p.start_line, p.end_line)),
         Ok((3, 4))
     );
     assert_eq!(
@@ -290,6 +568,44 @@ fn each_kind_of_file_takes_its_own_targets() {
         assert_eq!(
             check_target(DocKind::Pdf, &target, "brief.pdf"),
             Err("brief.pdf is a PDF: give a page target.".to_owned())
+        );
+    }
+}
+
+/// What follows a PDF's path is its page when it is the standard `#page=N` (in any letter case),
+/// checked as a page target is, with its messages; anything else is an error saying what a PDF
+/// takes.
+#[test]
+fn a_pdfs_page_fragment_is_a_page_target() {
+    for (fragment, page) in [("page=3", 3), ("PAGE=2", 2), ("Page=12", 12)] {
+        assert_eq!(
+            pdf_suffix_page(Some(fragment), "brief.pdf"),
+            Ok(Target::Page { page }),
+            "{fragment}"
+        );
+    }
+    // A page target's own message, as `tools/call` gives it.
+    let Err(CallError::Invalid(bad_page)) = parse_call(
+        "show",
+        json!({"path": r"S:\Notes\brief.pdf", "target": {"page": 0}})
+            .as_object()
+            .unwrap(),
+    ) else {
+        panic!("a page 0 checks out");
+    };
+    for fragment in ["page=0", "page=x", "page=", "page=-1"] {
+        assert_eq!(
+            pdf_suffix_page(Some(fragment), "brief.pdf"),
+            Err(bad_page.clone()),
+            "{fragment}"
+        );
+    }
+    let takes = "brief.pdf is a PDF: give #page=N after its path, or a page target.";
+    for fragment in [Some("intro"), Some("pages=3"), None] {
+        assert_eq!(
+            pdf_suffix_page(fragment, "brief.pdf"),
+            Err(takes.to_owned()),
+            "{fragment:?}"
         );
     }
 }

@@ -1,6 +1,6 @@
 //! The named pipe agents reach Lectern through (`agent.rs` serves it, `mcp.rs` connects to it):
-//! one per user and app identifier (`lectern_core::agent::pipe_name`), which only that user can
-//! open, from this machine only.
+//! one per user, session and app identifier (`agent_pipe`), which only that user can open, from
+//! this machine only.
 //!
 //! - **The server** creates its first instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so another
 //!   process that holds the name already (a second server, or a squatter) is found out, and every
@@ -16,18 +16,19 @@ use std::io::{self, ErrorKind, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
+use lectern_core::agent::pipe_name;
 use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, LocalFree, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING,
-    ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    HLOCAL, WAIT_OBJECT_0, WIN32_ERROR,
+    ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, HLOCAL, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER,
+    GetTokenInformation, TokenSessionId, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -60,6 +61,37 @@ const RETRY_MOST: Duration = Duration::from_secs(5);
 pub fn user_sid() -> io::Result<String> {
     // SAFETY: the pseudo-handle of the current process is always valid.
     process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The Windows session this process runs in: the same user logged on twice has two.
+pub fn session_id() -> io::Result<u32> {
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo-handle of the current process is always valid; `token` is a live local.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.map_err(os_error)?;
+    let token = Owned(token);
+    let mut session = 0u32;
+    let mut len = 0u32;
+    // SAFETY: `session` is a live u32, the size TokenSessionId writes.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenSessionId,
+            Some((&raw mut session).cast()),
+            size_of::<u32>() as u32,
+            &mut len,
+        )
+    }
+    .map_err(os_error)?;
+    Ok(session)
+}
+
+/// Lectern's agent pipe for the app `identifier`, as its server and `lectern.exe mcp` both name it
+/// (`pipe_name`): the current user's, in this session; with the user's SID, which the client checks
+/// the server against.
+pub fn agent_pipe(identifier: &str) -> io::Result<(String, String)> {
+    let sid = user_sid()?;
+    let session = session_id()?;
+    Ok((pipe_name(identifier, &sid, session), sid))
 }
 
 /// The SID, as text, of the user the process `process` (a handle open for querying) runs as.
@@ -133,11 +165,26 @@ impl Pipe {
     /// Reads what has arrived, at most `buf.len()` bytes, waiting for some; 0 once the other end
     /// has closed.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_waiting(buf, None)
+    }
+
+    /// Reads as `read` does, but waits at most `wait` for something to arrive: `TimedOut` when
+    /// nothing has, the connection still open.
+    pub fn read_within(&self, buf: &mut [u8], wait: Duration) -> io::Result<usize> {
+        self.read_waiting(buf, Some(wait))
+    }
+
+    /// `read`, waiting at most `within` when given.
+    fn read_waiting(&self, buf: &mut [u8], within: Option<Duration>) -> io::Result<usize> {
         let len = buf.len().min(u32::MAX as usize);
-        match self.overlapped(|ov| {
-            // SAFETY: `buf` and `ov` outlive the operation, which `overlapped` waits for.
-            unsafe { ReadFile(self.0 .0, Some(&mut buf[..len]), None, Some(ov)) }
-        }) {
+        let read = self.overlapped(
+            |ov| {
+                // SAFETY: `buf` and `ov` outlive the operation, which `overlapped` waits for.
+                unsafe { ReadFile(self.0 .0, Some(&mut buf[..len]), None, Some(ov)) }
+            },
+            within,
+        );
+        match read {
             Ok(n) => Ok(n as usize),
             Err(e) if is(&e, ERROR_BROKEN_PIPE) || is(&e, ERROR_NO_DATA) => Ok(0),
             Err(e) => Err(e),
@@ -149,10 +196,13 @@ impl Pipe {
         while !bytes.is_empty() {
             let len = bytes.len().min(u32::MAX as usize);
             let chunk = &bytes[..len];
-            let written = self.overlapped(|ov| {
-                // SAFETY: `chunk` and `ov` outlive the operation, which `overlapped` waits for.
-                unsafe { WriteFile(self.0 .0, Some(chunk), None, Some(ov)) }
-            })?;
+            let written = self.overlapped(
+                |ov| {
+                    // SAFETY: `chunk` and `ov` outlive the operation, which `overlapped` waits for.
+                    unsafe { WriteFile(self.0 .0, Some(chunk), None, Some(ov)) }
+                },
+                None,
+            )?;
             if written == 0 {
                 return Err(ErrorKind::WriteZero.into());
             }
@@ -168,10 +218,13 @@ impl Pipe {
     }
 
     /// Starts an overlapped operation with `start` and waits for it to finish, whether it
-    /// finished at once or is pending: how many bytes it moved.
+    /// finished at once or is pending: how many bytes it moved. Given `within`, it waits that long
+    /// at most: an operation not done by then is cancelled, `TimedOut`, unless it finished as it
+    /// was cancelled.
     fn overlapped(
         &self,
         start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
+        within: Option<Duration>,
     ) -> io::Result<u32> {
         let done = event()?;
         let mut ov = OVERLAPPED {
@@ -183,10 +236,32 @@ impl Pipe {
             Err(e) if e.code() == ERROR_IO_PENDING.to_hresult() => {}
             Err(e) => return Err(os_error(e)),
         }
+        let mut late = None;
+        if let Some(within) = within {
+            let millis = u32::try_from(within.as_millis())
+                .unwrap_or(u32::MAX)
+                .min(INFINITE - 1);
+            // SAFETY: the operation's own event, which this owns.
+            let woke = unsafe { WaitForSingleObject(done.0, millis) };
+            if woke != WAIT_OBJECT_0 {
+                late = Some(if woke == WAIT_FAILED {
+                    io::Error::last_os_error()
+                } else {
+                    io::Error::new(ErrorKind::TimedOut, "nothing arrived in time")
+                });
+                // SAFETY: cancels this operation alone, which is settled below before `ov` goes.
+                let _ = unsafe { CancelIoEx(self.0 .0, Some(&raw const ov)) };
+            }
+        }
         let mut moved = 0u32;
         // SAFETY: `ov` is the operation's own, alive until it is done, which this waits for.
-        unsafe { GetOverlappedResult(self.0 .0, &ov, &mut moved, true) }.map_err(os_error)?;
-        Ok(moved)
+        match unsafe { GetOverlappedResult(self.0 .0, &ov, &mut moved, true) } {
+            Ok(()) => Ok(moved),
+            Err(e) => match late {
+                Some(late) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Err(late),
+                _ => Err(os_error(e)),
+            },
+        }
     }
 }
 
@@ -275,12 +350,14 @@ pub struct Listener {
 }
 
 /// Failures a test makes a [`Listener`] meet: the next `instances` instances it makes, and the
-/// next `connects` waits for a client, fail.
+/// next `connects` waits for a client, fail; so do the next `waits` waits on a pending connect, as
+/// `WaitForMultipleObjects` fails (`WAIT_FAILED`).
 #[cfg(test)]
 #[derive(Default)]
 pub struct Faults {
     pub instances: std::sync::atomic::AtomicU32,
     pub connects: std::sync::atomic::AtomicU32,
+    pub waits: std::sync::atomic::AtomicU32,
 }
 
 #[cfg(test)]
@@ -404,6 +481,10 @@ impl Listener {
     fn pause(&self, pause: &mut Duration) -> Option<()> {
         // SAFETY: an event this owns.
         let stopped = unsafe { WaitForSingleObject(self.stop.0, pause.as_millis() as u32) };
+        if stopped == WAIT_FAILED {
+            // The stop can't be waited for: the pause is still taken.
+            std::thread::sleep(*pause);
+        }
         *pause = (*pause * 2).min(RETRY_MOST);
         (stopped != WAIT_OBJECT_0).then_some(())
     }
@@ -429,16 +510,34 @@ impl Listener {
         }
     }
 
-    /// Waits for the pending connect `ov` on `pipe`, or the stop: `Interrupted` when stopped.
+    /// Waits for the pending connect `ov` on `pipe`, or the stop: `Interrupted` when stopped, and
+    /// the wait's own error when it fails (`WAIT_FAILED`), the connect cancelled either way.
     fn wait(&self, pipe: &Pipe, ov: &OVERLAPPED) -> io::Result<()> {
-        // SAFETY: both handles are events this owns.
-        let woke = unsafe { WaitForMultipleObjects(&[ov.hEvent, self.stop.0], false, INFINITE) };
+        #[cfg(test)]
+        let failing = Faults::now(&self.faults.waits);
+        #[cfg(not(test))]
+        let failing = false;
+        let woke = if failing {
+            WAIT_FAILED
+        } else {
+            // SAFETY: both handles are events this owns.
+            unsafe { WaitForMultipleObjects(&[ov.hEvent, self.stop.0], false, INFINITE) }
+        };
         let mut moved = 0u32;
         if woke != WAIT_OBJECT_0 {
+            // Stopped, or the wait itself failed, which is tried again as any failure is: only
+            // the stop ends `accept`.
+            let failed = if woke == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                ErrorKind::Interrupted.into()
+            } else if failing {
+                io::Error::other("a wait for a client that fails, for a test")
+            } else {
+                io::Error::last_os_error()
+            };
             pipe.cancel();
             // SAFETY: settles the cancelled connect, so `ov` may go.
             let _ = unsafe { GetOverlappedResult(pipe.0 .0, ov, &mut moved, true) };
-            return Err(ErrorKind::Interrupted.into());
+            return Err(failed);
         }
         // SAFETY: the connect is done; this reads its outcome.
         unsafe { GetOverlappedResult(pipe.0 .0, ov, &mut moved, true) }.map_err(os_error)
@@ -550,6 +649,16 @@ mod tests {
     fn the_sid_is_a_user_sid() {
         let sid = user_sid().unwrap();
         assert!(sid.starts_with("S-1-5-"), "{sid}");
+    }
+
+    /// Lectern and `mcp` name the agent pipe alike: this user's, in this session.
+    #[test]
+    fn the_agent_pipe_is_this_users_in_this_session() {
+        let (name, sid) = agent_pipe("io.github.example.lectern").unwrap();
+        assert_eq!(sid, user_sid().unwrap());
+        let session = session_id().unwrap();
+        assert_eq!(name, pipe_name("io.github.example.lectern", &sid, session));
+        assert!(name.ends_with(&format!("-s{session}")), "{name}");
     }
 
     #[test]
@@ -683,6 +792,68 @@ mod tests {
             stopper.stop();
         }
         assert_eq!(server.join().unwrap(), Some(b'x'));
+    }
+
+    /// A read given a time ends when nothing arrives in it, the connection still open, and what
+    /// arrives later is read.
+    #[test]
+    fn a_read_within_a_time_ends_when_nothing_arrives() {
+        let name = test_name("within");
+        let mut listener = listen(&name).unwrap();
+        let server = thread::spawn(move || listener.accept().expect("a client"));
+        let client = connect(&name).unwrap();
+        let pipe = server.join().unwrap();
+        let (done, read) = std::sync::mpsc::channel();
+        let reading = thread::spawn(move || {
+            let mut buf = [0u8; 4];
+            let started = Instant::now();
+            let timed_out = pipe.read_within(&mut buf, Duration::from_millis(200));
+            let waited = started.elapsed();
+            let _ = done.send((timed_out.map_err(|e| e.kind()), waited));
+            (pipe, buf)
+        });
+        let (timed_out, waited) = read
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read ends in its time");
+        assert_eq!(timed_out, Err(ErrorKind::TimedOut));
+        assert!(waited >= Duration::from_millis(150), "{waited:?}");
+        let (pipe, mut buf) = reading.join().unwrap();
+        client.write_all(b"ok").unwrap();
+        assert_eq!(
+            pipe.read_within(&mut buf, Duration::from_secs(5)).unwrap(),
+            2
+        );
+        assert_eq!(&buf[..2], b"ok");
+    }
+
+    /// A wait for a client that fails (`WAIT_FAILED`) is an error like any other, logged and
+    /// tried again: only the stop ends `accept`.
+    #[test]
+    fn a_failed_wait_for_a_client_is_tried_again_not_taken_for_the_stop() {
+        let name = test_name("wait-fault");
+        let mut listener = listen(&name).unwrap();
+        let stopper = listener.stopper();
+        let faults = listener.faults();
+        faults.waits.store(1, SeqCst);
+        let server = thread::spawn(move || listener.accept().as_ref().and_then(first_byte));
+        wait_until("the failure", || {
+            faults.waits.load(SeqCst) == 0 || server.is_finished()
+        });
+        // Kept open until the server has read from them.
+        let mut clients = Vec::new();
+        let served = (0..20).any(|_| {
+            thread::sleep(Duration::from_millis(50));
+            let Ok(client) = connect(&name) else {
+                return false;
+            };
+            let wrote = client.write_all(b"w").is_ok();
+            clients.push(client);
+            wrote
+        });
+        if !served {
+            stopper.stop();
+        }
+        assert_eq!(server.join().unwrap(), Some(b'w'));
     }
 
     /// A client that finds every instance busy waits a moment, then gives up.

@@ -3,7 +3,10 @@
 //! it has validated, and sends them over the pipe; a window's UI gets the ones it answers.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ts_rs::TS;
+
+use super::tools::{parse_call, CallError};
 
 /// A request from an agent, tagged by `tool`: the nine tools, and `hello`, which names the client
 /// and the WSL distribution it runs in (`lectern.exe mcp --distro`) once a connection opens.
@@ -28,6 +31,33 @@ pub enum AgentRequest {
     Comments(CommentsArgs),
     Reply(ReplyArgs),
     Resolve(ResolveArgs),
+}
+
+impl AgentRequest {
+    /// Whether the request keeps to its tool's schema and limits, as `tools/call` checks the
+    /// arguments `lectern.exe mcp` builds it from ([`parse_call`]): Lectern's pipe checks again
+    /// what reaches it, as any of the user's processes may write to the pipe. A `hello` is the
+    /// connection's own, whose distribution `Agent::hello` checks. The error is a sentence for the
+    /// agent.
+    pub fn check(&self) -> Result<(), String> {
+        if matches!(self, Self::Hello { .. }) {
+            return Ok(());
+        }
+        // The request as the tool's arguments: its fields, beside its tool's name.
+        let Ok(Value::Object(mut arguments)) = serde_json::to_value(self) else {
+            return Err("Lectern couldn't read the request.".to_owned());
+        };
+        let tool = match arguments.remove("tool") {
+            Some(Value::String(tool)) => tool,
+            _ => return Err("Lectern couldn't read the request.".to_owned()),
+        };
+        parse_call(&tool, &arguments)
+            .map(drop)
+            .map_err(|e| match e {
+                CallError::Invalid(message) => message,
+                CallError::UnknownTool(tool) => format!("Lectern has no tool {tool}."),
+            })
+    }
 }
 
 /// The MCP client, as its `clientInfo` names it.

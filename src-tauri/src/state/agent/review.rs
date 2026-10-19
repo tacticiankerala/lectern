@@ -121,13 +121,15 @@ impl App {
             &path,
             &id,
             (agent, budget),
-            SHOW_PAGE_TO_REPLY,
+            (SHOW_PAGE_TO_REPLY, None),
             |n| reply_op(n, text, &agent.name, kind),
             |path| AgentRequest::Reply(ReplyArgs { path, ..args }),
         )
     }
 
-    /// `resolve`: the agent's closing entry added to thread `args.id`, which resolves it.
+    /// `resolve`: the agent's closing entry added to thread `args.id`, which resolves it. A thread
+    /// resolved already is left as it is, so a retry adds no second entry: the answer is its
+    /// status.
     pub(super) fn agent_resolve(
         &self,
         args: ResolveArgs,
@@ -139,7 +141,7 @@ impl App {
             &path,
             &id,
             (agent, budget),
-            SHOW_PAGE_TO_RESOLVE,
+            (SHOW_PAGE_TO_RESOLVE, Some(CommentStatus::Resolved)),
             |n| resolve_op(n, text, &agent.name),
             |path| AgentRequest::Resolve(ResolveArgs { path, ..args }),
         )
@@ -147,19 +149,28 @@ impl App {
 
     /// Adds the agent's entry to thread `id` of the file `raw` names: in a note or a text file,
     /// `op`'s, saved by Rust; in an HTML page, by the window showing it, which is sent `relayed`
-    /// with the page's path (else the error `page_first`), once Rust has found the thread.
+    /// with the page's path (else the error `page_first`), once Rust has found the thread. A
+    /// thread whose status is `done` already (`resolved`, for `resolve`) is left as it is: nothing
+    /// is written or relayed, and the answer is its status.
     fn change_thread(
         &self,
         raw: &str,
         id: &str,
         (agent, budget): (&Agent, Budget),
-        page_first: &str,
+        (page_first, done): (&str, Option<CommentStatus>),
         op: impl FnOnce(u32) -> ReviewOp,
         relayed: impl FnOnce(String) -> AgentRequest,
     ) -> Result<ThreadAnswer, String> {
         let (file, kind) = self.review_file(agent, raw)?;
         let name = file_name(&file);
         let n = thread_number(id).ok_or("`id` must be a thread's id, like C3.")?;
+        if let Some(done) = done.filter(|&done| thread_status(&file, &name, n) == Some(done)) {
+            return Ok(ThreadAnswer {
+                id: thread_id(n),
+                status: done,
+                sidecar: self.sidecar_forms(agent, &file),
+            });
+        }
         let status = if kind == DocKind::Html {
             let window = self.window_showing(&file).ok_or(page_first)?;
             self.check_thread(&file, &name, n)?;
@@ -319,6 +330,17 @@ fn review_kind(file: &Path) -> Result<DocKind, String> {
     }
 }
 
+/// The status of thread `n` of `file`, named `name`, as its sidecar has it now; none when it isn't
+/// there, or the sidecar can't be read.
+fn thread_status(file: &Path, name: &str, n: u32) -> Option<CommentStatus> {
+    store::load(&sidecar_path(file), name)
+        .ok()?
+        .review?
+        .comments()
+        .find(|c| c.id == n)
+        .map(Comment::effective_status)
+}
+
 /// The ids of the threads in `sidecar`, the sidecar of the note named `name`; none when it can't
 /// be read.
 fn thread_ids(sidecar: &Path, name: &str) -> Vec<u32> {
@@ -436,7 +458,8 @@ mod tests {
             "{first}"
         );
         let saved = sidecar_text(&readme);
-        assert!(saved.contains("\n## C1 · open · L4–L5\n"), "{saved}");
+        // On the line its quote is on, of its paragraph's two.
+        assert!(saved.contains("\n## C1 · open · L4\n"), "{saved}");
         assert!(
             saved.contains("\n> lanternfish survey\n\n**Claude (question):** Which survey?\n"),
             "{saved}"
@@ -643,6 +666,48 @@ mod tests {
         );
         assert_eq!(sidecar_text(&plan), before);
         assert!(!sidecar_of(&notes).exists());
+    }
+
+    /// `resolve` on a thread resolved already changes nothing and answers its status, so a retry
+    /// after a timeout adds no second entry: the sidecar isn't written, no window reloads, and a
+    /// page's window isn't asked.
+    #[test]
+    fn resolving_a_resolved_thread_changes_nothing() {
+        let (f, plan) = shown_plan();
+        f.app
+            .agent_answer(comment(&plan, quote("Roll back"), "Why first?"), &claude())
+            .unwrap();
+        let resolved = f.app.agent_answer(resolve(&plan, "C1"), &claude()).unwrap();
+        assert_eq!(resolved["status"], "resolved");
+        let saved = sidecar_text(&plan);
+        let reloads = f.host.review_changes().len();
+        let again = f.app.agent_answer(resolve(&plan, "C1"), &claude()).unwrap();
+        assert_eq!(again, resolved);
+        assert_eq!(sidecar_text(&plan), saved);
+        assert_eq!(f.host.review_changes().len(), reloads);
+
+        let report = f.dir.file("vault/report.html", REPORT);
+        fs::write(
+            sidecar_of(&report),
+            "---\nlectern-review: 1\nnote: report.html\n---\n\n\
+             ## C1 · resolved · L3 · Report\n> rose steadily\n\n**You:** Weekly?\n",
+        )
+        .unwrap();
+        let _ = f.state.open_document(&path_string(&report));
+        let sent = agent_requests(&f.host).len();
+        let page = f
+            .app
+            .agent_answer(resolve(&report, "C1"), &claude())
+            .unwrap();
+        assert_eq!(
+            (page["id"].as_str(), page["status"].as_str()),
+            (Some("C1"), Some("resolved"))
+        );
+        assert_eq!(
+            agent_requests(&f.host).len(),
+            sent,
+            "the window isn't asked"
+        );
     }
 
     /// An invented page whose text its bridge reports as `report_page` has it.

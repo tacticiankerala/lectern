@@ -16,7 +16,7 @@
 //! their source lines are a best effort (see [`TextMap::from_blocks`]).
 
 use comrak::arena_tree::NodeEdge;
-use comrak::nodes::{AstNode, NodeValue, Sourcepos};
+use comrak::nodes::{AstNode, NodeCodeBlock, NodeValue, Sourcepos};
 use comrak::Arena;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -44,6 +44,16 @@ const LOOK_AHEAD: usize = 64 * 1024;
 /// would otherwise cost blocks × HTML. Past it, the blocks left take the line of the last one
 /// found. A few milliseconds of searching.
 const SEARCH_BUDGET: usize = 32 * 1024 * 1024;
+
+/// `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, and the characters they stand for: the entities
+/// a page's HTML ([`decode_entities`]) and a note's source lines ([`Decoded`]) are read with.
+const ENTITIES: [(&str, char); 5] = [
+    ("&amp;", '&'),
+    ("&lt;", '<'),
+    ("&gt;", '>'),
+    ("&quot;", '"'),
+    ("&#39;", '\''),
+];
 
 /// A block of an HTML page's text, as the page's bridge reports it: its text, whitespace
 /// collapsed, and a heading's level.
@@ -151,6 +161,35 @@ pub struct TextMap {
     /// A page's: its headings go by the order of its blocks, not by source lines (see
     /// [`TextMap::heading_path_of`]).
     by_order: bool,
+    /// Where each source line's words are, in each paragraph and code block over more lines whose
+    /// lines are known, by block, then line: what makes [`TextMap::lines_of`] and
+    /// [`TextMap::line_text`] go by lines, not blocks. Built with the text, from the one parse,
+    /// and checked against the source before it is trusted ([`TextMap::push_line_spans`]).
+    line_spans: Vec<LineSpan>,
+}
+
+/// The words of one source line of a block over more lines: from the first's start to the last's
+/// end, in bytes of the text. Lines without a word have none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineSpan {
+    /// The block's index.
+    block: usize,
+    line: u32,
+    start: usize,
+    end: usize,
+}
+
+/// Where a source line's own text is in a note's or a text file's text ([`TextMap::line_text`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineText {
+    /// The line is its block's, whole: a block on that line alone, a heading, an HTML page's
+    /// block, or a block whose lines can't be told apart. From byte to byte of the text.
+    Block(usize, usize),
+    /// One line of a paragraph or a code block that runs over more lines: its own text, from byte
+    /// to byte.
+    Own(usize, usize),
+    /// No text is on the line: a blank one, a code block's fence, or one no block holds.
+    Empty,
 }
 
 impl TextMap {
@@ -158,6 +197,7 @@ impl TextMap {
     pub fn build(source: &str) -> TextMap {
         let arena = Arena::new();
         let root = parse_for_text(&arena, source);
+        let by_line = SourceByLine::new(source);
         let mut map = TextMap {
             text: String::with_capacity(source.len()),
             ..TextMap::default()
@@ -165,19 +205,26 @@ impl TextMap {
         let mut raw = String::new();
         for node in root.descendants() {
             let data = node.data();
+            let (first, last) = block_lines(data.sourcepos);
             let level = match data.value {
                 NodeValue::Heading(ref heading) => Some(heading.level),
                 NodeValue::Paragraph | NodeValue::TableRow(_) => None,
                 NodeValue::CodeBlock(ref code) => {
                     raw.clear();
                     raw.push_str(&code.literal);
-                    map.push_block(&raw, data.sourcepos);
+                    let lines = (first < last)
+                        .then(|| code_line_map(code, first, last))
+                        .flatten();
+                    map.push_by_lines(&raw, (first, last), lines.as_ref(), &by_line);
                     continue;
                 }
                 _ => continue,
             };
             raw.clear();
-            inline_text(node, &mut raw);
+            // A paragraph over more lines is collected by its lines too.
+            let by_lines = matches!(data.value, NodeValue::Paragraph) && first < last;
+            let mut starts = by_lines.then(|| LineStarts::new(first, last));
+            inline_text(node, &mut raw, starts.as_mut());
             if let Some(level) = level {
                 map.headings.push(HeadingLine {
                     level,
@@ -185,7 +232,8 @@ impl TextMap {
                     line: line_number(data.sourcepos.start.line),
                 });
             }
-            map.push_block(&raw, data.sourcepos);
+            let lines = starts.and_then(LineStarts::known);
+            map.push_by_lines(&raw, (first, last), lines.as_ref(), &by_line);
         }
         map.order_headings();
         map
@@ -193,12 +241,34 @@ impl TextMap {
 
     /// The text of a text file: its paragraphs, as `render_plain` renders them, with no headings.
     pub fn from_plain(source: &str) -> TextMap {
+        let by_line = SourceByLine::new(source);
         let mut map = TextMap {
             text: String::with_capacity(source.len()),
             ..TextMap::default()
         };
         for p in paragraphs(source) {
-            map.push_lines(&p.text, p.start_line, p.end_line);
+            let lines = (p.start_line < p.end_line).then(|| {
+                let mut at = 0;
+                let starts = (p.start_line..)
+                    .zip(p.text.split('\n'))
+                    .map(|(line, text)| {
+                        let start = (line, at);
+                        at += text.len() + 1;
+                        start
+                    })
+                    .collect();
+                LineMap {
+                    starts,
+                    cuts: Vec::new(),
+                    verbatim: vec![(0, p.text.len())],
+                }
+            });
+            map.push_by_lines(
+                &p.text,
+                (p.start_line, p.end_line),
+                lines.as_ref(),
+                &by_line,
+            );
         }
         map
     }
@@ -274,16 +344,72 @@ impl TextMap {
         }
     }
 
-    /// Appends a block with the text `raw`, normalised, from the source at `pos`, unless that's
-    /// empty.
-    fn push_block(&mut self, raw: &str, pos: Sourcepos) {
-        let start_line = line_number(pos.start.line);
-        // An end at column 0 is the end of the line before.
-        let end_line = match pos.end.column {
-            0 => line_number(pos.end.line.saturating_sub(1)),
-            _ => line_number(pos.end.line),
+    /// Appends a block with the text `raw`, normalised, on source lines `lines`, unless that's
+    /// empty; and where each of its lines' words are, when its line map is given and holds
+    /// against `source` ([`TextMap::push_line_spans`]).
+    fn push_by_lines(
+        &mut self,
+        raw: &str,
+        lines: (u32, u32),
+        map: Option<&LineMap>,
+        source: &SourceByLine,
+    ) {
+        let blocks = self.blocks.len();
+        self.push_lines(raw, lines.0, lines.1);
+        if let Some(map) = map.filter(|_| self.blocks.len() > blocks) {
+            self.push_line_spans(raw, map, source);
+        }
+    }
+
+    /// Notes where each line's words are in the last block, whose text is `raw` normalised and
+    /// whose lines `map` gives. The map is trusted only as far as it holds against `source`: each
+    /// word must be on the source line the map puts it on, after the word before it
+    /// ([`LineCheck`]). Should a word not be, or a line start inside a word (raw HTML over a line
+    /// break, with no space shown between the word's halves), or the words not add up to the
+    /// block's text, none are noted: its lines aren't known, and it is taken whole.
+    fn push_line_spans(&mut self, raw: &str, map: &LineMap, source: &SourceByLine) {
+        let Some(b) = self.blocks.len().checked_sub(1) else {
+            return;
         };
-        self.push_lines(raw, start_line, end_line);
+        let (base, end) = (self.blocks[b].start, self.blocks[b].end);
+        let kept = self.line_spans.len();
+        let starts = &map.starts;
+        let mut check = LineCheck::new(map, source);
+        let mut mark = 0;
+        // How long the normalised text is so far: its words, a space between each two.
+        let mut out = 0;
+        for (at, word) in words(raw) {
+            while starts.get(mark + 1).is_some_and(|&(_, start)| start <= at) {
+                mark += 1;
+            }
+            let Some(&(line, _)) = starts.get(mark) else {
+                break;
+            };
+            let onto_next = starts
+                .get(mark + 1)
+                .is_some_and(|&(_, start)| start < at + word.len());
+            if onto_next || !check.holds(raw, at, word, line) {
+                // The word runs onto the next line, so neither line is its own; or it isn't on
+                // the line counted for it, so the count is off.
+                self.line_spans.truncate(kept);
+                return;
+            }
+            let begins = if out == 0 { 0 } else { out + 1 };
+            out = begins + word.len();
+            let ours = self.line_spans.len() > kept;
+            match self.line_spans.last_mut() {
+                Some(span) if ours && span.line == line => span.end = base + out,
+                _ => self.line_spans.push(LineSpan {
+                    block: b,
+                    line,
+                    start: base + begins,
+                    end: base + out,
+                }),
+            }
+        }
+        if base + out != end {
+            self.line_spans.truncate(kept);
+        }
     }
 
     /// Appends a block with the text `raw`, normalised, on source lines `start_line` to
@@ -342,19 +468,76 @@ impl TextMap {
 
     /// The source lines of the text from byte `start` to byte `end`: the lowest first line and the
     /// highest last line of every block it touches, from the block holding `start` to the one
-    /// holding `end - 1`. Footnotes come last in the text but early in the source, so the end
-    /// blocks alone don't bound the lines. `(0, 0)` if the note has no text.
+    /// holding `end - 1`, each by where in it the text is, line by line, when its lines are known
+    /// (a paragraph or code block over more lines), else whole. Footnotes come last in the text but
+    /// early in the source, so the end blocks alone don't bound the lines. `(0, 0)` if the note has
+    /// no text.
     pub fn lines_of(&self, start: usize, end: usize) -> (u32, u32) {
         if self.blocks.is_empty() {
             return (0, 0);
         }
-        let first = self.block_at(start);
-        let last = self.block_at(end.saturating_sub(1).max(start));
-        self.blocks[first..=last]
+        let last_byte = end.saturating_sub(1).max(start);
+        let (first, last) = (self.block_at(start), self.block_at(last_byte));
+        (first..=last).fold((u32::MAX, 0), |(low, high), b| {
+            let from = (b == first).then_some(start);
+            let to = (b == last).then_some(last_byte);
+            let (l, h) = self.lines_in(b, from, to);
+            (low.min(l), high.max(h))
+        })
+    }
+
+    /// The source lines of block `b`'s text from byte `from` of the text (its start when none) to
+    /// byte `to` (its end when none): the line each is on, or, between two lines, the nearest with
+    /// text within, when its lines are known; else the block's lines.
+    fn lines_in(&self, b: usize, from: Option<usize>, to: Option<usize>) -> (u32, u32) {
+        let block = &self.blocks[b];
+        let spans = self.spans_of(b);
+        let (Some(first), Some(last)) = (spans.first(), spans.last()) else {
+            return (block.start_line, block.end_line);
+        };
+        let low = from.map_or(first.line, |at| {
+            spans
+                .get(spans.partition_point(|s| s.end <= at))
+                .unwrap_or(last)
+                .line
+        });
+        let high = to.map_or(last.line, |at| {
+            spans[spans.partition_point(|s| s.start <= at).saturating_sub(1)].line
+        });
+        (low, high.max(low))
+    }
+
+    /// Where each line's words are in block `b`, in order; none for a block on one line, a
+    /// heading, a page's block, or one whose lines aren't known.
+    fn spans_of(&self, b: usize) -> &[LineSpan] {
+        let from = self.line_spans.partition_point(|s| s.block < b);
+        let to = self.line_spans.partition_point(|s| s.block <= b);
+        &self.line_spans[from..to]
+    }
+
+    /// Where the text of source line `line` is. A line of a paragraph or a code block that runs
+    /// over more lines is its own text alone, Markdown marks aside ([`LineText::Own`]). A block on
+    /// that line alone, a heading, an HTML page's block, or a block whose lines can't be told
+    /// apart (a code span runs over a line break, or its words aren't on the lines counted for
+    /// them) is the block, whole ([`LineText::Block`]). A line no block holds, or one with none of
+    /// its block's text (a code block's fence, a line of an image alone), has none
+    /// ([`LineText::Empty`]).
+    pub fn line_text(&self, line: u32) -> LineText {
+        let Some(b) = self
+            .blocks
             .iter()
-            .fold((u32::MAX, 0), |(low, high), b| {
-                (low.min(b.start_line), high.max(b.end_line))
-            })
+            .position(|b| (b.start_line..=b.end_line).contains(&line))
+        else {
+            return LineText::Empty;
+        };
+        let spans = self.spans_of(b);
+        if spans.is_empty() {
+            return LineText::Block(self.blocks[b].start, self.blocks[b].end);
+        }
+        spans
+            .iter()
+            .find(|s| s.line == line)
+            .map_or(LineText::Empty, |s| LineText::Own(s.start, s.end))
     }
 
     /// The headings a reader is under at `line`, outermost first: the last heading at or before
@@ -448,23 +631,35 @@ fn path_of(stack: &[&HeadingLine]) -> Vec<String> {
 
 /// The text of a paragraph, heading or table row: text and inline code, with a space for each
 /// line break and before each table cell. Images, raw HTML and footnote references add nothing.
-fn inline_text<'a>(node: &'a AstNode<'a>, out: &mut String) {
+/// Given `lines`, where each of its source lines starts in it, and where each inline's run of
+/// text begins and ends, are noted too.
+fn inline_text<'a>(node: &'a AstNode<'a>, out: &mut String, mut lines: Option<&mut LineStarts>) {
     let mut image_depth = 0usize;
     for edge in node.traverse() {
         match edge {
-            NodeEdge::Start(n) => match n.data().value {
-                NodeValue::Image(_) => image_depth += 1,
-                _ if image_depth > 0 => {}
-                NodeValue::Text(ref t) => out.push_str(t),
-                NodeValue::Code(ref code) => out.push_str(&code.literal),
-                NodeValue::SoftBreak | NodeValue::LineBreak | NodeValue::TableCell => {
-                    out.push(' ');
+            NodeEdge::Start(n) => {
+                let data = n.data();
+                if let Some(lines) = lines.as_deref_mut() {
+                    lines.began(&data.value, data.sourcepos, out.len());
                 }
-                _ => {}
-            },
+                match data.value {
+                    NodeValue::Image(_) => image_depth += 1,
+                    _ if image_depth > 0 => {}
+                    NodeValue::Text(ref t) => out.push_str(t),
+                    NodeValue::Code(ref code) => out.push_str(&code.literal),
+                    NodeValue::SoftBreak | NodeValue::LineBreak | NodeValue::TableCell => {
+                        out.push(' ');
+                    }
+                    _ => {}
+                }
+            }
             NodeEdge::End(n) => {
-                if matches!(n.data().value, NodeValue::Image(_)) {
+                let data = n.data();
+                if matches!(data.value, NodeValue::Image(_)) {
                     image_depth -= 1;
+                }
+                if let Some(lines) = lines.as_deref_mut() {
+                    lines.ended(&data.value, out.len());
                 }
             }
         }
@@ -473,6 +668,369 @@ fn inline_text<'a>(node: &'a AstNode<'a>, out: &mut String) {
 
 fn line_number(line: usize) -> u32 {
     u32::try_from(line).unwrap_or(u32::MAX)
+}
+
+/// The first and last source lines of a block at `pos`: an end at column 0 is the end of the line
+/// before.
+fn block_lines(pos: Sourcepos) -> (u32, u32) {
+    let start = line_number(pos.start.line);
+    let end = match pos.end.column {
+        0 => line_number(pos.end.line.saturating_sub(1)),
+        _ => line_number(pos.end.line),
+    };
+    (start, end.max(start))
+}
+
+/// Where a block's source lines are in its raw text, as worked out from its structure: what
+/// [`TextMap::push_line_spans`] checks against the source and, when it holds, notes the lines by.
+struct LineMap {
+    /// Where each source line starts, in order of line, the first at 0.
+    starts: Vec<(u32, usize)>,
+    /// Where the runs of text the block's inlines gave begin and end, in order, for a paragraph;
+    /// none for a code block or a text file's paragraph, whose text is one run. Each run is in
+    /// its source as written, markup aside; a word across a cut (`` `Vec`s ``, `**bold**text`) is
+    /// as many runs.
+    cuts: Vec<usize>,
+    /// The runs that are in the source exactly as written, in order: a paragraph's code spans;
+    /// all of a code block or a text file's paragraph. Any other run shows the source's backslash
+    /// escapes and entities as the characters they stand for.
+    verbatim: Vec<(usize, usize)>,
+}
+
+/// Where each source line of a paragraph starts in its text as [`inline_text`] collects it, from
+/// `start` to `last`, by the line breaks its inlines hold: each line break, and those in raw HTML
+/// and in a link's or an image's title, start the next line. (comrak's own positions of inlines
+/// are off after such a title.) Not known when a line's words can't be told apart, text or a code
+/// span running over a line break, or when the line breaks counted don't come to the paragraph's
+/// lines. What is counted can still be off (a reference link's title has its breaks in its
+/// definition; a comment over a break is dropped before this), so the map is checked against the
+/// source before it is trusted ([`LineCheck`]).
+struct LineStarts {
+    line: u32,
+    last: u32,
+    map: LineMap,
+    known: bool,
+}
+
+impl LineStarts {
+    fn new(start: u32, last: u32) -> Self {
+        Self {
+            line: start,
+            last,
+            map: LineMap {
+                starts: vec![(start, 0)],
+                cuts: Vec::new(),
+                verbatim: Vec::new(),
+            },
+            known: true,
+        }
+    }
+
+    /// Notes the inline `value` begun, at `pos` in the source, with the text `at` bytes long.
+    fn began(&mut self, value: &NodeValue, pos: Sourcepos, at: usize) {
+        self.cut(at);
+        match value {
+            NodeValue::SoftBreak | NodeValue::LineBreak => self.breaks(1, at),
+            NodeValue::HtmlInline(html) => self.breaks(newlines(html), at),
+            NodeValue::Code(_) => {
+                self.map.verbatim.push((at, at));
+                // A code span's line breaks are spaces in its code, and where they fell is lost.
+                if pos.start.line != pos.end.line {
+                    self.known = false;
+                }
+            }
+            NodeValue::Text(text) if text.contains('\n') => self.known = false,
+            _ => {}
+        }
+    }
+
+    /// Notes the inline `value` ended, with the text `at` bytes long: a title follows a link's or
+    /// an image's text, and a code span's text is as written up to here.
+    fn ended(&mut self, value: &NodeValue, at: usize) {
+        self.cut(at);
+        match value {
+            NodeValue::Link(link) | NodeValue::Image(link) => {
+                self.breaks(newlines(&link.title), at);
+            }
+            NodeValue::Code(_) => {
+                if let Some(code) = self.map.verbatim.last_mut() {
+                    code.1 = at;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A cut between two inlines' runs of text, at byte `at`.
+    fn cut(&mut self, at: usize) {
+        if self.map.cuts.last() != Some(&at) {
+            self.map.cuts.push(at);
+        }
+    }
+
+    /// `count` line breaks, after which the text from byte `at` on is.
+    fn breaks(&mut self, count: usize, at: usize) {
+        for _ in 0..count {
+            self.line += 1;
+            self.map.starts.push((self.line, at));
+        }
+    }
+
+    /// The map, when it is known: the line breaks counted came to the last line.
+    fn known(self) -> Option<LineMap> {
+        (self.known && self.line == self.last).then_some(self.map)
+    }
+}
+
+/// Where each line of a code block's code starts in it: a fenced block's first is the line after
+/// its fence, on line `start`, an indented block's is `start`; none should they run past `last`.
+fn code_line_map(code: &NodeCodeBlock, start: u32, last: u32) -> Option<LineMap> {
+    let first = if code.fenced { start + 1 } else { start };
+    let mut at = 0;
+    let starts: Vec<(u32, usize)> = (first..)
+        .zip(code.literal.split_inclusive('\n'))
+        .map(|(line, text)| {
+            let begins = (line, at);
+            at += text.len();
+            begins
+        })
+        .collect();
+    starts
+        .last()
+        .is_none_or(|&(line, _)| line <= last)
+        .then_some(LineMap {
+            starts,
+            cuts: Vec::new(),
+            verbatim: vec![(0, code.literal.len())],
+        })
+}
+
+/// The source by its lines, for checking a block's line map against ([`LineCheck`]).
+struct SourceByLine<'s> {
+    source: &'s str,
+    /// Where each line starts, in bytes: line `n` at index `n - 1`. Lines end at `\n`; a lone
+    /// `\r` doesn't end one here, so a file with those (an old Mac's) has its blocks taken whole.
+    starts: Vec<usize>,
+}
+
+impl<'s> SourceByLine<'s> {
+    fn new(source: &'s str) -> Self {
+        let starts = std::iter::once(0)
+            .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+            .collect();
+        Self { source, starts }
+    }
+
+    /// Line `line`, 1-based, without its line ending; empty past the end.
+    fn line(&self, line: u32) -> &'s str {
+        let n = usize::try_from(line).unwrap_or(usize::MAX);
+        let Some(&start) = n.checked_sub(1).and_then(|i| self.starts.get(i)) else {
+            return "";
+        };
+        let end = self.starts.get(n).copied().unwrap_or(self.source.len());
+        self.source[start..end].trim_end_matches(['\n', '\r'])
+    }
+}
+
+/// Checks a block's words against the source lines its map puts them on, in order: each run of a
+/// word between two cuts must be in that line's source after the run before it. A verbatim run
+/// (a code span's, a code block's, a text file's) is looked for in the line as written; any other
+/// in the line as it shows, its backslash escapes and entities read ([`Decoded`]), as the run
+/// shows them. One search per run, each from where the one before ended: linear in the line. A
+/// word that isn't there is one the map has on the wrong line, however its count came out.
+struct LineCheck<'a> {
+    source: &'a SourceByLine<'a>,
+    cuts: &'a [usize],
+    verbatim: &'a [(usize, usize)],
+    /// The first cut, and the first verbatim run, not yet passed.
+    cut: usize,
+    code: usize,
+    /// The line in hand (none is 0), its source, the source as it shows when that differs, and
+    /// how far along the source the runs so far reached.
+    line: u32,
+    text: &'a str,
+    decoded: Option<Decoded>,
+    from: usize,
+}
+
+impl<'a> LineCheck<'a> {
+    fn new(map: &'a LineMap, source: &'a SourceByLine<'a>) -> Self {
+        Self {
+            source,
+            cuts: &map.cuts,
+            verbatim: &map.verbatim,
+            cut: 0,
+            code: 0,
+            line: 0,
+            text: "",
+            decoded: None,
+            from: 0,
+        }
+    }
+
+    /// Whether the word `word`, at byte `at` of the block's raw text, is on source line `line`,
+    /// after the words checked before it there.
+    fn holds(&mut self, raw: &str, at: usize, word: &str, line: u32) -> bool {
+        if line != self.line {
+            self.line = line;
+            self.text = self.source.line(line);
+            self.decoded = self
+                .text
+                .contains(['\\', '&'])
+                .then(|| Decoded::new(self.text));
+            self.from = 0;
+        }
+        while self.cuts.get(self.cut).is_some_and(|&cut| cut <= at) {
+            self.cut += 1;
+        }
+        let end = at + word.len();
+        let mut start = at;
+        loop {
+            let stop = match self.cuts.get(self.cut) {
+                Some(&cut) if cut < end => {
+                    self.cut += 1;
+                    cut
+                }
+                _ => end,
+            };
+            let run = &raw[start..stop];
+            // A run is cut at a code span's ends, so it is in one or out of it, whole.
+            while self
+                .verbatim
+                .get(self.code)
+                .is_some_and(|&(_, code_end)| code_end <= start)
+            {
+                self.code += 1;
+            }
+            let as_written = self
+                .verbatim
+                .get(self.code)
+                .is_some_and(|&(code_start, _)| code_start <= start);
+            let found = match &self.decoded {
+                Some(decoded) if !as_written => decoded.find(self.from, run),
+                _ => self.text[self.from..]
+                    .find(run)
+                    .map(|found| self.from + found + run.len()),
+            };
+            match found {
+                Some(found) => self.from = found,
+                None => return false,
+            }
+            if stop == end {
+                return true;
+            }
+            start = stop;
+        }
+    }
+}
+
+/// A source line as it shows: its backslash escapes (a backslash before ASCII punctuation) and
+/// the entities of [`ENTITIES`] read as the characters they stand for, with where each reading
+/// was, so a place in the text is a place in the line. Any other entity (`&copy;`, a numeric one)
+/// shows as something else and stays as written here, so a run holding one goes unfound.
+struct Decoded {
+    text: String,
+    readings: Vec<Reading>,
+}
+
+/// One escape or entity read: its bytes in the line, and where its character ends in the text.
+#[derive(Clone, Copy)]
+struct Reading {
+    raw_start: usize,
+    raw_end: usize,
+    dec_end: usize,
+}
+
+impl Decoded {
+    fn new(line: &str) -> Self {
+        let mut text = String::with_capacity(line.len());
+        let mut readings = Vec::new();
+        let mut from = 0;
+        while let Some(found) = line[from..].find(['\\', '&']) {
+            let at = from + found;
+            text.push_str(&line[from..at]);
+            let tail = &line[at..];
+            let read = match tail.strip_prefix('\\') {
+                Some(escaped) => escaped
+                    .chars()
+                    .next()
+                    .filter(|p| p.is_ascii_punctuation())
+                    .map(|p| (2, p)),
+                None => ENTITIES
+                    .iter()
+                    .find(|(name, _)| tail.starts_with(name))
+                    .map(|&(name, c)| (name.len(), c)),
+            };
+            match read {
+                Some((len, c)) => {
+                    text.push(c);
+                    readings.push(Reading {
+                        raw_start: at,
+                        raw_end: at + len,
+                        dec_end: text.len(),
+                    });
+                    from = at + len;
+                }
+                None => {
+                    // The `\` or `&` is as written.
+                    text.push_str(&tail[..1]);
+                    from = at + 1;
+                }
+            }
+        }
+        text.push_str(&line[from..]);
+        Self { text, readings }
+    }
+
+    /// Where `run` ends in the line, looked for in the text from the line's byte `from` on.
+    fn find(&self, from: usize, run: &str) -> Option<usize> {
+        let from = self.to_text(from);
+        self.text[from..]
+            .find(run)
+            .map(|found| self.to_line(from + found + run.len()))
+    }
+
+    /// The text's byte for the line's byte `at`; inside a reading, its character's end.
+    fn to_text(&self, at: usize) -> usize {
+        let i = self.readings.partition_point(|r| r.raw_end <= at);
+        let (raw_end, dec_end) = self.ends_before(i);
+        match self.readings.get(i) {
+            Some(r) if r.raw_start < at => r.dec_end,
+            _ => dec_end + (at - raw_end),
+        }
+    }
+
+    /// The line's byte for the text's byte `at`, which is never inside a reading's character.
+    fn to_line(&self, at: usize) -> usize {
+        let i = self.readings.partition_point(|r| r.dec_end <= at);
+        let (raw_end, dec_end) = self.ends_before(i);
+        raw_end + (at - dec_end)
+    }
+
+    /// Where reading `i - 1` ends in the line and in the text: (0, 0) before the first. Between
+    /// two readings the line and the text run alike.
+    fn ends_before(&self, i: usize) -> (usize, usize) {
+        i.checked_sub(1).map_or((0, 0), |i| {
+            (self.readings[i].raw_end, self.readings[i].dec_end)
+        })
+    }
+}
+
+/// The words of `s`, as `split_whitespace` finds them, each with the byte it starts at.
+fn words(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut chars = s.char_indices().peekable();
+    std::iter::from_fn(move || {
+        let (start, _) = chars.find(|(_, c)| !c.is_whitespace())?;
+        let mut end = s.len();
+        while let Some(&(i, c)) = chars.peek() {
+            if c.is_whitespace() {
+                end = i;
+                break;
+            }
+            chars.next();
+        }
+        Some((start, &s[start..end]))
+    })
 }
 
 /// Where an HTML page's blocks are in its source, looked for one after another, in the blocks'
@@ -582,16 +1140,9 @@ fn body_start(source: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// `html` with `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;` read as the characters they stand
-/// for, once: `&amp;lt;` is `&lt;`.
+/// `html` with `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;` ([`ENTITIES`]) read as the
+/// characters they stand for, once: `&amp;lt;` is `&lt;`.
 fn decode_entities(html: &str) -> String {
-    const ENTITIES: [(&str, char); 5] = [
-        ("&amp;", '&'),
-        ("&lt;", '<'),
-        ("&gt;", '>'),
-        ("&quot;", '"'),
-        ("&#39;", '\''),
-    ];
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     while let Some(i) = rest.find('&') {
@@ -650,7 +1201,38 @@ fn newlines(s: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceLines, SEARCH_BUDGET};
+    use super::{SourceLines, TextMap, SEARCH_BUDGET};
+    use crate::agent::request::Target;
+    use crate::agent::target::resolve_target;
+    use crate::render::TEXT_PARSES;
+
+    /// Line targets in a large note's long paragraphs and code blocks cost no parse of their own:
+    /// the note is parsed once, for its text, whose lines are known from then on, for every
+    /// target and comment.
+    #[test]
+    fn line_targets_share_the_one_parse_of_the_note() {
+        let mut note = String::from("# Survey\n\n");
+        for section in 0..200 {
+            for n in 0..40 {
+                note.push_str(&format!("Entry {section}.{n}: the lanternfish count.\n"));
+            }
+            note.push_str("\n```text\n");
+            for n in 0..40 {
+                note.push_str(&format!("count_{section}_{n} = {n}\n"));
+            }
+            note.push_str("```\n\n");
+        }
+        let before = TEXT_PARSES.with(std::cell::Cell::get);
+        let text = TextMap::build(&note);
+        let lines: Vec<u32> = (0..20).map(|i| 4 + i * 413).collect();
+        for &line in &lines {
+            let found = resolve_target(&text, &note, "survey.md", &Target::Line { line });
+            let place = found.unwrap_or_else(|e| panic!("line {line}: {e}"));
+            assert_eq!((place.start_line, place.end_line), (line, line));
+            assert!(place.text_start.is_some(), "line {line}");
+        }
+        assert_eq!(TEXT_PARSES.with(std::cell::Cell::get) - before, 1);
+    }
 
     /// Each block a script made is nowhere in the page's HTML, and looking for it searches the rest
     /// of the HTML. All the searching for one page stays within a budget, however many such blocks

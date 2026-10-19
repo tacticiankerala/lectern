@@ -1,19 +1,23 @@
 //! The agent pipe's server, in the Lectern window process: `lectern.exe mcp` connects and sends
-//! one request per line, each answered in time (`answer_within`: `ANSWER_WITHIN`, and a `show`'s
-//! wait for the reader), on a thread of its own, by the app (`App::agent_answer`), for the agent
-//! its `hello` named: who it is, and the WSL distribution it runs in. Connections are served side
-//! by side. Past `MAX_CONNECTIONS` connections, or `MAX_IN_FLIGHT` requests on one, the answer is
-//! that Lectern is busy.
+//! one request per line, each checked against its tool's limits and answered in time
+//! (`answer_within`: `ANSWER_WITHIN`, and a `show`'s wait for the reader), on a thread of its own,
+//! by the app (`App::agent_answer`), for the agent its `hello` named: who it is, and the WSL
+//! distribution it runs in. Connections are served side by side. Past `MAX_CONNECTIONS`
+//! connections, or `MAX_IN_FLIGHT` requests on one, the answer is that Lectern is busy. A
+//! connection idle for `IDLE` is closed, freeing its place, and `mcp` connects again. The pipe is
+//! made as soon as it can be, and kept for as long as Lectern runs: agent control never dies
+//! quietly.
 
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use lectern_core::agent::lines::{Line, LineReader};
 use lectern_core::agent::{
-    answer_within, pipe_name, printable, Agent, AgentRequest, Answer, PipeReply, PipeRequest,
-    MAX_LINE,
+    answer_within, printable, Agent, AgentRequest, Answer, PipeReply, PipeRequest, MAX_LINE,
 };
 use serde_json::{json, Value};
 
@@ -36,24 +40,33 @@ const MAX_IN_FLIGHT: usize = 8;
 /// The answer to a request past either limit.
 const BUSY: &str = "Lectern is busy.";
 
-/// Starts serving agents for the app `identifier`, off the main thread. Without a pipe (another
-/// process holds its name) agent control is off for this run, which is logged.
+/// How long a connection may be idle, nothing in flight, before it is closed: its place goes to
+/// another agent, and `mcp` connects again at its next call.
+const IDLE: Duration = Duration::from_secs(10 * 60);
+
+/// The pause before a pipe that couldn't be named or made is tried again, the first time, and the
+/// longest.
+const LISTEN_RETRY_FIRST: Duration = Duration::from_secs(1);
+const LISTEN_RETRY_MOST: Duration = Duration::from_secs(60);
+
+/// Starts serving agents for the app `identifier`, off the main thread, on its pipe as soon as it
+/// can be made (`listen_until_up`).
 pub fn start(app: Arc<App>, identifier: &str) {
     let identifier = identifier.to_owned();
     let started = thread::Builder::new()
         .name("lectern-agent-pipe".to_owned())
         .spawn(move || {
-            let name = match pipe::user_sid() {
-                Ok(sid) => pipe_name(&identifier, &sid),
-                Err(e) => {
-                    log::warn!("agent control is off this run: no user SID for its pipe ({e})");
-                    return;
-                }
-            };
-            if let Some(listener) = listen_or_warn(&name) {
+            let listener = listen_until_up(
+                || pipe::agent_pipe(&identifier).map(|(name, _)| name),
+                pipe::listen,
+                LISTEN_RETRY_FIRST,
+                LISTEN_RETRY_MOST,
+            );
+            if let Some(listener) = listener {
                 accept_loop(
                     listener,
                     Arc::new(move |r, agent| app.agent_answer(r, agent)),
+                    IDLE,
                 );
             }
         });
@@ -62,16 +75,33 @@ pub fn start(app: Arc<App>, identifier: &str) {
     }
 }
 
-/// The pipe `name`'s listener, unless it can't be made: then agents can't reach this Lectern,
-/// which is logged, and nothing else changes.
-fn listen_or_warn(name: &str) -> Option<Listener> {
-    match pipe::listen(name) {
-        Ok(listener) => Some(listener),
-        Err(e) => {
-            log::warn!(
-                "agent control is off this run: another process holds the agent pipe's name ({e})"
-            );
-            None
+/// The listener of the pipe `name` names, made with `listen`. Agent control doesn't die quietly:
+/// while the name can't be worked out (the user's SID, the session) or the pipe can't be made, it
+/// is logged and tried again, after a pause doubling from `first` up to `most`, for as long as
+/// Lectern runs. Only another process holding the name (a second Lectern, or another user who made
+/// it first: access denied) ends it, with agent control off for this run, which is logged.
+fn listen_until_up(
+    name: impl Fn() -> io::Result<String>,
+    listen: impl Fn(&str) -> io::Result<Listener>,
+    first: Duration,
+    most: Duration,
+) -> Option<Listener> {
+    let mut pause = first;
+    loop {
+        match name().and_then(|name| listen(&name)) {
+            Ok(listener) => return Some(listener),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                log::warn!(
+                    "agent control is off this run: another process holds the agent pipe's name \
+                     ({e})"
+                );
+                return None;
+            }
+            Err(e) => {
+                log::warn!("the agent pipe can't be made yet ({e}); trying again in {pause:?}");
+                thread::sleep(pause);
+                pause = (pause * 2).min(most);
+            }
         }
     }
 }
@@ -96,12 +126,18 @@ impl Drop for Server {
 
 /// Serves the pipe `name`, answering with `handle`.
 #[cfg(test)]
-pub fn serve(name: &str, handle: Handler) -> std::io::Result<Server> {
+pub fn serve(name: &str, handle: Handler) -> io::Result<Server> {
+    serve_idle(name, handle, IDLE)
+}
+
+/// As `serve`, closing a connection once it is `idle` that long.
+#[cfg(test)]
+pub fn serve_idle(name: &str, handle: Handler, idle: Duration) -> io::Result<Server> {
     let listener = pipe::listen(name)?;
     let stop = listener.stopper();
     let accepting = thread::Builder::new()
         .name("lectern-agent-pipe".to_owned())
-        .spawn(move || accept_loop(listener, handle))?;
+        .spawn(move || accept_loop(listener, handle, idle))?;
     Ok(Server {
         stop,
         accepting: Some(accepting),
@@ -109,9 +145,9 @@ pub fn serve(name: &str, handle: Handler) -> std::io::Result<Server> {
 }
 
 /// Serves each client on a thread of its own, at most [`MAX_CONNECTIONS`] at once, until the
-/// listener stops. A client past that is told Lectern is busy, by a thread of its own too, as
-/// many again at most; past those, its connection is closed at once.
-fn accept_loop(mut listener: Listener, handle: Handler) {
+/// listener stops, closing one `idle` that long. A client past that is told Lectern is busy, by
+/// a thread of its own too, as many again at most; past those, its connection is closed at once.
+fn accept_loop(mut listener: Listener, handle: Handler, idle: Duration) {
     let serving = Arc::new(AtomicUsize::new(0));
     let refusing = Arc::new(AtomicUsize::new(0));
     while let Some(pipe) = listener.accept() {
@@ -121,7 +157,7 @@ fn accept_loop(mut listener: Listener, handle: Handler) {
             thread::Builder::new()
                 .name("lectern-agent".to_owned())
                 .spawn(move || {
-                    serve_connection(pipe, &handle);
+                    serve_connection(pipe, &handle, idle);
                     drop(place);
                 })
         } else if let Some(place) = Taken::place(&refusing, MAX_CONNECTIONS) {
@@ -180,15 +216,23 @@ fn refuse_connection(pipe: &Pipe) {
 }
 
 /// Reads the client's requests one line at a time, answering each on a thread of its own, until
-/// it closes or sends something that isn't a request. At most [`MAX_IN_FLIGHT`] are worked on at
-/// once; one past that is answered [`BUSY`] at once. Each is answered for the agent the last
-/// `hello` named; a `hello` naming a WSL distribution that can't be one is refused, and closes the
-/// connection.
-fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
+/// it closes or sends something that isn't a request. Each is checked against its tool's limits
+/// (`AgentRequest::check`), and one past them refused. At most [`MAX_IN_FLIGHT`] are in flight
+/// at once, each until its answer is written; one past that is answered [`BUSY`] at once. Each is
+/// answered for the agent the last `hello` named; a `hello` naming a WSL distribution that can't
+/// be one is refused, and closes the connection.
+fn serve_connection(pipe: Arc<Pipe>, handle: &Handler, idle: Duration) {
     let writing = Arc::new(Mutex::new(()));
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let used = Arc::new(Mutex::new(Instant::now()));
     let mut agent = Agent::default();
-    let mut lines = LineReader::new(&*pipe, MAX_LINE);
+    let reader = Idle {
+        pipe: &pipe,
+        idle,
+        used: &used,
+        in_flight: &in_flight,
+    };
+    let mut lines = LineReader::new(reader, MAX_LINE);
     loop {
         let line = match lines.next_line() {
             Ok(Line::Text(line)) => line,
@@ -197,11 +241,16 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
                 return;
             }
             Ok(Line::End) => return,
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                log::info!("closing an agent's connection, idle for {idle:?}");
+                return;
+            }
             Err(e) => {
                 log::warn!("an agent's connection failed: {e}");
                 return;
             }
         };
+        used_now(&used);
         let PipeRequest { id, request } = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(e) => {
@@ -237,17 +286,26 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
             );
             continue;
         }
+        // Checked again here, as any of the user's processes may write to the pipe.
+        if let Err(refusal) = request.check() {
+            reply(&pipe, &writing, id, Err(refusal));
+            continue;
+        }
         let Some(place) = Taken::place(&in_flight, MAX_IN_FLIGHT) else {
             reply(&pipe, &writing, id, Err(BUSY.to_owned()));
             continue;
         };
         let (pipe, writing, handle) = (Arc::clone(&pipe), Arc::clone(&writing), Arc::clone(handle));
-        let agent = agent.clone();
+        let (agent, used) = (agent.clone(), Arc::clone(&used));
         let answering = thread::Builder::new()
             .name("lectern-agent-call".to_owned())
             .spawn(move || {
-                let answer = answer_in_time(&handle, request, agent, place);
+                // Held until both the app is done with the request and its answer is written.
+                let place = Arc::new(place);
+                let answer = answer_in_time(&handle, request, agent, Arc::clone(&place));
                 reply(&pipe, &writing, id, answer);
+                used_now(&used);
+                drop(place);
             });
         if let Err(e) = answering {
             log::warn!("couldn't answer an agent: {e}");
@@ -255,14 +313,51 @@ fn serve_connection(pipe: Arc<Pipe>, handle: &Handler) {
     }
 }
 
+/// A connection's pipe, as `serve_connection` reads it: a read that waits until the connection
+/// has been `idle` that long since it was last `used` (a request read, or an answer written), with
+/// nothing `in_flight`, ends it as timed out.
+struct Idle<'a> {
+    pipe: &'a Pipe,
+    idle: Duration,
+    used: &'a Mutex<Instant>,
+    in_flight: &'a AtomicUsize,
+}
+
+impl Read for Idle<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let unused = self
+                .used
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .elapsed();
+            let busy = self.in_flight.load(Ordering::SeqCst) > 0;
+            if !busy && unused >= self.idle {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "idle"));
+            }
+            // Asked again once the rest of the time has passed, or, in flight, a whole one.
+            let wait = if busy { self.idle } else { self.idle - unused };
+            match self.pipe.read_within(buf, wait) {
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                read => return read,
+            }
+        }
+    }
+}
+
+/// Notes that a connection is used now (`Idle`).
+fn used_now(used: &Mutex<Instant>) {
+    *used.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+}
+
 /// `handle`'s answer to `request` from `agent`, or an error once its time (`answer_within`) has
 /// passed without one. The request keeps its `place` until `handle` is done with it, however long
-/// that takes.
+/// that takes, as well as until its answer is written, which the caller holds it for.
 fn answer_in_time(
     handle: &Handler,
     request: AgentRequest,
     agent: Agent,
-    place: Taken,
+    place: Arc<Taken>,
 ) -> Result<Value, String> {
     let (done, answered) = mpsc::channel();
     let handle = Arc::clone(handle);
@@ -271,7 +366,6 @@ fn answer_in_time(
         .name("lectern-agent-work".to_owned())
         .spawn(move || {
             let answer = handle(request, &agent);
-            // Given back before the answer, so a client that has it may ask again at once.
             drop(place);
             let _ = done.send(answer);
         });
@@ -304,7 +398,7 @@ fn line_of(id: u64, answer: Answer) -> String {
 mod tests {
     use super::*;
     use crate::pipe::connect;
-    use lectern_core::agent::request::ClientInfo;
+    use lectern_core::agent::request::{ClientInfo, HighlightArgs, ShowArgs, Target};
     use std::io::Read;
     use std::sync::Condvar;
     use std::time::Duration;
@@ -495,13 +589,172 @@ mod tests {
         }
     }
 
+    /// A request is checked against its tool's limits on the pipe too, as any of the user's
+    /// processes may write to it: one past them is refused, saying why, and never reaches the app.
+    #[test]
+    fn a_request_past_its_tools_limits_is_refused_unanswered_by_the_app() {
+        let name = test_name("limits");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let handler: Handler = {
+            let asked = Arc::clone(&asked);
+            Arc::new(move |_, _| {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            })
+        };
+        let _server = serve(&name, handler).unwrap();
+        let pipe = connect(&name).unwrap();
+        let mut lines = LineReader::new(&pipe, MAX_LINE);
+        let waits_for_ever = AgentRequest::Show(ShowArgs {
+            path: r"S:\Notes\My Vault\plan.md".to_owned(),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: u32::MAX,
+        });
+        let refused = |answer: Answer, says: &str| match answer {
+            Answer::Err(message) => assert!(message.contains(says), "{message}"),
+            other => panic!("answered: {other:?}"),
+        };
+        refused(ask(&pipe, &mut lines, 1, waits_for_ever), "wait");
+        let long_quote = AgentRequest::Highlight(HighlightArgs {
+            path: None,
+            targets: vec![Target::Quote {
+                quote: "q".repeat(2001),
+                prefix: None,
+                suffix: None,
+            }],
+            clear: false,
+        });
+        refused(ask(&pipe, &mut lines, 2, long_quote), "2,000");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            ask(&pipe, &mut lines, 3, AgentRequest::Status),
+            Answer::Ok(_)
+        ));
+    }
+
+    /// A request keeps its place among those in flight until its answer is written, not only
+    /// until the app has answered: answers larger than the pipe holds, unread, keep theirs, so one
+    /// more request is answered busy.
+    #[test]
+    fn a_place_in_flight_is_held_until_its_answer_is_written() {
+        let name = test_name("written");
+        let entered = Arc::new(AtomicUsize::new(0));
+        let handler: Handler = {
+            let entered = Arc::clone(&entered);
+            let big = "x".repeat(200 * 1024);
+            Arc::new(move |request, _| match request {
+                AgentRequest::Status => {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!(big))
+                }
+                _ => Ok(json!("quick")),
+            })
+        };
+        let _server = serve(&name, handler).unwrap();
+        let pipe = connect(&name).unwrap();
+        for id in 1..=MAX_IN_FLIGHT as u64 {
+            send(&pipe, id, AgentRequest::Status);
+        }
+        wait_until("the app answers every one", || {
+            entered.load(Ordering::SeqCst) == MAX_IN_FLIGHT
+        });
+        // Long enough for a place given back with the app's answer to be free.
+        thread::sleep(Duration::from_millis(200));
+        send(&pipe, 99, AgentRequest::Read(Default::default()));
+        let mut lines = LineReader::new(&pipe, MAX_LINE);
+        let mut answers = std::collections::HashMap::new();
+        while answers.len() <= MAX_IN_FLIGHT {
+            let Line::Text(line) = lines.next_line().unwrap() else {
+                panic!("closed");
+            };
+            let reply: PipeReply = serde_json::from_str(&line).unwrap();
+            answers.insert(reply.id, reply.answer);
+        }
+        assert_eq!(answers[&99], Answer::Err(BUSY.to_owned()));
+    }
+
     /// Another process holding the name (a second Lectern, or another user who made it first)
-    /// leaves agent control off for this run, and nothing worse.
+    /// leaves agent control off for this run, at once, and nothing worse.
     #[test]
     fn a_taken_name_leaves_agent_control_off() {
         let name = test_name("taken");
         let _first = pipe::listen(&name).unwrap();
-        assert!(listen_or_warn(&name).is_none());
+        let pause = Duration::from_millis(50);
+        assert!(listen_until_up(|| Ok(name.clone()), pipe::listen, pause, pause).is_none());
+    }
+
+    /// Agent control doesn't die quietly: a pipe that can't be named or made yet is tried again,
+    /// until it can be.
+    #[test]
+    fn a_pipe_that_cant_be_made_yet_is_tried_again_until_it_can() {
+        let name = test_name("retry");
+        let (named, made) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let listener = listen_until_up(
+            || match named.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(io::Error::other("no session yet, for a test")),
+                _ => Ok(name.clone()),
+            },
+            |name| match made.fetch_add(1, Ordering::SeqCst) {
+                0 | 1 => Err(io::Error::other("no pipe yet, for a test")),
+                _ => pipe::listen(name),
+            },
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+        );
+        assert!(listener.is_some());
+        assert_eq!(made.load(Ordering::SeqCst), 3);
+        assert!(listen_until_up(
+            || Ok(name.clone()),
+            pipe::listen,
+            Duration::ZERO,
+            Duration::ZERO
+        )
+        .is_none());
+    }
+
+    /// A connection idle for its time, nothing in flight, is closed, freeing its place; one with a
+    /// request in flight isn't, however long the answer takes.
+    #[test]
+    fn an_idle_connection_is_closed_but_not_one_waiting_on_an_answer() {
+        let name = test_name("idle");
+        let (handler, gate, entered) = gated();
+        let _server = serve_idle(&name, handler, Duration::from_millis(300)).unwrap();
+        let pipe = Arc::new(connect(&name).unwrap());
+        let (read, lines) = mpsc::channel();
+        let reading = {
+            let pipe = Arc::clone(&pipe);
+            thread::spawn(move || {
+                let mut reader = LineReader::new(&*pipe, MAX_LINE);
+                loop {
+                    let line = reader.next_line().map_err(|e| e.kind());
+                    let more = matches!(line, Ok(Line::Text(_)));
+                    if read.send(line).is_err() || !more {
+                        break;
+                    }
+                }
+            })
+        };
+        send(&pipe, 1, AgentRequest::Status);
+        wait_until("the request is worked on", || {
+            entered.load(Ordering::SeqCst) == 1
+        });
+        thread::sleep(Duration::from_millis(900));
+        assert!(lines.try_recv().is_err(), "closed with a request in flight");
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let Ok(Ok(Line::Text(line))) = lines.recv_timeout(Duration::from_secs(5)) else {
+            panic!("no answer");
+        };
+        let reply: PipeReply = serde_json::from_str(&line).unwrap();
+        assert_eq!((reply.id, reply.answer), (1, Answer::Ok(json!("slow"))));
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(5)),
+            Ok(Ok(Line::End)),
+            "kept open, idle"
+        );
+        reading.join().unwrap();
     }
 
     /// Shut until set to true, then notified.
@@ -579,16 +832,27 @@ mod tests {
             assert_eq!(reply.answer, Answer::Ok(json!("slow")));
             slow += 1;
         }
-        // Answered, they leave room for more.
-        assert_eq!(
-            ask(
+        // Answered, they leave room for more, each once its answer is written: a request sent the
+        // moment the last answer arrives may still find none.
+        let started = std::time::Instant::now();
+        for id in 100.. {
+            match ask(
                 &pipe,
                 &mut lines,
-                100,
-                AgentRequest::Read(Default::default())
-            ),
-            Answer::Ok(json!("quick"))
-        );
+                id,
+                AgentRequest::Read(Default::default()),
+            ) {
+                Answer::Err(busy)
+                    if busy == BUSY && started.elapsed() < Duration::from_secs(20) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                answer => {
+                    assert_eq!(answer, Answer::Ok(json!("quick")));
+                    break;
+                }
+            }
+        }
     }
 
     #[test]

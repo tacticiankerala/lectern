@@ -22,8 +22,8 @@ impl WindowState {
     /// The window's startup payload, with every workspace for its title. The document rendered as
     /// the window started (during boot, for the first window) becomes the initial document, unless
     /// a second launch, or an agent's `show`, asked for another one meanwhile: the agent's comes
-    /// with its target. The payloads of the window that asked
-    /// first are the primary ones, until the automatic update check has run
+    /// with its target, and its `show` hears whether it opened. The payloads of the window that
+    /// asked first are the primary ones, until the automatic update check has run
     /// (`App::claims_update_check`).
     pub fn startup(self: &Arc<Self>) -> StartupPayload {
         self.app.perf.mark("webview-ready", None);
@@ -50,14 +50,17 @@ impl WindowState {
             request,
             by_agent,
             at,
+            settle,
         }) = self.opens.ready()
         {
             self.next_seq();
             let path = PathBuf::from(&request.path);
             if by_agent {
                 // A file, its host checked already (`state::agent`): opened as it is, trusting
-                // nothing new, then taken to the agent's target.
-                initial = Some(self.open_document(&request.path));
+                // nothing new, then taken to the agent's target. Its `show` hears how it went.
+                let opened = self.open_document(&request.path);
+                self.opens.opened(&request.path, &opened, settle);
+                initial = Some(opened);
                 agent_target = at;
             } else if self.blank_window_folder(&path) {
                 // The UI's listeners are in place before it asks for this payload.

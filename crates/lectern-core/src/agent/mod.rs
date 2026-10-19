@@ -3,7 +3,7 @@
 //!
 //! - `lectern.exe mcp` speaks MCP over its stdin and stdout ([`mcp`]). Each tool call
 //!   ([`tools`]) becomes an [`AgentRequest`], which it relays to the running Lectern over a
-//!   per-user named pipe ([`pipe_name`]): one JSON line each way, [`PipeRequest`] then
+//!   per-user, per-session named pipe ([`pipe_name`]): one JSON line each way, [`PipeRequest`] then
 //!   [`PipeReply`], each at most [`MAX_LINE`] bytes ([`lines`]).
 //! - Lectern answers each request within [`ANSWER_WITHIN`]. What needs a window's view goes to
 //!   that window's UI as an [`AgentCall`], which answers with an [`AgentReply`] ([`status`]).
@@ -38,6 +38,7 @@ pub use self::request::AgentRequest;
 use self::request::ClientInfo;
 pub use self::status::{AgentCall, AgentReply};
 use crate::library::pathmap::PathMapper;
+use crate::review::format::holds_agent_name;
 
 /// The longest line either end of the pipe sends, and the longest MCP message read from stdin, in
 /// bytes.
@@ -48,10 +49,13 @@ pub const MAX_LINE: usize = 1024 * 1024;
 pub const ANSWER_WITHIN: Duration = Duration::from_secs(10);
 
 /// How long Lectern takes at most to answer `request` on the pipe: [`ANSWER_WITHIN`], and for a
-/// `show`, the seconds it may wait for the reader's answer on top.
+/// `show`, the seconds it may wait for the reader's answer on top, never more than a show waits
+/// ([`tools::WAIT_MAX`]).
 pub fn answer_within(request: &AgentRequest) -> Duration {
     match request {
-        AgentRequest::Show(args) => ANSWER_WITHIN + Duration::from_secs(args.wait.into()),
+        AgentRequest::Show(args) => {
+            ANSWER_WITHIN + Duration::from_secs(args.wait.min(tools::WAIT_MAX).into())
+        }
         _ => ANSWER_WITHIN,
     }
 }
@@ -65,8 +69,10 @@ pub const UNNAMED_AGENT: &str = "An agent";
 /// The name the reader sees an agent by, from the name its MCP client gives (`hello`): "Claude"
 /// for Claude Code (`claude-code`) or any name starting `claude`, "Codex" for `codex`, in any
 /// letter case. Any other name keeps only its ASCII letters, digits, spaces and `._-`, trimmed, at
-/// most [`AGENT_NAME_MAX`] of them. With no client, or nothing left, or "You" left (the reader's
-/// own name in a review sidecar), it is [`UNNAMED_AGENT`].
+/// most [`AGENT_NAME_MAX`] of them. With no client, or nothing left, or a name a review sidecar's
+/// entry can't hold as an agent's (`holds_agent_name`: "You", the reader's own, or one that doesn't
+/// start with a letter), it is [`UNNAMED_AGENT`], so the ask bar, `status` and the sidecar all name
+/// the agent alike.
 pub fn agent_name(client: Option<&ClientInfo>) -> String {
     let Some(client) = client else {
         return UNNAMED_AGENT.to_owned();
@@ -85,7 +91,7 @@ pub fn agent_name(client: Option<&ClientInfo>) -> String {
         .collect();
     let name: String = kept.trim().chars().take(AGENT_NAME_MAX).collect();
     let name = name.trim_end();
-    if name.is_empty() || name.eq_ignore_ascii_case("you") {
+    if name.is_empty() || !holds_agent_name(name) {
         return UNNAMED_AGENT.to_owned();
     }
     name.to_owned()
@@ -189,14 +195,15 @@ const NO_DISTRO: &str = "lectern.exe mcp was given --distro without a WSL distri
     Register it from a WSL shell, where $WSL_DISTRO_NAME names one: copy the WSL command from \
     Lectern's Preferences › Agents.";
 
-/// The named pipe Lectern serves agents on, for the app `identifier` and the user whose SID (as a
-/// string, `S-1-5-21-…`) is `user_sid`: `\\.\pipe\lectern-<identifier>-<16 hex digits>`, the
-/// digits the start of the SID's SHA-256. Another build of Lectern (another identifier) and
-/// another user each have their own.
-pub fn pipe_name(identifier: &str, user_sid: &str) -> String {
+/// The named pipe Lectern serves agents on, for the app `identifier`, the user whose SID (as a
+/// string, `S-1-5-21-…`) is `user_sid`, and the Windows session `session` they are logged on in:
+/// `\\.\pipe\lectern-<identifier>-<16 hex digits>-s<session>`, the digits the start of the SID's
+/// SHA-256. Another build of Lectern (another identifier), another user, and the same user logged
+/// on again in another session each have their own. Lectern and `lectern.exe mcp` name it alike.
+pub fn pipe_name(identifier: &str, user_sid: &str, session: u32) -> String {
     let digest = Sha256::digest(user_sid.as_bytes());
     let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    format!(r"\\.\pipe\lectern-{identifier}-{hex}")
+    format!(r"\\.\pipe\lectern-{identifier}-{hex}-s{session}")
 }
 
 /// The answer to a tool call when Lectern's pipe is served by a process of another user.

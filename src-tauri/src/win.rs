@@ -14,7 +14,8 @@ use lectern_core::ipc::AgentFocus;
 
 use windows::core::{w, BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL, E_INVALIDARG, FILETIME, HWND,
+    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
+    E_INVALIDARG, FILETIME, HWND,
 };
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::DirectWrite::{
@@ -29,15 +30,17 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
+    OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetGUIThreadInfo,
-    GetWindowThreadProcessId, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, FLASHWINFO,
-    FLASHW_ALL, FLASHW_TIMERNOFG, GUITHREADINFO, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    GetWindowThreadProcessId, IsHungAppWindow, IsIconic, SetForegroundWindow, SetWindowPos,
+    ShowWindow, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG, GUITHREADINFO, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_RESTORE,
+    SW_SHOWNOACTIVATE,
 };
 
 /// 100 ns intervals from 1601-01-01, the `FILETIME` epoch, to the Unix epoch.
@@ -318,6 +321,9 @@ pub trait Desktop {
     /// With this thread's input attached to the foreground window's thread's, `SetForegroundWindow`
     /// and `BringWindowToTop`; then detached.
     fn attach_and_raise(&self);
+    /// The foreground window has stopped answering (`IsHungAppWindow`): attaching to its thread's
+    /// input could stall this one.
+    fn front_is_hung(&self) -> bool;
     /// Topmost, then not: on top of the other windows, without taking the focus.
     fn raise(&self);
     /// Flashes its taskbar button until it is focused.
@@ -329,8 +335,9 @@ pub trait Desktop {
 ///
 /// - **`front`:** a ladder, checking after each step whether the window is in front. It is
 ///   restored if minimised; then asked for the foreground; then asked again after a nudge of
-///   input; then asked with this thread's input attached to the foreground thread's. When no step
-///   works, it settles for `raise` and a taskbar flash, and answers `raised`.
+///   input; then asked with this thread's input attached to the foreground thread's, unless the
+///   foreground window has stopped answering. When no step works, it settles for `raise` and a
+///   taskbar flash, and answers `raised`.
 /// - **`raise`:** restored without activation if minimised, and raised without the focus.
 /// - **`none`:** only a taskbar flash; the window stays where it is.
 ///
@@ -350,7 +357,12 @@ pub fn bring_forward(window: &impl Desktop, mode: AgentFocus) -> FocusStep {
                     window.nudge();
                     window.ask_foreground();
                 },
-                &|| window.attach_and_raise(),
+                // Never attached to a thread that has stopped answering, which could stall ours.
+                &|| {
+                    if !window.front_is_hung() {
+                        window.attach_and_raise();
+                    }
+                },
             ];
             for step in ladder {
                 step();
@@ -425,6 +437,11 @@ impl Desktop for Win32Window {
         let _ = unsafe { SendInput(&[mouse], size) };
     }
 
+    fn front_is_hung(&self) -> bool {
+        // SAFETY: plain queries of window handles; a stale one answers false.
+        unsafe { IsHungAppWindow(GetForegroundWindow()) }.as_bool()
+    }
+
     fn attach_and_raise(&self) {
         // SAFETY: plain calls on window handles and thread ids; the input is detached again only
         // when it was attached, before this returns.
@@ -467,10 +484,9 @@ impl Desktop for Win32Window {
 /// holds until it exits. A second launch skips its boot work and lets the single-instance plugin
 /// hand its arguments over. `false` when the mutex can't be made, so Lectern still starts.
 pub fn another_instance_is_running(identifier: &str) -> bool {
-    let name = HSTRING::from(format!(r"Local\{identifier}.boot"));
     // SAFETY: the name is a NUL-terminated HSTRING; the handle is deliberately never closed, so
     // the mutex lives as long as the process.
-    match unsafe { CreateMutexW(None, true, &name) } {
+    match unsafe { CreateMutexW(None, true, &boot_mutex(identifier)) } {
         Ok(_handle) => {
             // SAFETY: reads the calling thread's last error, set by CreateMutexW just above.
             let last = unsafe { GetLastError() };
@@ -481,6 +497,26 @@ pub fn another_instance_is_running(identifier: &str) -> bool {
             false
         }
     }
+}
+
+/// Whether a Lectern of the app `identifier` runs, or is starting, in this session: whether its
+/// boot mutex (`another_instance_is_running`) is there.
+pub fn lectern_runs(identifier: &str) -> bool {
+    // SAFETY: the name is a NUL-terminated HSTRING; a handle opened is closed at once.
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, &boot_mutex(identifier)) } {
+        Ok(handle) => {
+            // SAFETY: the handle was just opened here, and is closed once.
+            let _ = unsafe { CloseHandle(handle) };
+            true
+        }
+        // There, but not this process's to open.
+        Err(e) => e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    }
+}
+
+/// The name of the boot mutex of the app `identifier`, in this session's namespace.
+fn boot_mutex(identifier: &str) -> HSTRING {
+    HSTRING::from(format!(r"Local\{identifier}.boot"))
 }
 
 /// The installed font families, in the user's language (else US English), sorted
@@ -687,6 +723,8 @@ mod tests {
         works: Option<&'static str>,
         calls: std::cell::RefCell<Vec<&'static str>>,
         front: std::cell::Cell<bool>,
+        /// The window in front has stopped answering.
+        front_hung: bool,
     }
 
     impl Pretend {
@@ -696,6 +734,7 @@ mod tests {
                 works,
                 calls: std::cell::RefCell::new(Vec::new()),
                 front: std::cell::Cell::new(works == Some("already")),
+                front_hung: false,
             }
         }
 
@@ -733,6 +772,9 @@ mod tests {
         }
         fn attach_and_raise(&self) {
             self.call("attach");
+        }
+        fn front_is_hung(&self) -> bool {
+            self.front_hung
         }
         fn raise(&self) {
             self.call("raise");
@@ -779,6 +821,28 @@ mod tests {
             window.calls(),
             ["ask", "nudge", "ask", "attach", "raise", "flash"]
         );
+    }
+
+    /// Behind a window that has stopped answering, the ladder never attaches to its thread's
+    /// input, which could stall Lectern's UI thread: it settles for raised and a flash.
+    #[test]
+    fn front_never_attaches_to_a_hung_foreground_window() {
+        let window = Pretend {
+            front_hung: true,
+            ..Pretend::new(false, Some("attach"))
+        };
+        assert_eq!(bring_forward(&window, AgentFocus::Front), FocusStep::Raised);
+        assert_eq!(window.calls(), ["ask", "nudge", "ask", "raise", "flash"]);
+    }
+
+    /// A Lectern runs while its boot mutex is held: what `mcp` checks before starting one.
+    #[test]
+    fn a_lectern_runs_while_its_boot_mutex_is_held() {
+        let identifier = format!("io.github.example.lectern-test-{}", std::process::id());
+        assert!(!lectern_runs(&identifier));
+        // Made, and held until this process exits, as a Lectern holds it.
+        assert!(!another_instance_is_running(&identifier));
+        assert!(lectern_runs(&identifier));
     }
 
     #[test]

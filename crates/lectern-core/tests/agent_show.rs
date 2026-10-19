@@ -77,6 +77,12 @@ fn an_agent_with_no_usable_name_is_an_agent() {
     for client in ["You", "you", " YOU "] {
         assert_eq!(named(client), "An agent", "{client:?}");
     }
+    // Nor a name a sidecar's entry line can't hold, which must start with a letter: the ask bar
+    // and `status` name the agent as its entries do.
+    for client in ["42bot", "_bot", "-bot", ".bot"] {
+        assert_eq!(named(client), "An agent", "{client:?}");
+    }
+    assert_eq!(named("bot 42"), "bot 42");
 }
 
 // How long Lectern has.
@@ -97,6 +103,11 @@ fn a_show_that_waits_for_the_reader_has_that_much_longer() {
     assert_eq!(answer_within(&show(0)), ANSWER_WITHIN);
     assert_eq!(
         answer_within(&show(60)),
+        ANSWER_WITHIN + Duration::from_secs(60)
+    );
+    // Never longer than the most a show waits, whatever reaches the pipe.
+    assert_eq!(
+        answer_within(&show(u32::MAX)),
         ANSWER_WITHIN + Duration::from_secs(60)
     );
 }
