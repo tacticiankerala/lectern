@@ -1591,7 +1591,8 @@ describe("a note's target within the file on screen", () => {
 
   /**
    * B on screen with Buzz on line 3; then `between` lands before Buzz, now on line `buzz` (gone
-   * for null), and the window hears of the change. The refresh that follows opens B only once
+   * for null), and the window hears of the change. The refresh that follows has Rust open B, so
+   * Rust has read the change (a show then has nothing shown afresh), and answers only once
    * `refreshing` is let go.
    */
   async function changing(between: [number, string][], buzz: number | null) {
@@ -1601,12 +1602,16 @@ describe("a note's target within the file on screen", () => {
     const byBlock = vi.spyOn(app.view, "scrollToLine");
     beeWith(fake, between, buzz);
     const refreshing = deferred();
+    const read = deferred();
     const open = fake.openDocument.bind(fake);
     vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      const opened = open(path, generation);
+      read.resolve();
       await refreshing.promise;
-      return open(path, generation);
+      return opened;
     });
     fake.emit("doc-changed", { path: B });
+    await read.promise;
     return { fake, app, byBlock, refreshing };
   }
 
@@ -1627,6 +1632,50 @@ describe("a note's target within the file on screen", () => {
     expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
     expect(byBlock).toHaveBeenCalledWith(7);
     expect(byBlock).not.toHaveBeenCalledWith(3);
+  });
+
+  it("lands in the file as it is now when the show comes before the watcher has told of the change", async () => {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // An agent edits B, two paragraphs landing before Buzz, and shows Buzz at once: Rust finds it
+    // on line 7, in the file as it is now, and the show reaches the window before any word of
+    // the change from the watcher. The refresh answers only once let go.
+    beeWith(fake, moved(), 7);
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      const opened = open(path, generation);
+      await refreshing.promise;
+      return opened;
+    });
+    let answered: unknown;
+    const reply = fake
+      .agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(7, 7, [22, 26], 0)])
+      .then((r) => {
+        answered = r;
+        return r;
+      });
+    await settle();
+    // Rust had the window show B afresh before the show came: it waits for that refresh.
+    expect(answered).toBeUndefined();
+    expect(byBlock).not.toHaveBeenCalled();
+    refreshing.resolve();
+    expect(await reply).toEqual({ kind: "shown" });
+    // The change rendered, and Buzz landed in it.
+    expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+    // The watcher catches up: the same text again, so nothing renders or moves.
+    const shown = document.querySelector("#lx-doc h2");
+    const restored = vi.spyOn(app.view, "restore");
+    byBlock.mockClear();
+    fake.emit("doc-changed", { path: B });
+    await settle();
+    expect(document.querySelector("#lx-doc h2")).toBe(shown);
+    expect(restored).not.toHaveBeenCalled();
+    expect(byBlock).not.toHaveBeenCalled();
   });
 
   it("fails as a missing target does once the change took it away, moving nowhere", async () => {
@@ -1686,20 +1735,26 @@ describe("a note's target within the file on screen", () => {
     await app.open(B, { push: true });
     const byBlock = vi.spyOn(app.view, "scrollToLine");
     beeWith(fake, moved(), 7);
-    // Two changes in a row: the first refresh's open is slow, the second's answers first.
+    // Two changes in a row: the first refresh's open is slow to answer, the second's answers
+    // first. Rust has read the change before the show comes, so it shows nothing afresh itself.
     const slow = deferred();
     const quick = deferred();
+    const read = deferred();
     const open = fake.openDocument.bind(fake);
     vi.spyOn(fake, "openDocument")
       .mockImplementationOnce(async (path, generation) => {
+        const opened = open(path, generation);
+        read.resolve();
         await slow.promise;
-        return open(path, generation);
+        return opened;
       })
       .mockImplementationOnce(async (path, generation) => {
+        const opened = open(path, generation);
         await quick.promise;
-        return open(path, generation);
+        return opened;
       });
     fake.emit("doc-changed", { path: B });
+    await read.promise;
     let answered: unknown;
     const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found()).then((r) => {
       answered = r;
@@ -2974,7 +3029,8 @@ describe("a comment target within the file on screen", () => {
       expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
     });
     // Two paragraphs land before Buzz., on line 7 now, and the window hears of the change; the
-    // refresh that follows opens B only once let go.
+    // refresh that follows has Rust open B (so Rust has read the change, and a show has nothing
+    // shown afresh), and answers only once let go.
     fake.setDoc(
       B,
       "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><p data-sourcepos='3:1-3:9'>New one.</p>" +
@@ -2987,10 +3043,13 @@ describe("a comment target within the file on screen", () => {
       [7, 7, "Buzz."],
     ]);
     const refreshing = deferred();
+    const read = deferred();
     const open = fake.openDocument.bind(fake);
     vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      const opened = open(path, generation);
+      read.resolve();
       await refreshing.promise;
-      return open(path, generation);
+      return opened;
     });
     // The review loads again for the render, with the thread on line 7: once let go too.
     const loading = deferred();
@@ -3005,6 +3064,7 @@ describe("a comment target within the file on screen", () => {
     const restored = vi.spyOn(app.view, "restore");
     const scrolled = vi.spyOn(app.view, "scrollToLine");
     fake.emit("doc-changed", { path: B });
+    await read.promise;
     const reply = fake.agentRequest(show(B, { comment: "C1" }));
     await settle();
     // Nothing is revealed while the refresh is on its way.

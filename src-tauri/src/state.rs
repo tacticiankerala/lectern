@@ -84,7 +84,7 @@ pub use self::windows::is_folder;
 
 use self::agent::AgentCalls;
 use self::assets::AssetScope;
-use self::doc::CachedRender;
+use self::doc::{CachedRender, Stamp};
 use self::grammars::AppGrammars;
 use self::library::Library;
 use self::pages::PageOptions;
@@ -154,6 +154,10 @@ struct Current {
     /// The text a note or a text file rendered from: what an agent's targets are found in again
     /// (`agent_places`), the revision the window shows, never the file as it is on disk since.
     source: Option<Arc<str>>,
+    /// The file's modified time and size as it was read: an agent's show of it compares them with
+    /// the file's on disk, to have the window show it afresh first when it changed since
+    /// (`WindowState::show_afresh_if_changed`).
+    stamp: Option<Stamp>,
 }
 
 /// Everything `App` needs from boot.

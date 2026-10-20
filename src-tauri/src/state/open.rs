@@ -18,7 +18,7 @@ use lectern_core::store::State;
 
 use super::doc::{
     breadcrumbs, check_size, framed, now_ms, opened_kind, read_text, readme_in, render_doc,
-    stat_doc, Rendered,
+    stat_doc, Rendered, Stamp,
 };
 use super::paths::{is_under, path_string, same_path};
 use super::sync::{lock, read, write};
@@ -81,6 +81,7 @@ impl WindowState {
                 doc,
                 framed: None,
                 mtime_ms: stamp.mtime_ms,
+                size: stamp.size,
                 lossy: false,
                 covered,
                 gen,
@@ -107,6 +108,7 @@ impl WindowState {
             doc,
             framed: None,
             mtime_ms: stamp.mtime_ms,
+            size: stamp.size,
             lossy: text.lossy,
             covered,
             gen,
@@ -244,6 +246,10 @@ impl WindowState {
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
             source: rendered.and_then(|r| r.source.clone()),
+            stamp: rendered.map(|r| Stamp {
+                mtime_ms: r.mtime_ms,
+                size: r.size,
+            }),
         });
         if let Some(watch) = &*lock(&self.watch) {
             watch.doc(Some(path.to_path_buf()));

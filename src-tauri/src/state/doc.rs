@@ -33,6 +33,9 @@ pub struct Rendered {
     /// its frame URL from it. `None` for every other kind.
     pub framed: Option<String>,
     pub mtime_ms: i64,
+    /// Its size in bytes, as stated with `mtime_ms`: together they tell whether it has changed on
+    /// disk since (`Stamp`).
+    pub size: u64,
     pub lossy: bool,
     /// The index held the file's own root when it was rendered; without that, its wikilinks show
     /// as broken.
@@ -65,6 +68,9 @@ pub struct Early {
     pub folder: Option<PathBuf>,
 }
 
+/// A file's modified time and size, as stated: the same pair, the same file, as the render cache
+/// takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Stamp {
     pub(super) mtime_ms: i64,
     pub(super) size: u64,
@@ -89,6 +95,7 @@ pub fn render_file(
         doc: Arc::new(doc),
         framed: None,
         mtime_ms: stamp.mtime_ms,
+        size: stamp.size,
         lossy: text.lossy,
         covered: false,
         gen: 0,
@@ -121,6 +128,7 @@ pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Result<Render
         doc: Arc::new(RenderedDoc::framed(path)),
         framed: Some(page),
         mtime_ms: stamp.mtime_ms,
+        size: stamp.size,
         lossy: false,
         covered: false,
         gen: 0,

@@ -25,11 +25,15 @@
 //!   wouldn't read (a text file over 20 MB) is refused unread, as the open refuses it. The window is
 //!   sent it with where it is (`AgentCall::places`); a window still starting gets it with the file
 //!   it opens first thing (`StartupPayload::agent_target`), found again in the file as it opened
-//!   (`found_again`): one gone by then fails the show, the file open all the same. An HTML page's target goes to the
-//!   window as it is, to find in what the page reports, waiting for a page still loading as long
-//!   as the pipe gives it (`AgentCall::within_ms`): one that isn't there is the tool's error, and
-//!   one the page hadn't loaded in time for, or that a starting window will find, is `pending`. A
-//!   PDF's target is its page.
+//!   (`found_again`): one gone by then fails the show, the file open all the same. A window that
+//!   shows the file already, changed on disk since it rendered it, is told to show it afresh
+//!   before the request goes to it (`WindowState::show_afresh_if_changed`), as the watcher would
+//!   once it notices: its UI hears of the refresh first, waits for it, and finds the target again
+//!   in the file as it is now, never in the text it showed before. An HTML page's target goes to
+//!   the window as it is, to find in what the page reports, waiting for a page still loading as
+//!   long as the pipe gives it (`AgentCall::within_ms`): one that isn't there is the tool's error,
+//!   and one the page hadn't loaded in time for, or that a starting window will find, is
+//!   `pending`. A PDF's target is its page.
 //! - **`highlight`:** goes to the window showing the file (the most recently focused, and by
 //!   default the file it shows), with where core found each target in a note or a text file. No
 //!   window comes forward. A PDF can't be painted: the tool's error. Once the note changes, the
@@ -91,7 +95,7 @@ use lectern_core::review::text::{page_text_len, TextMap, MAX_PAGE_TEXT};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::doc::{check_size, opened_kind, read_text as read_file, stat_doc};
+use super::doc::{check_size, opened_kind, read_text as read_file, stat_doc, unix_ms, Stamp};
 use super::open_queue::{AgentOffer, ForUi, OpenQueue, Settled};
 use super::paths::{normalize_root, path_string, same_path};
 use super::sync::{lock, read};
@@ -140,6 +144,10 @@ pub struct AgentCalls {
     /// between a wait's end and its clean-up.
     #[cfg(test)]
     before_later: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs on the thread that reads the file on screen to see whether it changed, before it reads
+    /// (`WindowState::show_afresh_if_changed`): a test's slow share.
+    #[cfg(test)]
+    before_fresh_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// A held `show` that answered `waiting` (`AgentCalls::later`): its request's id, the window it
@@ -431,7 +439,7 @@ impl App {
     ) -> Result<ShowAnswer, String> {
         let path = self.agent_location(agent, &args.path)?;
         let file = PathBuf::from(&path.windows);
-        check_file(&file, budget.at_most(self.timings.exists))?;
+        let on_disk = check_file(&file, budget.at_most(self.timings.exists))?;
         let at = match args.target {
             Some(target) => Some(self.show_at(&file, target, budget)?),
             None => self.show_at_path(&file, &path, budget)?,
@@ -513,7 +521,7 @@ impl App {
                 };
                 let label = window.label().to_owned();
                 let (state, target, focus) =
-                    self.show_in(&window, shown, places, &agent.name, budget)?;
+                    self.show_in(&window, shown, places, Some(on_disk), &agent.name, budget)?;
                 (label, state, target, focus)
             }
         };
@@ -542,21 +550,26 @@ impl App {
 
     /// Asks the UI of `window`, which is up, to show `args.path`, at its target, which is at
     /// `places` in a note or a text file. It opens it, or asks the reader first; either way the
-    /// window then comes forward. The UI is told how long it has to answer (`within_ms`), which an
-    /// HTML page's target may take to load: one that isn't there is the tool's error, and one the
-    /// page hadn't loaded in time for is `pending`. Asked, with a `wait`, what became of it is
-    /// waited for that long. A window let go of before it settles the request (`let_go_of`) ends
-    /// the wait at once. A window still starting with the user's launch gets the request once its
-    /// UI is up (`OpenQueue::to_ui`), with as long to answer as is left, and is waited for that
-    /// long: `waiting` when it hasn't answered by then, as for any window that hasn't started in
-    /// time, and `status` has what it answers later (`AgentCalls::later`); past that, the request
-    /// reaches the UI with no deadline, so it takes as long as it needs. The newest held so wins,
-    /// as at the ask bar: the one it takes the place of hears it was replaced.
+    /// window then comes forward. When the window shows that file already, changed on disk since
+    /// (`on_disk`, as the show found it: `WindowState::show_afresh_if_changed`), it is told to show
+    /// it afresh first, so the request, which reaches its UI after that, lands in the file as it
+    /// is now; what that look takes comes out of `budget`, before the UI's time is counted. The UI
+    /// is told how long it has to answer (`within_ms`), which an HTML page's target may take to
+    /// load: one that isn't there is the tool's error, and one the page hadn't loaded in time for
+    /// is `pending`. Asked, with a `wait`, what became of it is waited for that long. A window
+    /// let go of before it settles the request (`let_go_of`) ends the wait at once. A window still
+    /// starting with the user's launch gets the request once its UI is up (`OpenQueue::to_ui`),
+    /// with as long to answer as is left, and is waited for that long: `waiting` when it hasn't
+    /// answered by then, as for any window that hasn't started in time, and `status` has what it
+    /// answers later (`AgentCalls::later`); past that, the request reaches the UI with no
+    /// deadline, so it takes as long as it needs. The newest held so wins, as at the ask bar: the
+    /// one it takes the place of hears it was replaced.
     fn show_in(
         &self,
         window: &WindowState,
         args: ShowArgs,
         places: Vec<TextPlace>,
+        on_disk: Option<Stamp>,
         agent: &str,
         budget: Budget,
     ) -> Result<(ShowState, Option<TargetState>, Option<FocusStep>), String> {
@@ -570,28 +583,42 @@ impl App {
             self.agent_calls.forget(id);
             return Ok((self.let_go_of(label)?, None, None));
         }
-        let within = budget.at_most(UI_WAIT);
+        let millis = |time: Duration| u32::try_from(time.as_millis()).unwrap_or(u32::MAX);
         let path = args.path.clone();
         let call = AgentCall {
             id,
             request: AgentRequest::Show(args),
             agent: agent.to_owned(),
             places,
-            within_ms: Some(u32::try_from(within.as_millis()).unwrap_or(u32::MAX)),
+            within_ms: Some(millis(budget.at_most(UI_WAIT))),
         };
-        let held = match window.opens.to_ui(&path, call, budget.0) {
-            ForUi::Now(call) => {
+        let (held, within) = match window.opens.to_ui(&path, call, budget.0) {
+            ForUi::Now(mut call) => {
+                // Both from this thread, in this order, which is the order the window's page runs
+                // them in: its UI starts the refresh as `doc-changed` reaches it, before the
+                // request does, and the request waits for that refresh.
+                if let Some(on_disk) = on_disk {
+                    window.show_afresh_if_changed(
+                        Path::new(&path),
+                        on_disk,
+                        budget.at_most(self.timings.exists),
+                    );
+                }
+                // What that look took comes out of the same budget: the UI's time to answer, and
+                // the wait for its answer, are what is left now.
+                let within = budget.at_most(UI_WAIT);
+                call.within_ms = Some(millis(within));
                 window.emit(UiEvent::AgentRequest(call));
-                false
+                (false, within)
             }
             ForUi::Held { replaced } => {
                 if let Some(older) = replaced {
                     self.agent_calls.replaced(label, older);
                 }
-                true
+                (true, budget.left())
             }
         };
-        let received = match reply.recv_timeout(if held { budget.left() } else { within }) {
+        let received = match reply.recv_timeout(within) {
             // Its UI gets it once up all the same, and what it answers then is kept for `status`;
             // unless that came as the wait ended.
             Err(RecvTimeoutError::Timeout) if held => {
@@ -1135,6 +1162,49 @@ impl WindowState {
         })
     }
 
+    /// Before an agent's request about `file` goes to the window's UI: when `file` is the note or
+    /// the text file the window shows, and it has changed on disk since it was read for that, the
+    /// window is told to show it afresh (`doc-changed`, as the watcher would tell it, which may not
+    /// have yet), so the request sent after it waits for that refresh and lands in the file as it
+    /// is now. Changed: `on_disk`, its modified time and size as the request found them, aren't
+    /// those it was read with; when only the time moved, its text, read within `timeout`, isn't the
+    /// text it rendered from. A text that can't be read in that time (a stalled share), or at all,
+    /// counts as unchanged, which is logged: the watcher tells the window once it notices, as
+    /// before. The same pair is the same file, as the render cache has it, so a file that hasn't
+    /// changed costs nothing more than the request's own look at it.
+    pub(super) fn show_afresh_if_changed(&self, file: &Path, on_disk: Stamp, timeout: Duration) {
+        let shown = lock(&self.current)
+            .as_ref()
+            .filter(|c| c.doc.is_some() && same_path(&c.path, file))
+            .and_then(|c| Some((c.path.clone(), c.source.clone()?, c.stamp?)));
+        let Some((path, source, read_as)) = shown else {
+            return;
+        };
+        let changed = if on_disk == read_as {
+            false
+        } else if on_disk.size != read_as.size {
+            true
+        } else {
+            #[cfg(test)]
+            let first = lock(&self.app.agent_calls.before_fresh_read).take();
+            #[cfg(not(test))]
+            let first = None;
+            match read_source_after(file, timeout, first) {
+                Ok(text) => text != *source,
+                Err(message) => {
+                    log::warn!(
+                        "couldn't tell whether {} changed on disk ({message}); the watcher will",
+                        file.display()
+                    );
+                    false
+                }
+            }
+        };
+        if changed {
+            self.emit(UiEvent::DocChanged(path));
+        }
+    }
+
     /// The text the window's document rendered from, when that is `file`, a note or a text file
     /// that opened; none for any other file, a page or a PDF, a blank window, the welcome page or a
     /// file that didn't open.
@@ -1180,11 +1250,24 @@ fn file_name(path: &Path) -> String {
 /// The text of the note or text file at `path`, as its open reads it: an error, a sentence for the
 /// agent, when it can't be read, or doesn't answer within `timeout` (a stalled share).
 fn read_source(path: &Path, timeout: Duration) -> Result<String, String> {
+    read_source_after(path, timeout, None)
+}
+
+/// `read_source`, running `first`, when given, on the reading thread before it reads: a test's
+/// slow share.
+fn read_source_after(
+    path: &Path,
+    timeout: Duration,
+    first: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<String, String> {
     let (done, read) = mpsc::channel();
     let probed = path.to_path_buf();
     thread::Builder::new()
         .name("lectern-agent-read".to_owned())
         .spawn(move || {
+            if let Some(first) = first {
+                first();
+            }
             // Gone when the read already timed out.
             let _ = done.send(note_source(&probed));
         })
@@ -1213,21 +1296,29 @@ fn to_value(answer: &impl Serialize) -> Result<Value, String> {
     serde_json::to_value(answer).map_err(|e| e.to_string())
 }
 
-/// Whether `path` is a file, as an agent's `show` needs: an error, a sentence for the agent, when
-/// it is a folder, isn't there, or doesn't answer within `timeout` (a stalled share).
-fn check_file(path: &Path, timeout: Duration) -> Result<(), String> {
+/// Whether `path` is a file, as an agent's `show` needs: its modified time and size when it is, as
+/// an open states them; an error, a sentence for the agent, when it is a folder, isn't there, or
+/// doesn't answer within `timeout` (a stalled share).
+fn check_file(path: &Path, timeout: Duration) -> Result<Stamp, String> {
     let (done, stat) = mpsc::channel();
     let probed = path.to_path_buf();
     thread::Builder::new()
         .name("lectern-probe".to_owned())
         .spawn(move || {
+            let stated = fs::metadata(&probed).map(|meta| {
+                let stamp = Stamp {
+                    mtime_ms: meta.modified().map_or(0, unix_ms),
+                    size: meta.len(),
+                };
+                (meta.is_dir(), stamp)
+            });
             // Gone when the check already timed out.
-            let _ = done.send(fs::metadata(&probed).map(|meta| meta.is_dir()));
+            let _ = done.send(stated);
         })
         .map_err(|e| e.to_string())?;
     match stat.recv_timeout(timeout) {
-        Ok(Ok(false)) => Ok(()),
-        Ok(Ok(true)) => Err(format!(
+        Ok(Ok((false, stamp))) => Ok(stamp),
+        Ok(Ok((true, _))) => Err(format!(
             "{} is a folder, and show opens a file.",
             path.display()
         )),
@@ -1635,15 +1726,21 @@ mod tests {
             .open_workspace("main", &garden, OpenWhere::Here)
             .unwrap();
         assert_eq!(
-            f.app
-                .show_in(&turned, args.clone(), Vec::new(), "Claude", Budget::new()),
+            f.app.show_in(
+                &turned,
+                args.clone(),
+                Vec::new(),
+                None,
+                "Claude",
+                Budget::new()
+            ),
             Ok((ShowState::Dismissed, None, None))
         );
         let closed = f.app.window("main").unwrap();
         f.app.window_destroyed("main");
         assert_eq!(
             f.app
-                .show_in(&closed, args, Vec::new(), "Claude", Budget::new()),
+                .show_in(&closed, args, Vec::new(), None, "Claude", Budget::new()),
             Err(CLOSED.to_owned())
         );
         assert!(started.elapsed() < UI_WAIT);
@@ -3483,6 +3580,201 @@ mod tests {
             f.state.agent_places(&path, &[notes_1]),
             Ok(places.into_iter().map(Some).collect::<Vec<_>>())
         );
+    }
+
+    /// What a show sent the windows from the `from`th event on, in order.
+    #[derive(Debug, PartialEq)]
+    enum Sent {
+        /// `doc-changed`: the window shows the file afresh.
+        Afresh(Target, PathBuf),
+        /// `agent-request`.
+        Request(Target),
+    }
+
+    fn sent_from(host: &FakeHost, from: usize) -> Vec<Sent> {
+        lock(&host.events)
+            .iter()
+            .skip(from)
+            .filter_map(|(target, e)| match e {
+                UiEvent::DocChanged(path) => Some(Sent::Afresh(target.clone(), path.clone())),
+                UiEvent::AgentRequest(_) => Some(Sent::Request(target.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The vault, indexed, with plan.md (`ROLLOUT`) on screen in Main's window, whose UI is up:
+    /// nothing renders it again by itself (its links resolved), so every `doc-changed` is a show's.
+    fn plan_on_screen() -> (Fixture, PathBuf) {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", ROLLOUT);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        wait_until("the root is indexed", || settled(&f, &root));
+        let _ = f.state.startup();
+        f.state.ui_shown.open();
+        let _ = f.state.open_document(&path_string(&plan));
+        (f, plan)
+    }
+
+    /// `request` from Claude, answered `shown` by Main's UI: the answer, the places sent with it,
+    /// and what reached the windows meanwhile.
+    fn shown_with(f: &Fixture, request: AgentRequest) -> (Value, Vec<TextPlace>, Vec<Sent>) {
+        let from = lock(&f.host.events).len();
+        let answering = ui_answers(f, "main", vec![AgentReply::Shown { target: None }]);
+        let answer = f.app.agent_answer(request, &claude()).unwrap();
+        let (_, call) = answering.join().unwrap();
+        (answer, shown_target(call).1, sent_from(&f.host, from))
+    }
+
+    /// The live ordering: an agent edits the note on screen and shows a passage in it before the
+    /// watcher has told the window. Core finds the target in the file as it is on disk (a line
+    /// only the new text has is taken), and the window is told to show the file afresh before the
+    /// request goes to it, so the request, which reaches it after, lands in the file as it is now.
+    #[test]
+    fn a_show_of_the_file_on_screen_changed_on_disk_has_it_shown_afresh_first() {
+        let (f, plan) = plan_on_screen();
+        let main = || Target::Window("main".to_owned());
+        // Two paragraphs land before Rollout, now on line 7; no watcher event reaches the window.
+        fs::write(
+            &plan,
+            "# Plan\n\nIntro.\n\nMore.\n\n## Rollout\n\nRoll back the migration first.\n",
+        )
+        .unwrap();
+        let (answer, places, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(places, vec![place((7, 7), (18, 25), 0)]);
+        assert_eq!(
+            sent,
+            vec![Sent::Afresh(main(), plan.clone()), Sent::Request(main())]
+        );
+        // A line the text on screen doesn't reach yet, only the file as it is now.
+        fs::write(
+            &plan,
+            "# Plan\n\nIntro.\n\nMore.\n\n## Rollout\n\nRoll back the migration first.\n\nThen \
+             tell the team.\n",
+        )
+        .unwrap();
+        let (answer, places, sent) = shown_with(&f, show_at(&plan, AgentTarget::Line { line: 11 }));
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(
+            places.iter().map(|p| p.start_line).collect::<Vec<_>>(),
+            vec![11]
+        );
+        assert_eq!(
+            sent,
+            vec![Sent::Afresh(main(), plan), Sent::Request(main())]
+        );
+    }
+
+    /// A show of the file on screen, unchanged on disk since the window rendered it, goes to the
+    /// window as before: nothing is shown afresh. That takes no more than the size and modified
+    /// time the show stats the file for anyway.
+    #[test]
+    fn a_show_of_the_file_on_screen_unchanged_on_disk_shows_nothing_afresh() {
+        let (f, plan) = plan_on_screen();
+        let (answer, places, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(places, vec![place((3, 3), (5, 12), 0)]);
+        assert_eq!(sent, vec![Sent::Request(Target::Window("main".to_owned()))]);
+        // Changed, then shown afresh by the window (its refresh opens it again): nothing more.
+        fs::write(&plan, "# Plan\n\nIntro.\n\n## Rollout\n\nRoll back.\n").unwrap();
+        let _ = f.state.open_document(&path_string(&plan));
+        let (_, places, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(places, vec![place((5, 5), (12, 19), 0)]);
+        assert_eq!(sent, vec![Sent::Request(Target::Window("main".to_owned()))]);
+    }
+
+    /// The size and modified time decide whether the file on screen changed, as the render cache
+    /// has them decide; when only the time moved, its text does: touched, it's the same file, and
+    /// nothing is shown afresh; rewritten to the same length, it isn't, and the window shows it
+    /// afresh first.
+    #[test]
+    fn the_text_decides_when_only_the_modified_time_of_the_file_on_screen_moved() {
+        let (f, plan) = plan_on_screen();
+        let main = || Target::Window("main".to_owned());
+        touch(&plan, 1_000_000);
+        let (_, _, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(sent, vec![Sent::Request(main())]);
+        rewritten_to_the_same_length(&plan);
+        let (_, _, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(
+            sent,
+            vec![Sent::Afresh(main(), plan), Sent::Request(main())]
+        );
+    }
+
+    /// Sets `path`'s modified time to `seconds` past the epoch.
+    fn touch(path: &Path, seconds: u64) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    /// plan.md (`ROLLOUT`) rewritten to the same length, "first" become "today", its modified time
+    /// moved: whether it changed takes reading its text.
+    fn rewritten_to_the_same_length(plan: &Path) {
+        fs::write(plan, ROLLOUT.replace("first", "today")).unwrap();
+        touch(plan, 2_000_000);
+    }
+
+    /// Reading the file on screen to see whether it changed (`before_fresh_read`) takes `ms`.
+    fn slow_fresh_read(f: &Fixture, ms: u64) {
+        *lock(&f.app.agent_calls.before_fresh_read) =
+            Some(Box::new(move || thread::sleep(Duration::from_millis(ms))));
+    }
+
+    /// The look at the file on screen comes out of the show's own time: reading it slowly (a
+    /// share), the window's time to answer, and the wait for that answer, are what is left after
+    /// it, so a show whose window doesn't answer still answers within its time.
+    #[test]
+    fn a_slow_look_at_the_file_on_screen_comes_out_of_the_shows_time() {
+        let (f, plan) = plan_on_screen();
+        rewritten_to_the_same_length(&plan);
+        slow_fresh_read(&f, 600);
+        let from = lock(&f.host.events).len();
+        let given = Duration::from_millis(1500);
+        let started = Instant::now();
+        let args = ShowArgs {
+            path: path_string(&plan),
+            workspace: None,
+            target: Some(heading("Rollout")),
+            new_window: false,
+            wait: 0,
+        };
+        assert_eq!(
+            f.app
+                .agent_show(args, &claude(), Budget(started + given))
+                .unwrap_err(),
+            "The window didn't answer in time."
+        );
+        let elapsed = started.elapsed();
+        assert!(elapsed < given + Duration::from_millis(200), "{elapsed:?}");
+        let main = Target::Window("main".to_owned());
+        assert_eq!(
+            sent_from(&f.host, from),
+            vec![Sent::Afresh(main.clone(), plan), Sent::Request(main)]
+        );
+        // The 1.5 s, less the 600 ms read.
+        let within = agent_requests(&f.host).pop().unwrap().1.within_ms.unwrap();
+        assert!((500..=900).contains(&within), "{within}");
+    }
+
+    /// A look at the file on screen that can't finish in the time it's given (a stalled share)
+    /// leaves the window as it is: nothing is shown afresh, and the watcher tells it of a change
+    /// once it notices, as before.
+    #[test]
+    fn a_look_at_the_file_on_screen_that_cant_finish_shows_nothing_afresh() {
+        let (f, plan) = plan_on_screen();
+        rewritten_to_the_same_length(&plan);
+        // Longer than the read is given: the fixture's `exists`, 1 s.
+        slow_fresh_read(&f, 1500);
+        let (answer, _, sent) = shown_with(&f, show_at(&plan, heading("Rollout")));
+        assert_eq!(answer["state"], "shown");
+        assert_eq!(sent, vec![Sent::Request(Target::Window("main".to_owned()))]);
     }
 
     /// A window whose UI leaves its document for none (the welcome page, a file deleted while

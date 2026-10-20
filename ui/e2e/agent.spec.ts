@@ -783,6 +783,82 @@ test("a show within the file on screen lands in the revision a change is being s
   await expectLandedOn(page, "section-12");
 });
 
+/**
+ * Edits the plan on disk, with no word of it to the window: a paragraph lands before Section 12,
+ * on line `line`, which moves two lines down.
+ */
+function insertBeforeSection12(page: Page, plan: string, line: number): Promise<void> {
+  return page.evaluate(
+    ({ plan, line }) => {
+      const fake = window.__fake;
+      const html = (fake.html(plan) ?? "").replace(
+        /data-sourcepos="(\d+):(\d+)-(\d+):(\d+)"/g,
+        (_, s: string, a: string, e: string, b: string) => {
+          const shift = (n: string) => String(Number(n) >= line ? Number(n) + 2 : Number(n));
+          return `data-sourcepos="${shift(s)}:${a}-${shift(e)}:${b}"`;
+        },
+      );
+      fake.setDoc(
+        plan,
+        html.replace(
+          '<h2 id="section-12"',
+          `<p data-sourcepos="${String(line)}:1-${String(line)}:9">Inserted.</p><h2 id="section-12"`,
+        ),
+      );
+      const blocks = fake
+        .blocksOf(plan)
+        .map(([s, e, text]): [number, number, string] => [
+          s >= line ? s + 2 : s,
+          e >= line ? e + 2 : e,
+          text,
+        ]);
+      const at = blocks.findIndex(([s]) => s > line);
+      blocks.splice(at, 0, [line, line, "Inserted."]);
+      fake.setText(plan, blocks);
+    },
+    { plan, line },
+  );
+}
+
+test("a show right after an edit of the file on screen, before the watcher tells of it, lands in the file as it is now", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const plan = fixturePath(BIG_PLAN);
+  const line = await page.evaluate(
+    (plan) => window.__fake.blocksOf(plan).find(([, , text]) => text === "Section 12")?.[0] ?? 0,
+    plan,
+  );
+  expect(line).toBeGreaterThan(1);
+  // An agent edits the plan and shows Section 12 at once: Rust finds it two lines down, in the
+  // file as it is now, and the show reaches the window before the watcher has told of the edit.
+  await insertBeforeSection12(page, plan, line);
+  const shown = await page.evaluate(
+    ({ plan, line }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path: plan, target: { heading: "Section 12" }, newWindow: false, wait: 0 },
+        "Claude",
+        [{ startLine: line + 2, endLine: line + 2 }],
+      ),
+    { plan, line },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  // Rust had the window show the plan afresh first: the edit had rendered as the show answered,
+  // and Section 12 landed in it.
+  const inserted = page.locator("#lx-doc p", { hasText: /^Inserted\.$/ });
+  expect(await inserted.count()).toBe(1);
+  await expectLandedOn(page, "section-12");
+  // The watcher catches up: the same text again, so nothing moves.
+  const scrollTop = () => page.locator("#lx-doc-pane").evaluate((el) => el.scrollTop);
+  const top = await scrollTop();
+  await page.evaluate((plan) => {
+    window.__fake.emit("doc-changed", { path: plan });
+  }, plan);
+  await page.waitForTimeout(300);
+  expect(await scrollTop()).toBe(top);
+  await expectLandedOn(page, "section-12");
+});
+
 const REPORT = "artifacts/report.html";
 
 /** The text of each range the page's bridge paints in the agent's layer, in the page. */

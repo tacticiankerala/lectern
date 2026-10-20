@@ -14,7 +14,9 @@
 // where its targets are in a note as the test gives them (Rust's core would find them), which
 // answers with what the UI replies, as Rust would wait for it; what became of a `show` the UI asked
 // the reader about, which it tells Rust later, is kept in `agentAnswers`. Targets found again
-// (`agentPlaces`) are looked for in the note as the window's last open read it, as Rust keeps it.
+// (`agentPlaces`) are looked for in the note as the window's last open read it, as Rust keeps it;
+// and a `show` of that note, changed since (`setDoc`, `setText`), has `doc-changed` sent first, as
+// Rust has the window show it afresh before the request goes to it.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -314,7 +316,8 @@ export interface FakeControl {
    * (`places`, none when not given) and how long Rust waits for the answer (`withinMs`: 5 s when
    * not given, as Rust gives a window that's up; null for no deadline, as Rust sends a show it
    * has stopped waiting for, held for the window's start); answers with the UI's reply. The
-   * requests are numbered from 1.
+   * requests are numbered from 1. A show of the note the window last opened, changed since that
+   * open read it, has `doc-changed` sent first, as Rust does, whether or not a test has sent one.
    */
   agentRequest(
     request: AgentRequest,
@@ -1566,8 +1569,32 @@ export class FakeBackend implements Backend, FakeControl {
     const call: AgentCall = { id, request, agent };
     if (places.length > 0) call.places = places;
     if (withinMs !== null) call.withinMs = withinMs;
+    const afresh = request.tool === "show" ? this.changedSinceOpen(request.path) : null;
+    if (afresh !== null) {
+      // As Rust: the window shows the note afresh first, as the watcher would once it noticed.
+      this.emit("doc-changed", { path: afresh });
+    }
     this.emit("agent-request", call);
     return replied;
+  }
+
+  /**
+   * As Rust decides before an agent's show of `path` goes to the window: the path of the note or
+   * text file the window last opened, when it is `path` and has changed since that open read it
+   * (its HTML or core's text isn't what the open had); else null.
+   */
+  private changedSinceOpen(path: string): string | null {
+    const shown = this.rendered;
+    const now = this.docs.get(key(path));
+    const kind = this.kinds.get(key(path)) ?? "markdown";
+    const changed =
+      shown !== null &&
+      now !== undefined &&
+      key(shown.path) === key(path) &&
+      (kind === "markdown" || kind === "text") &&
+      (now.doc.html !== shown.html ||
+        JSON.stringify(this.textBlocks.get(key(path)) ?? []) !== JSON.stringify(shown.blocks));
+    return changed ? shown.path : null;
   }
 
   /**
