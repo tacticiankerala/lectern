@@ -94,6 +94,8 @@ claude mcp add --scope user lectern -- "C:\Users\me\AppData\Local\Lectern\lecter
 
 From WSL, the shell fills in the distribution you run it in, so a Linux path Claude gives, such as `/home/me/notes/plan.md`, opens from that distribution. Lectern starts by itself the first time Claude needs it. A portable copy must stay where it is, or be registered again after you move it.
 
+**After an update,** the installer closes Lectern's MCP server in every Claude Code session that's open, so their Lectern tools stop answering. In each of those sessions, run `/mcp reconnect lectern`, or pick **Reconnect** for lectern under `/mcp`; new sessions connect by themselves. An installed copy keeps its path through updates, so there's nothing to register again.
+
 **What Claude can do,** with nine tools:
 
 - **status** tells what each window shows: its workspace, the file, the section in view and what you've selected, so "explain this bit" works without copying it.
