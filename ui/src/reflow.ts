@@ -26,10 +26,14 @@ const placing = new WeakMap<HTMLElement, () => void>();
  * content-visibility kept at an estimated height take their real one as they come near the
  * viewport, which moves `el` by up to thousands of pixels a frame or two later; so the position
  * is corrected every frame until `el` has held still for a few frames, for at most a second, and
- * not once the reader scrolls. A newer placement in the same scroller replaces this one.
+ * not once the reader scrolls. A newer placement in the same scroller replaces this one, and so
+ * does another document rendered in it (`stopPlacing`). `el` may be a range of text, such as one
+ * line of a long paragraph: its placing ends once the text it started in is gone, as a live range
+ * moves to what is left of the document.
  */
-export function placeAt(scroller: HTMLElement, el: HTMLElement, at: number): void {
-  placing.get(scroller)?.();
+export function placeAt(scroller: HTMLElement, el: Element | Range, at: number): void {
+  stopPlacing(scroller);
+  const node = el instanceof Range ? el.startContainer : el;
   const correct = (): number => {
     const delta = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - at;
     if (Math.abs(delta) > 0.5) {
@@ -51,7 +55,7 @@ export function placeAt(scroller: HTMLElement, el: HTMLElement, at: number): voi
     }
   };
   const tick = (): void => {
-    if (!el.isConnected || performance.now() - started > PLACE_MS) {
+    if (!node.isConnected || performance.now() - started > PLACE_MS) {
       stop();
       return;
     }
@@ -67,6 +71,11 @@ export function placeAt(scroller: HTMLElement, el: HTMLElement, at: number): voi
   }
   frame = requestAnimationFrame(tick);
   placing.set(scroller, stop);
+}
+
+/** Stops the placing in progress in `scroller`, if any: another document is rendered there. */
+export function stopPlacing(scroller: HTMLElement): void {
+  placing.get(scroller)?.();
 }
 
 /** A reading spot held across a reflow: a block, and how far down it the pane's top falls. */

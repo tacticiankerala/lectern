@@ -14,10 +14,11 @@
 //   answered, once it has); an older answer is dropped.
 // - Opening or creating a workspace here first asks the app whether the window may leave (unsaved
 //   comment text is confirmed; the settings and the reading position are saved), and once Rust
-//   has turned the window to it, the page stops its listeners (Rust would keep them otherwise) and
-//   reloads through the normal startup. A workspace open in another window is asked for in a new
-//   window, which brings that window forward and never turns this one, so nothing is asked. While
-//   one is being opened or made, asking again joins it.
+//   has turned the window to it, a request an agent asked the reader about is dismissed, the page
+//   stops its listeners (Rust would keep them otherwise) and reloads through the normal startup.
+//   A workspace open in another window is asked for in a new window, which brings that window
+//   forward and never turns this one, so nothing is asked. While one is being opened or made,
+//   asking again joins it.
 // - In a blank window a folder (Add folder, a drop, an Explorer launch) asks for a new workspace's
 //   name, then makes one holding the folder, here or in a new window. Cancelling drops it. Rust
 //   says which paths are folders (`UserOpen.folder`, `OpenRequest.folder`); a file opens as a
@@ -293,9 +294,12 @@ export class Workspaces {
       if ((await call()) === "reload") {
         // Bounded: the reload must happen even if Rust is slow to answer.
         await Promise.race([
-          this.app.backend.stopListening().catch((e: unknown) => {
-            console.warn(e);
-          }),
+          Promise.all([
+            this.app.agentLeaving(),
+            this.app.backend.stopListening().catch((e: unknown) => {
+              console.warn(e);
+            }),
+          ]),
           new Promise((resolve) => setTimeout(resolve, STOP_LISTENING_MS)),
         ]);
         this.app.reloadWindow();

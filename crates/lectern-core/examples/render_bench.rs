@@ -151,10 +151,12 @@ fn review_of(source: &str) -> Review {
             end_line: block.end_line,
             quote,
             prefix: String::new(),
+            text_start: None,
         };
         let op = ReviewOp::Add {
             anchor,
             text: format!("Comment {i}"),
+            author: None,
         };
         ops::apply(&mut review, &op, &ctx).expect("a comment on the plan is added");
     }

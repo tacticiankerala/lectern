@@ -3,8 +3,9 @@
 // `?many=<n>` adds n more, "Notebook 1" to "Notebook n", closed with no folders, `?recent=<n>`
 // makes the first n fixture documents the recent files, and `?blank` starts a blank window.
 // `window.__lxDocText()` reads the page's visible text as the review comments do, to check it
-// against core's (`__fake.coreText`). `window.__lxPage()` is what the HTML page on screen has
-// reported through its bridge.
+// against core's (`__fake.coreText`); given a selector, the text of that block alone. `window.__lxPage()` is what the HTML page on screen has
+// reported through its bridge. `window.__lxViewTop()` is the block at the top of the document
+// pane: the source line it starts on, and how far below the pane's top it is.
 import { App } from "../src/app";
 import { docText } from "../src/comments-text";
 import { byId } from "../src/dom";
@@ -30,14 +31,30 @@ interface PageState {
 
 declare global {
   interface Window {
-    __lxDocText: () => string;
+    __lxDocText: (block?: string) => string;
     __lxPage: () => PageState | null;
+    __lxViewTop: () => { line: number; offset: number } | null;
   }
 }
 
-window.__lxDocText = () => {
-  const doc = document.querySelector(".doc");
+window.__lxDocText = (block?: string) => {
+  const doc = document.querySelector(block === undefined ? ".doc" : `.doc ${block}`);
   return doc ? docText(doc) : "";
+};
+
+window.__lxViewTop = () => {
+  const pane = document.getElementById("lx-doc-pane");
+  const doc = document.querySelector(".doc");
+  if (!pane || !doc) return null;
+  const top = pane.getBoundingClientRect().top;
+  for (const block of doc.children) {
+    const box = block.getBoundingClientRect();
+    if (box.bottom <= top) continue;
+    const lined = block.closest("[data-sourcepos]") ?? block.querySelector("[data-sourcepos]");
+    const line = Number(/^(\d+):/.exec(lined?.getAttribute("data-sourcepos") ?? "")?.[1] ?? NaN);
+    return { line, offset: Math.round(box.top - top) };
+  }
+  return null;
 };
 
 /** The `n`th workspace `?many` adds: closed, with no folders. */

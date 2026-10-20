@@ -339,16 +339,18 @@ impl WindowState {
     }
 
     /// Indexes the folder of `doc` when no root covers it, replacing the previous ad-hoc root.
-    /// Only while the open numbered `seq` is still the current document, checked under the
+    /// Only while the open numbered `generation` is still the current document, checked under the
     /// library lock: an open that stalled (on the asset scope, say) must not replace the ad-hoc
     /// root of a document opened since.
-    pub(super) fn ensure_root_for(self: &Arc<Self>, doc: &Path, seq: u64) {
+    pub(super) fn ensure_root_for(self: &Arc<Self>, doc: &Path, generation: u64) {
         let Some(folder) = doc.parent().map(Path::to_path_buf) else {
             return;
         };
         let dropped = {
             let mut lib = lock(&self.library);
-            let still_current = lock(&self.current).as_ref().is_some_and(|c| c.seq == seq);
+            let still_current = lock(&self.current)
+                .as_ref()
+                .is_some_and(|c| c.generation == generation);
             if !still_current || lib.roots.iter().any(|r| is_under(doc, &r.path)) {
                 return;
             }

@@ -23,10 +23,10 @@ use super::pages::{self, MAX_BYTES as MAX_PAGE_BYTES};
 use super::sync::{lock, read};
 use super::{trust, WindowState};
 
-const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
+pub(super) const FEATURE_OFF: &str = "Review comments are turned off in Preferences.";
 const NOT_OPEN: &str = "Comments can only be loaded or saved for the open note.";
-const NOT_A_NOTE: &str = "Comments can only be added to notes, text files and pages.";
-const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
+pub(super) const NOT_A_NOTE: &str = "Comments can only be added to notes, text files and pages.";
+pub(super) const NOT_ON_A_PDF: &str = "PDFs don't take comments.";
 const NO_PAGE_TEXT: &str =
     "The page hasn't reported its text yet, so its comments can't be placed.";
 const PAGE_TOO_LONG: &str = "The page's text is over 2 MB, too much for comments.";
@@ -81,7 +81,7 @@ impl Target {
 /// The source of the HTML page at `path`, read as the browser reads the page: whatever it holds
 /// (a NUL is a character, not a sign of a binary file), invalid bytes replaced, up to the page
 /// protocol's 20 MiB, past which it isn't read.
-fn read_page_source(path: &Path) -> Result<String, String> {
+pub(super) fn read_page_source(path: &Path) -> Result<String, String> {
     match pages::read(path, MAX_PAGE_BYTES) {
         Ok(bytes) => Ok(decode_lossy(&bytes).text),
         Err(e) if e.kind() == io::ErrorKind::FileTooLarge => Err(PAGE_TOO_LARGE.to_owned()),
@@ -118,7 +118,8 @@ impl WindowState {
     }
 
     /// Applies `op` to the open note's sidecar, creating it if need be, and returns the comments
-    /// as saved. An HTML page's take its text (`page`, see `Target::page`).
+    /// as saved, with the one `op` changed. An HTML page's take its text (`page`, see
+    /// `Target::page`).
     pub fn review_op(
         &self,
         path: &str,
@@ -130,14 +131,17 @@ impl WindowState {
         let note = target.read(page.as_deref())?;
         let now = iso_utc(SystemTime::now());
         let saved = store::apply_op_on(&target.sidecar, &target.note_name, &note, &op, &now);
-        let (review, _) = saved.map_err(|e| {
+        let (review, changed) = saved.map_err(|e| {
             log::warn!(
                 "couldn't save a review comment to {}: {e}",
                 target.sidecar.display()
             );
             e.to_string()
         })?;
-        Ok(self.review_payload(&target, Some((&review, &note)), None))
+        Ok(ReviewPayload {
+            changed: Some(changed),
+            ..self.review_payload(&target, Some((&review, &note)), None)
+        })
     }
 
     /// Whether review comments are on.
@@ -252,8 +256,10 @@ mod tests {
                 end_line: 5,
                 quote: "batches of at most 50".to_owned(),
                 prefix: String::new(),
+                text_start: None,
             },
             text: text.to_owned(),
+            author: None,
         }
     }
 
@@ -310,6 +316,7 @@ mod tests {
             payload.sidecar_wsl_path
         );
         assert_eq!(payload.open_count, 1);
+        assert_eq!(payload.changed, Some(1), "the comment the op added");
         let [comment] = payload.comments.as_slice() else {
             panic!("{:?}", payload.comments);
         };
@@ -325,6 +332,7 @@ mod tests {
 
         let loaded = f.state.load_review(&path, None).unwrap();
         assert!(loaded.exists);
+        assert_eq!(loaded.changed, None, "a load changes nothing");
         let [again] = loaded.comments.as_slice() else {
             panic!("{:?}", loaded.comments);
         };
@@ -339,6 +347,7 @@ mod tests {
         let reply = ReviewOp::Reply {
             id: 9,
             text: "Agreed.".to_owned(),
+            author: None,
         };
         assert_eq!(
             f.state
@@ -381,8 +390,7 @@ mod tests {
         );
         assert!(!note.with_file_name("tide.review.md").exists());
         // A relative path is refused even when it is the current one, which no open makes it.
-        f.state
-            .make_current(f.state.next_seq(), Path::new("tide.md"), None);
+        f.state.make_current(1, Path::new("tide.md"), None);
         assert_eq!(f.state.load_review("tide.md", None).unwrap_err(), NOT_OPEN);
         assert_eq!(
             f.state
@@ -487,8 +495,10 @@ mod tests {
                 end_line: 0,
                 quote: quote.to_owned(),
                 prefix: prefix.to_owned(),
+                text_start: None,
             },
             text: text.to_owned(),
+            author: None,
         }
     }
 
@@ -862,7 +872,8 @@ mod tests {
             panic!("{:?}", loaded.comments);
         };
         assert_eq!(agents.state, AnchorState::Anchored);
-        assert_eq!((agents.start_line, agents.end_line), (1, 2));
+        // On the line its quote is on, of its paragraph's two.
+        assert_eq!((agents.start_line, agents.end_line), (1, 1));
 
         let add = ReviewOp::Add {
             anchor: NewAnchor {
@@ -870,16 +881,18 @@ mod tests {
                 end_line: 5,
                 quote: "lanternfish survey is plain text".to_owned(),
                 prefix: "Every word is invented. The ".to_owned(),
+                text_start: None,
             },
             text: "Which survey?".to_owned(),
+            author: None,
         };
         let payload = f.state.review_op(&path, add, None).unwrap();
         let ours = &payload.comments[1];
         assert_eq!(ours.state, AnchorState::Anchored);
-        assert_eq!((ours.start_line, ours.end_line), (4, 5));
+        assert_eq!((ours.start_line, ours.end_line), (4, 4));
         assert!(ours.heading_path.is_empty());
         let saved = fs::read_to_string(&sidecar).unwrap();
-        assert!(saved.contains("\n## C2 · open · L4–L5\n"), "{saved}");
+        assert!(saved.contains("\n## C2 · open · L4\n"), "{saved}");
         assert!(
             saved.contains("\n> lanternfish survey is plain text\n"),
             "{saved}"
@@ -895,13 +908,13 @@ mod tests {
         let loaded = f.state.load_review(&path, None).unwrap();
         let moved = &loaded.comments[1];
         assert_eq!(moved.state, AnchorState::Anchored);
-        assert_eq!((moved.start_line, moved.end_line), (6, 7));
+        assert_eq!((moved.start_line, moved.end_line), (6, 6));
         // Reworded: found again by its words, as moved.
         fs::write(&text, TEXT.replace("is plain text", "is now plain text")).unwrap();
         let loaded = f.state.load_review(&path, None).unwrap();
         let reworded = &loaded.comments[1];
         assert_eq!(reworded.state, AnchorState::Moved);
-        assert_eq!((reworded.start_line, reworded.end_line), (4, 5));
+        assert_eq!((reworded.start_line, reworded.end_line), (4, 4));
     }
 
     #[test]
@@ -933,8 +946,7 @@ mod tests {
         let doc = r"\\lectern-untrusted.invalid\share\a.md";
         let refusal = trust::refusal(doc);
         // Current as a failed open would leave it, so only the trust check stands in the way.
-        f.state
-            .make_current(f.state.next_seq(), Path::new(doc), None);
+        f.state.make_current(1, Path::new(doc), None);
         let started = Instant::now();
         assert_eq!(f.state.load_review(doc, None).unwrap_err(), refusal);
         assert_eq!(

@@ -81,6 +81,19 @@ fn is_capped(quote: &str) -> bool {
     match_part(quote).len() != quote.len()
 }
 
+/// How far the lines `lines` of a candidate are from a comment's stored lines `stored`: none when
+/// they overlap (the quote's own lines fall within its block's, which an older sidecar stores),
+/// else the gap to the nearer edge. Never the distance between first lines: a quote on the last
+/// line of a long paragraph is in that paragraph, not nearest the block after it.
+fn line_distance(stored: (u32, u32), lines: (u32, u32)) -> u32 {
+    let (stored_end, lines_end) = (stored.1.max(stored.0), lines.1.max(lines.0));
+    // At most one of the two is a gap; overlapping, both are 0.
+    lines
+        .0
+        .saturating_sub(stored_end)
+        .max(stored.0.saturating_sub(lines_end))
+}
+
 /// The lines of a comment whose quote was found word for word at `span`. A capped quote is only
 /// the start of the passage, so the stored range moves with it, keeping its length, rather than
 /// shrinking to the excerpt.
@@ -105,9 +118,12 @@ pub struct AnchorParts {
 
 /// Anchors a new comment, or a reattached one, to the text the UI sent.
 ///
-/// The whole selection is found in the note's text, preferring an occurrence within the given
-/// lines and, among those, the one after the text the UI saw before the selection; it gives the
-/// lines, prefix and suffix. Only its first [`QUOTE_CAP`] characters are stored as the quote. A
+/// A selection sent with where it starts (`text_start`, an agent's) is anchored there, when the
+/// text there is the selection. Otherwise the whole selection is found in the note's text,
+/// preferring an occurrence within the given lines and, among those, the one after the text the
+/// UI saw before the selection; it gives the lines (where the selection sits, line by line:
+/// [`TextMap::lines_of`]), prefix and suffix. Only its first [`QUOTE_CAP`] characters are stored
+/// as the quote. A
 /// selection that isn't there whole is looked for by that excerpt. If neither is there (the UI
 /// and core disagree, or the note changed under the reader), the given lines are kept with an
 /// empty fingerprint, so they are never trusted. An anchor that came with no lines (line 0: a
@@ -125,11 +141,13 @@ pub fn make_anchor(
     let quote = cap_quote(&selection);
     let excerpt = needle(&quote);
     let (start, end) = (a.start_line, a.end_line.max(a.start_line));
-    let found = occurrence_near(text, &selection, &a.prefix, start, end).or_else(|| {
-        (excerpt != selection)
-            .then(|| occurrence_near(text, &excerpt, &a.prefix, start, end))
-            .flatten()
-    });
+    let found = exact_place(text, a.text_start, &selection)
+        .or_else(|| occurrence_near(text, &selection, (&a.prefix, ""), start, end))
+        .or_else(|| {
+            (excerpt != selection)
+                .then(|| occurrence_near(text, &excerpt, (&a.prefix, ""), start, end))
+                .flatten()
+        });
     let meta = |prefix, suffix, fp: &str| AnchorMeta {
         prefix,
         suffix,
@@ -175,13 +193,32 @@ pub fn make_anchor(
     }
 }
 
+/// The span of `selection` at UTF-16 offset `at` of `text`, when the text there is the selection.
+fn exact_place(text: &TextMap, at: Option<u32>, selection: &str) -> Option<(usize, usize)> {
+    let t = text.text();
+    let wanted = usize::try_from(at?).ok()?;
+    let mut units = 0;
+    let mut byte = None;
+    for (i, c) in t.char_indices().chain(std::iter::once((t.len(), ' '))) {
+        if units >= wanted {
+            byte = (units == wanted).then_some(i);
+            break;
+        }
+        units += c.len_utf16();
+    }
+    let byte = byte?;
+    (!selection.is_empty() && t[byte..].starts_with(selection))
+        .then(|| (byte, byte + selection.len()))
+}
+
 /// The occurrence of `needle` to anchor on: one whose lines lie within `start..=end`, else one
-/// overlapping them, else any; of those, the one whose text before it agrees most with `prefix`
-/// (as [`best_by_context`] scores it), then the one starting nearest `start`, then the earliest.
+/// overlapping them, else any; of those, the one whose text before and after it agrees most with
+/// `prefix` and `suffix` (as [`best_by_context`] scores it), then the one whose lines are nearest
+/// `start..=end` ([`line_distance`]), then the earliest.
 fn occurrence_near(
     text: &TextMap,
     needle: &str,
-    prefix: &str,
+    (prefix, suffix): (&str, &str),
     start: u32,
     end: u32,
 ) -> Option<(usize, usize)> {
@@ -197,8 +234,9 @@ fn occurrence_near(
             } else {
                 2
             };
-            let agreement = common_suffix(&t[..s], prefix);
-            ((fit, Reverse(agreement), first.abs_diff(start)), span)
+            let agreement = common_suffix(&t[..s], prefix) + common_prefix(&t[span.1..], suffix);
+            let distance = line_distance((start, end), (first, last));
+            ((fit, Reverse(agreement), distance), span)
         })
         .min_by_key(|&(key, _)| key)
         .map(|(_, span)| span)
@@ -210,7 +248,10 @@ fn occurrence_near(
 /// is twice in `a a a`). A longer one is matched end to end: visiting the overlapping
 /// occurrences costs the needle's length each, and a needle that long which overlaps itself is
 /// repeated text, in which one occurrence is as good as another.
-fn occurrences<'h>(haystack: &'h str, needle: &'h str) -> impl Iterator<Item = usize> + 'h {
+pub(crate) fn occurrences<'h>(
+    haystack: &'h str,
+    needle: &'h str,
+) -> impl Iterator<Item = usize> + 'h {
     let overlapping = needle.chars().nth(QUOTE_CAP).is_none();
     let mut from = 0;
     std::iter::from_fn(move || {
@@ -230,12 +271,17 @@ fn occurrences<'h>(haystack: &'h str, needle: &'h str) -> impl Iterator<Item = u
 
 /// Where the quote of a comment found at its stored place (the note unchanged since it was
 /// anchored, so [`resolve_all`] didn't look for it) is in the text: its occurrence in the stored
-/// lines, told apart from others there by the stored prefix, as when it was anchored. `None` when
-/// the quote isn't in the text.
+/// lines, told apart from others there by the stored prefix and suffix (a capped quote's suffix
+/// follows the whole passage, so only its prefix), as when it was anchored. `None` when the quote
+/// isn't in the text.
 pub fn stored_span(c: &Comment, text: &TextMap) -> Option<(usize, usize)> {
-    let prefix = c.anchor.as_ref().map_or("", |a| a.prefix.as_str());
+    let context = match &c.anchor {
+        Some(a) if is_capped(&c.quote) => (a.prefix.as_str(), ""),
+        Some(a) => (a.prefix.as_str(), a.suffix.as_str()),
+        None => ("", ""),
+    };
     let end = c.end_line.max(c.start_line);
-    occurrence_near(text, &needle(&c.quote), prefix, c.start_line, end)
+    occurrence_near(text, &needle(&c.quote), context, c.start_line, end)
 }
 
 /// Finds every comment's quote in the note: one result per comment, in file order.
@@ -277,7 +323,7 @@ fn resolve<'t>(
         Some(a) => (a.prefix.as_str(), a.suffix.as_str()),
         None => ("", ""),
     };
-    if let Some((s, e)) = best_by_context(text, &needle, prefix, suffix, c.start_line) {
+    if let Some((s, e)) = best_by_context(text, &needle, prefix, suffix, stored) {
         return at(
             AnchorState::Anchored,
             anchored_lines(c, text, (s, e)),
@@ -305,21 +351,22 @@ fn resolve<'t>(
 }
 
 /// The occurrence of `needle` whose surroundings agree most with the stored `prefix` and
-/// `suffix`; on a tie the one starting nearest `line`, then the earliest.
+/// `suffix`; on a tie the one whose lines are nearest the `stored` lines ([`line_distance`]), then
+/// the earliest.
 fn best_by_context(
     text: &TextMap,
     needle: &str,
     prefix: &str,
     suffix: &str,
-    line: u32,
+    stored: (u32, u32),
 ) -> Option<(usize, usize)> {
     let t = text.text();
-    // (score, distance to `line` once worked out, span)
+    // (score, distance to the stored lines once worked out, span)
     let mut best: Option<(usize, Option<u32>, (usize, usize))> = None;
     for s in occurrences(t, needle) {
         let e = s + needle.len();
         let score = common_suffix(&t[..s], prefix) + common_prefix(&t[e..], suffix);
-        let distance = |span: (usize, usize)| text.lines_of(span.0, span.1).0.abs_diff(line);
+        let distance = |span: (usize, usize)| line_distance(stored, text.lines_of(span.0, span.1));
         best = match best {
             Some((top, _, _)) if score < top => best,
             Some((top, top_distance, top_span)) if score == top => {
@@ -338,7 +385,7 @@ fn best_by_context(
 }
 
 /// How many characters `a` and `b` share at their ends.
-fn common_suffix(a: &str, b: &str) -> usize {
+pub(crate) fn common_suffix(a: &str, b: &str) -> usize {
     a.chars()
         .rev()
         .zip(b.chars().rev())
@@ -347,7 +394,7 @@ fn common_suffix(a: &str, b: &str) -> usize {
 }
 
 /// How many characters `a` and `b` share at their starts.
-fn common_prefix(a: &str, b: &str) -> usize {
+pub(crate) fn common_prefix(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
@@ -445,7 +492,9 @@ impl<'t> Fuzzy<'t> {
 
     /// The span of the run of tokens, as many as the quote has, that holds the largest share of
     /// the quote's `words`, if that share (plus the heading bonus) reaches the threshold. On a tie
-    /// the run starting nearest the comment's stored line wins, then the earliest.
+    /// the run whose block's lines are nearest the comment's stored lines ([`line_distance`])
+    /// wins, then the earliest. (The block's lines, not the run's: a run over the end of one block
+    /// and the start of the next is as near as either.)
     fn find(&mut self, words: &[String], c: &Comment) -> Option<(usize, usize)> {
         let m = words.len();
         let n = self.ids.len();
@@ -471,6 +520,7 @@ impl<'t> Fuzzy<'t> {
         for &id in &ids[..w] {
             overlap += usize::from(add(have, need, id));
         }
+        let stored = (c.start_line, c.end_line);
         // Scores are in twentieths of a word, so the threshold and the bonus compare exactly.
         let mut best: Option<(usize, u32, usize)> = None; // (score, distance, first token)
         for first in 0..=n - w {
@@ -488,7 +538,7 @@ impl<'t> Fuzzy<'t> {
             if score < FUZZY_THRESHOLD_TWENTIETHS * m {
                 continue;
             }
-            let distance = block.start_line.abs_diff(c.start_line);
+            let distance = line_distance(stored, (block.start_line, block.end_line));
             let better = match best {
                 None => true,
                 Some((top, top_distance, _)) => {
@@ -526,14 +576,16 @@ fn remove(have: &mut [u16], need: &[u16], id: u32) -> bool {
 }
 
 /// The index in the note's headings of the deepest heading of the comment's path that's still in
-/// the note: of the headings with that text, the one nearest the comment's stored line.
+/// the note: of the headings with that text, the one nearest the comment's stored lines
+/// ([`line_distance`]).
 fn pinned_index(c: &Comment, text: &TextMap) -> Option<usize> {
+    let stored = (c.start_line, c.end_line);
     c.heading_path.iter().rev().find_map(|wanted| {
         text.headings()
             .iter()
             .enumerate()
             .filter(|(_, h)| h.text == *wanted)
-            .min_by_key(|(_, h)| h.line.abs_diff(c.start_line))
+            .min_by_key(|(_, h)| line_distance(stored, (h.line, h.line)))
             .map(|(i, _)| i)
     })
 }

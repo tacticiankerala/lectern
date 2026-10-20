@@ -11,6 +11,9 @@
    from the selection, so comments and matches never look alike. Text keeps ≥ 4.5:1 on either
    highlight over `--bg`, and the dot ≥ 3:1 against it.
 
+   An agent's highlights (`--agent-highlight`) are a translucent violet, a hue apart from both, with
+   the same floor for text over them.
+
    Catppuccin and Nord use their official palettes. Where an official colour misses the 4.5:1 floor
    it keeps its hue and chroma and only its OKLCH lightness moves, as little as passes; each such
    value names its source. */
@@ -33,6 +36,7 @@ html[data-theme="paper"] {
   --comment: rgb(46 139 120 / 0.2);
   --comment-focus: rgb(46 139 120 / 0.38);
   --comment-dot: #2f7d6d;
+  --agent-highlight: rgb(124 92 214 / 0.2);
   --badge-active: #3b7340;
   --badge-blocked: #a8392c;
   --badge-parked: #6f6a60;
@@ -70,6 +74,7 @@ html[data-theme="daylight"] {
   --comment: rgb(26 158 128 / 0.18);
   --comment-focus: rgb(26 158 128 / 0.34);
   --comment-dot: #1a7f6a;
+  --agent-highlight: rgb(120 86 230 / 0.18);
   --badge-active: #1a7f37;
   --badge-blocked: #cf222e;
   --badge-parked: #59636e;
@@ -108,6 +113,7 @@ html[data-theme="sepia"] {
   --comment: rgb(60 130 110 / 0.2);
   --comment-focus: rgb(60 130 110 / 0.36);
   --comment-dot: #3d7566;
+  --agent-highlight: rgb(128 90 170 / 0.2);
   --badge-active: #4d6625;
   --badge-blocked: #a03a22;
   --badge-parked: #6f6250;
@@ -146,6 +152,7 @@ html[data-theme="latte"] {
   --comment: rgb(23 146 153 / 0.2); /* Teal */
   --comment-focus: rgb(23 146 153 / 0.32); /* Teal */
   --comment-dot: #179299; /* Teal */
+  --agent-highlight: rgb(136 57 239 / 0.16); /* Mauve */
   --badge-active: #1f7802; /* Green #40a02b, darkened */
   --badge-blocked: #d20f39; /* Red */
   --badge-parked: #636679; /* Overlay 2 #7c7f93, darkened */
@@ -184,6 +191,7 @@ html[data-theme="graphite"] {
   --comment: rgb(108 194 166 / 0.2);
   --comment-focus: rgb(108 194 166 / 0.3);
   --comment-dot: #6cc2a6;
+  --agent-highlight: rgb(167 139 250 / 0.24);
   --badge-active: #6cc287;
   --badge-blocked: #ec7f86;
   --badge-parked: #9a9da5;
@@ -221,6 +229,7 @@ html[data-theme="midnight"] {
   --comment: rgb(111 209 180 / 0.2);
   --comment-focus: rgb(111 209 180 / 0.3);
   --comment-dot: #6fd1b4;
+  --agent-highlight: rgb(167 139 250 / 0.24);
   --badge-active: #81c995;
   --badge-blocked: #f28b82;
   --badge-parked: #8e8e96;
@@ -259,6 +268,7 @@ html[data-theme="nord"] {
   --comment: rgb(143 188 187 / 0.22); /* nord7 */
   --comment-focus: rgb(143 188 187 / 0.34); /* nord7 */
   --comment-dot: #8fbcbb; /* nord7 */
+  --agent-highlight: rgb(180 142 173 / 0.3); /* nord15 */
   --badge-active: #a3be8c; /* nord14 */
   --badge-blocked: #e28189; /* nord11 #bf616a, lightened */
   --badge-parked: #d8dee9; /* nord4 */
@@ -296,6 +306,7 @@ html[data-theme="mocha"] {
   --comment: rgb(148 226 213 / 0.16); /* Teal */
   --comment-focus: rgb(148 226 213 / 0.26); /* Teal */
   --comment-dot: #94e2d5; /* Teal */
+  --agent-highlight: rgb(203 166 247 / 0.22); /* Mauve */
   --badge-active: #a6e3a1; /* Green */
   --badge-blocked: #f38ba8; /* Red */
   --badge-parked: #9399b2; /* Overlay 2 */

@@ -58,6 +58,7 @@ const lazy = [
   "comments",
   "workspace-menu",
   "page-frame",
+  "agent",
 ];
 await esbuild.build({
   entryPoints: [entry],

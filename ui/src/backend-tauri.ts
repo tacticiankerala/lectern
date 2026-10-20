@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type EventTarget as TauriTarget, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Backend, BackendEvent } from "./backend";
+import type { AgentReply } from "./generated/AgentReply";
+import type { Target } from "./generated/Target";
+import type { TextPlace } from "./generated/TextPlace";
 import type { Candidate } from "./generated/Candidate";
 import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import type { FileHits } from "./generated/FileHits";
@@ -14,6 +17,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -62,12 +66,12 @@ export class TauriBackend implements Backend {
     return invoke<StartupPayload>("startup");
   }
 
-  openDocument(path: string): Promise<OpenResult> {
-    return invoke("open_document", { path });
+  openDocument(path: string, generation: number): Promise<OpenResult> {
+    return invoke("open_document", { path, generation });
   }
 
-  openUserPath(path: string): Promise<UserOpen> {
-    return invoke("open_user_path", { path });
+  openUserPath(path: string, generation: number): Promise<UserOpen> {
+    return invoke("open_user_path", { path, generation });
   }
 
   removeRecent(path: string): Promise<RecentEntry[]> {
@@ -155,6 +159,10 @@ export class TauriBackend implements Backend {
     return invoke("list_wsl_distros");
   }
 
+  lecternExe(): Promise<PathForms> {
+    return invoke("lectern_exe");
+  }
+
   /** Asks GitHub Releases for a newer Lectern (Rust's updater). */
   checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
     return invoke("check_update", { automatic });
@@ -233,6 +241,22 @@ export class TauriBackend implements Backend {
 
   closeWindow(): Promise<void> {
     return invoke("close_window");
+  }
+
+  replyToAgent(id: number, reply: AgentReply): Promise<void> {
+    return invoke("agent_reply", { id, reply });
+  }
+
+  leaveDocument(missing: boolean, generation: number): Promise<void> {
+    return invoke("leave_document", { missing, generation });
+  }
+
+  keepDocument(path: string, generation: number): Promise<boolean> {
+    return invoke("keep_document", { path, generation });
+  }
+
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
+    return invoke("agent_places", { path, targets });
   }
 
   /**

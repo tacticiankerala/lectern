@@ -354,6 +354,13 @@ fn entry_head(line: &str) -> Option<(EntryHead<'_>, &str)> {
     Some((head, caps.get(4).map_or("", |rest| rest.as_str())))
 }
 
+/// Whether an agent's entry under `name` reads back as that agent's, with that name: one an entry
+/// line can hold (see [`ENTRY`]), and not `You`.
+pub(crate) fn holds_agent_name(name: &str) -> bool {
+    entry_head(&format!("**{name} (reply):**"))
+        .is_some_and(|(head, _)| head.author == EntryAuthor::Agent && head.name == name)
+}
+
 fn flush(paragraph: &mut Vec<&str>, notes: &mut Vec<String>) {
     if !paragraph.is_empty() {
         notes.push(paragraph.join("\n"));

@@ -808,6 +808,7 @@ describe("Preferences", () => {
       "WSL distribution",
       "Editor",
       "Updates",
+      "Agents",
       "Workspaces",
     ]);
     expect(dialog.querySelector<HTMLInputElement>(".prefs-ws-name")?.value).toBe("Work");

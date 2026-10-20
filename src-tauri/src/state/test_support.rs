@@ -8,7 +8,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lectern_core::ipc::{FrameKey, OpenResult, PageLoads, RootState, Settings};
+use lectern_core::agent::show::FocusStep;
+use lectern_core::agent::Agent;
+use lectern_core::ipc::{AgentFocus, FrameKey, OpenResult, PageLoads, RootState, Settings};
 use lectern_core::library::pathmap::PathMapper;
 use lectern_core::perf::PerfLog;
 use lectern_core::render::highlight::StartupWarmUp;
@@ -37,6 +39,10 @@ pub(super) struct FakeHost {
     pub(super) opened: Mutex<Vec<(String, bool)>>,
     /// The windows brought forward, in order.
     pub(super) focused: Mutex<Vec<String>>,
+    /// The windows brought forward for an agent, in order, each with the `agentFocus` it had.
+    pub(super) agent_focused: Mutex<Vec<(String, AgentFocus)>>,
+    /// How long each of those was given to say how far it came, in order.
+    pub(super) focus_within: Mutex<Vec<Duration>>,
     /// The app asked to exit.
     pub(super) exited: Mutex<bool>,
 }
@@ -67,6 +73,17 @@ impl Host for FakeHost {
 
     fn focus_window(&self, label: &str) {
         lock(&self.focused).push(label.to_owned());
+    }
+
+    /// Each mode works as asked: `front` takes the foreground.
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep> {
+        lock(&self.agent_focused).push((label.to_owned(), mode));
+        lock(&self.focus_within).push(within);
+        Some(match mode {
+            AgentFocus::Front => FocusStep::Foreground,
+            AgentFocus::Raise => FocusStep::Raised,
+            AgentFocus::None => FocusStep::Flashed,
+        })
     }
 }
 
@@ -357,6 +374,8 @@ fn fixture_full(
             scan_delay,
             // Never in a test: releasing would race the other tests' renders.
             release_after: Duration::from_secs(24 * 60 * 60),
+            // No window a test builds ever shows.
+            shown: Duration::from_millis(100),
         },
         portable: false,
     };
@@ -390,6 +409,11 @@ fn fixture_full(
 
 pub(super) fn fixture(profile: Profile, host: FakeHost) -> Fixture {
     fixture_in(TempDir::new(), profile, host)
+}
+
+/// Claude Code's agent, as the reader sees it, in no WSL distribution of its own.
+pub(super) fn claude() -> Agent {
+    Agent::named("Claude")
 }
 
 pub(super) fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -452,6 +476,18 @@ pub(super) fn early_doc(path: &Path) -> Early {
         doc: Some(EarlyDoc {
             path: path.to_path_buf(),
             from_args: true,
+            outcome: render_file(path, &PathMapper::default(), &[]),
+        }),
+        folder: None,
+    }
+}
+
+/// What boot renders when the command line names nothing: the workspace's last document, restored.
+pub(super) fn restored_doc(path: &Path) -> Early {
+    Early {
+        doc: Some(EarlyDoc {
+            path: path.to_path_buf(),
+            from_args: false,
             outcome: render_file(path, &PathMapper::default(), &[]),
         }),
         folder: None,

@@ -7,8 +7,8 @@
 // its own script element out of the page before any page script runs, so no page script can read
 // it or forge a message.
 //
-// To Lectern: `ready` once the page has loaded (its headings, text blocks, scroll state and colour
-// scheme; after the next animation frame, or a moment, when the window is in the background and
+// To Lectern: `ready` once the page has loaded (its headings, text blocks, with `truncated` when they
+// stopped at the limit, scroll state and colour scheme; after the next animation frame, or a moment, when the window is in the background and
 // draws none), `loaded` once its window's `load` comes (Lectern pairs it with its frame's `load`,
 // so a page that leaves before its own load is told apart): each once a document, on the browser's
 // own DOMContentLoaded and load, never ones a page fakes. Then `blocks` again when the page changes,
@@ -65,8 +65,9 @@
   var READY_FALLBACK_MS = 100;
   /** How far below the top an offset scrolled to lands, in pixels. */
   var TOP_GAP = 12;
-  /** The highlight layers Lectern paints, with their priorities: find's over comments'. */
-  var LAYERS = { comment: 0, "comment-focus": 1, find: 2, "find-current": 3 };
+  /** The highlight layers Lectern paints, with their priorities: find's over an agent's, which are
+   * over the comments'. */
+  var LAYERS = { comment: 0, "comment-focus": 1, agent: 2, find: 3, "find-current": 4 };
   /** The most ranges painted in one layer. */
   var MAX_RANGES = 10000;
   /** What the outline lists at most: headings, each heading's text, and an id (else none). */
@@ -293,6 +294,7 @@
     }
     var kept = [];
     var length = 0;
+    var truncated = false;
     for (var i = 0; i < blocks.length; i++) {
       var block = blocks[i];
       var parts = [];
@@ -314,6 +316,7 @@
       }
       var join = kept.length > 0 ? 1 : 0;
       if (length + join + block.text.length > MAX_TEXT) {
+        truncated = true;
         break;
       }
       block.start = length + join;
@@ -329,7 +332,16 @@
         })
         .join(" "),
       blocks: kept,
+      truncated: truncated,
     };
+  }
+
+  /** `message`, with `truncated` when the page's text stopped short at the limit. */
+  function withCut(message) {
+    if (model.truncated) {
+      message.truncated = true;
+    }
+    return message;
   }
 
   /** The blocks as Lectern takes them: their text, and a heading's level. */
@@ -555,27 +567,40 @@
   /** What `blocks` last reported, to say nothing when a change leaves the text as it was. */
   var reported = "";
 
-  /** The text, where its blocks break, and the headings: a change in any is reported. */
+  /**
+   * The text, where its blocks break, the headings, and whether the text stopped short at the
+   * limit: a change in any is reported.
+   */
   function signature(headings) {
     var breaks = model.blocks
       .map(function (block) {
         return block.text.length;
       })
       .join(",");
-    return model.text + "\u0000" + breaks + "\u0000" + JSON.stringify(headings);
+    return (
+      model.text +
+      "\u0000" +
+      breaks +
+      "\u0000" +
+      JSON.stringify(headings) +
+      "\u0000" +
+      (model.truncated ? "cut" : "whole")
+    );
   }
 
   function ready() {
     read();
     var headings = headingList();
     reported = signature(headings);
-    post({
-      type: "ready",
-      headings: headings,
-      blocks: blockList(),
-      scroll: scrollState(),
-      dark: dark(),
-    });
+    post(
+      withCut({
+        type: "ready",
+        headings: headings,
+        blocks: blockList(),
+        scroll: scrollState(),
+        dark: dark(),
+      }),
+    );
     watch();
   }
 
@@ -623,7 +648,7 @@
       return;
     }
     reported = now;
-    post({ type: "blocks", headings: headings, blocks: blockList() });
+    post(withCut({ type: "blocks", headings: headings, blocks: blockList() }));
   }
 
   var selectionTimer = null;

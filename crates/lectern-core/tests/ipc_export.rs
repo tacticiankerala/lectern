@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use lectern_core::agent::request::Target;
+use lectern_core::agent::target::{ShowAt, TextPlace};
 use lectern_core::frame_keys::keys;
 use lectern_core::ipc::{
     DocPayload, EditorPref, FollowResult, FrameFocus, FrameKey, HtmlPages, Measure, OpenError,
@@ -16,8 +18,9 @@ use lectern_core::page::{
     inject_script, page_policy, prepare_page, BRIDGE_KEY_SLOT, SHARED_EXTENSIONS,
 };
 use lectern_core::review::anchor::AnchorState;
-use lectern_core::review::ops::{NewAnchor, ReviewOp, StatusChange};
+use lectern_core::review::ops::{AgentAuthor, NewAnchor, ReviewOp, StatusChange};
 use lectern_core::review::text::PageBlock;
+use lectern_core::review::view::ReviewPayload;
 use lectern_core::review::{ClaudeKind, CommentStatus, EntryAuthor};
 use serde_json::json;
 use ts_rs::{Config, TS};
@@ -67,6 +70,7 @@ fn ts_bindings_exported() {
         "AnchorState",
         "NewAnchor",
         "ReviewOp",
+        "AgentAuthor",
         "StatusChange",
         "ReviewPayload",
         "CommentView",
@@ -84,6 +88,31 @@ fn ts_bindings_exported() {
         "FrameKey",
         "PageBlock",
         "WslDistros",
+        "AgentOpens",
+        "AgentFocus",
+        "AgentRequest",
+        "ClientInfo",
+        "ShowArgs",
+        "WorkspaceArgs",
+        "WorkspaceAction",
+        "HighlightArgs",
+        "ReadArgs",
+        "CommentArgs",
+        "CommentsArgs",
+        "ReplyArgs",
+        "ResolveArgs",
+        "Target",
+        "EntryKind",
+        "ThreadFilter",
+        "AgentCall",
+        "AgentReply",
+        "WindowView",
+        "ViewSelection",
+        "AskAnswer",
+        "AskOutcome",
+        "TextPlace",
+        "ShowAt",
+        "TargetState",
     ] {
         assert!(
             dir.join(format!("{name}.ts")).is_file(),
@@ -460,14 +489,20 @@ fn ts_unions_follow_the_serde_tags() {
             " * Up to `CONTEXT_CHARS` (32) characters of the note's visible text just before a selection,\n",
             " * which tell apart a phrase found more than once in its lines; empty for a whole block.\n",
             " */\n",
-            "prefix: string, };",
+            "prefix: string, \n",
+            "/**\n",
+            " * Where the quote starts in the note's visible text, in UTF-16 code units (as\n",
+            " * `CommentView::text_start` counts), when the sender knows exactly: an agent's target, which\n",
+            " * may have been told apart by the text after it. The quote found there is anchored there.\n",
+            " */\n",
+            "textStart?: number, };",
         )
     );
     assert_eq!(
         decl::<ReviewOp>(),
         concat!(
-            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, } | "#,
-            r#"{ "op": "reply", id: number, text: string, } | "#,
+            r#"type ReviewOp = { "op": "add", anchor: NewAnchor, text: string, author?: AgentAuthor, } | "#,
+            r#"{ "op": "reply", id: number, text: string, author?: AgentAuthor, } | "#,
             r#"{ "op": "setStatus", id: number, change: StatusChange, } | "#,
             r#"{ "op": "reattach", id: number, anchor: NewAnchor, } | "#,
             r#"{ "op": "edit", id: number, entry: number, text: string, };"#,
@@ -492,8 +527,10 @@ fn review_ops_are_tagged_by_op() {
             end_line: 6,
             quote: "batches of at most 50".to_owned(),
             prefix: String::new(),
+            text_start: None,
         },
         text: "Why 50?".to_owned(),
+        author: None,
     };
     assert_eq!(
         serde_json::to_value(&add).unwrap(),
@@ -505,6 +542,33 @@ fn review_ops_are_tagged_by_op() {
     )
     .unwrap();
     assert_eq!(without, add);
+    // An agent's, written under its name: the UI sends it for a page.
+    let agents: ReviewOp = serde_json::from_value(json!({
+        "op": "reply",
+        "id": 2,
+        "text": "Per station.",
+        "author": {"name": "Claude", "kind": "reply"},
+    }))
+    .unwrap();
+    assert_eq!(
+        agents,
+        ReviewOp::Reply {
+            id: 2,
+            text: "Per station.".to_owned(),
+            author: Some(AgentAuthor {
+                name: "Claude".to_owned(),
+                kind: ClaudeKind::Reply,
+            }),
+        }
+    );
+    assert_eq!(
+        decl::<AgentAuthor>(),
+        "type AgentAuthor = { name: string, kind: ClaudeKind, };"
+    );
+    // The comment an operation changed rides on its answer, for the agent a page's window adds it
+    // for.
+    let payload = decl::<ReviewPayload>();
+    assert!(payload.contains("changed?: number, "), "{payload}");
 }
 
 #[test]
@@ -626,9 +690,13 @@ fn startup_payload_carries_a_notice() {
         workspace: None,
         workspaces: vec![],
         primary: true,
+        generation: 50,
+        agent_target: None,
     })
     .unwrap();
     assert_eq!(j["startupNotice"], "Settings were reset");
+    assert_eq!(j["generation"], 50);
+    assert!(decl::<StartupPayload>().contains("generation: number,"));
     assert!(j["initial"].is_null());
     assert_eq!(j["settings"]["measure"], 100);
     assert_eq!(j["settingsRev"], 7);
@@ -636,6 +704,50 @@ fn startup_payload_carries_a_notice() {
     assert!(j["workspace"].is_null());
     assert_eq!(j["workspaces"], json!([]));
     assert_eq!(j["primary"], true);
+}
+
+/// An agent's `show` held for a window still starting comes with its target, which the UI applies
+/// once the file has opened; a payload without one leaves it out.
+#[test]
+fn startup_payload_carries_an_agents_target() {
+    let payload = |agent_target| StartupPayload {
+        settings: Default::default(),
+        settings_rev: 0,
+        library: lectern_core::ipc::LibraryPayload { roots: vec![] },
+        recent: vec![],
+        initial: None,
+        version: "0.5.0".to_owned(),
+        portable: false,
+        startup_notice: None,
+        workspace: None,
+        workspaces: vec![],
+        primary: false,
+        generation: 0,
+        agent_target,
+    };
+    let held = ShowAt {
+        target: Target::Heading {
+            heading: "Rollout".to_owned(),
+        },
+        place: Some(TextPlace {
+            start_line: 5,
+            end_line: 5,
+            text_start: Some(17),
+            text_end: Some(24),
+            block_offset: None,
+        }),
+    };
+    let j = serde_json::to_value(payload(Some(held))).unwrap();
+    assert_eq!(
+        j["agentTarget"],
+        json!({
+            "target": {"heading": "Rollout"},
+            "place": {"startLine": 5, "endLine": 5, "textStart": 17, "textEnd": 24},
+        })
+    );
+    let j = serde_json::to_value(payload(None)).unwrap();
+    assert!(j.get("agentTarget").is_none());
+    assert!(decl::<StartupPayload>().contains("agentTarget?: ShowAt"));
 }
 
 #[test]
@@ -668,6 +780,8 @@ fn startup_payload_names_the_window_workspace() {
         workspace: Some(personal.clone()),
         workspaces: vec![work, personal],
         primary: false,
+        generation: 0,
+        agent_target: None,
     })
     .unwrap();
     let personal = json!({"id": "w2", "name": "Personal", "open": true, "current": true, "roots": ["C:\\Users\\me\\projects"], "ownTheme": true});

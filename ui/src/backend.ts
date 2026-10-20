@@ -1,5 +1,8 @@
 // What the UI needs from the host: the Tauri app (backend-tauri.ts) or, for Playwright, a fake
 // that serves pre-rendered fixtures (dev/backend-fake.ts).
+import type { AgentReply } from "./generated/AgentReply";
+import type { Target } from "./generated/Target";
+import type { TextPlace } from "./generated/TextPlace";
 import type { Candidate } from "./generated/Candidate";
 import type { FileHits } from "./generated/FileHits";
 import type { FollowResult } from "./generated/FollowResult";
@@ -9,6 +12,7 @@ import type { LibraryPayload } from "./generated/LibraryPayload";
 import type { OpenResult } from "./generated/OpenResult";
 import type { OpenWhere } from "./generated/OpenWhere";
 import type { PageBlock } from "./generated/PageBlock";
+import type { PathForms } from "./generated/PathForms";
 import type { RecentEntry } from "./generated/RecentEntry";
 import type { ReviewOp } from "./generated/ReviewOp";
 import type { ReviewPayload } from "./generated/ReviewPayload";
@@ -33,12 +37,19 @@ export type BackendEvent =
   | "workspaces-changed"
   | "close-requested"
   | "page-loads"
-  | "frame-key";
+  | "frame-key"
+  | "agent-request";
 
 export interface Backend {
   /** Waits for every listener registered with `on` so far, then asks for the startup payload. */
   startup(): Promise<StartupPayload>;
-  openDocument(path: string): Promise<OpenResult>;
+  /**
+   * Opens `path` as the open numbered `generation`. The window numbers its opens, and its leaves
+   * and keeps of its document (`leaveDocument`, `keepDocument`), in the order it sends them, as
+   * Rust may run them in another: it orders them by the number, so a newer open stays its
+   * document, and one numbered below the last leave or keep never becomes it.
+   */
+  openDocument(path: string, generation: number): Promise<OpenResult>;
   getLibrary(): Promise<LibraryPayload>;
   addRoot(path: string): Promise<LibraryPayload>;
   removeRoot(path: string): Promise<LibraryPayload>;
@@ -74,6 +85,11 @@ export interface Backend {
    */
   listWslDistros(): Promise<WslDistros>;
   /**
+   * This lectern.exe's path, for the commands that connect Claude Code (Preferences › Agents):
+   * the Windows form, and the WSL one, null when WSL can't reach it (a share no mapping reaches).
+   */
+  lecternExe(): Promise<PathForms>;
+  /**
    * Asks GitHub Releases for a newer Lectern. `automatic`: the check after startup, which then
    * runs no more this session (`StartupPayload.primary`).
    */
@@ -91,10 +107,10 @@ export interface Backend {
   /**
    * Opens a file or folder the user explicitly chose (the file dialog, Add folder or a drop) as a
    * launch argument would: Rust trusts its network host for the session; a file opens like
-   * `openDocument`; a folder joins the library unless it nests with a root, and opens its README
-   * when it has one.
+   * `openDocument`, numbered as one; a folder joins the library unless it nests with a root, and
+   * opens its README when it has one.
    */
-  openUserPath(path: string): Promise<UserOpen>;
+  openUserPath(path: string, generation: number): Promise<UserOpen>;
   /** Drops `path` from the recent files, for good; returns the recent files left. */
   removeRecent(path: string): Promise<RecentEntry[]>;
   /** Sets the native window title (the title bar and the task switcher). */
@@ -138,6 +154,27 @@ export interface Backend {
    * frame, where only Rust sees the keys and sends Lectern's shortcuts back as `frame-key`.
    */
   setFrameFocus(focus: FrameFocus): Promise<void>;
+  /** Answers the agent's request `id` (`agent-request`) that Rust sent this window. */
+  replyToAgent(id: number, reply: AgentReply): Promise<void>;
+  /**
+   * Tells Rust the window left its document for none (the welcome page), so nothing acts on that
+   * document any more; or, when `missing`, that it was deleted or moved away while open, and the
+   * window says so: nothing acts on it either, but it is still watched, so its return reloads it.
+   * Numbered `generation` as an open is (`openDocument`): no open numbered below takes its place.
+   */
+  leaveDocument(missing: boolean, generation: number): Promise<void>;
+  /**
+   * Tells Rust the window keeps `path`, the path on screen, though it dropped an open on its way
+   * (an agent's, that a newer show took the place of), numbered `generation` as an open is
+   * (`openDocument`): no open numbered below takes its place. False when one had already, so
+   * Rust's document isn't `path`: the window opens it again.
+   */
+  keepDocument(path: string, generation: number): Promise<boolean>;
+  /**
+   * Where each of an agent's `targets` is now in `path`, the note or text file on screen, as core
+   * finds them in the file; null for one that's gone. For its highlights, after the file changed.
+   */
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]>;
   /**
    * Closes this window once its unsaved comment text was let go (`close-requested`): it isn't
    * asked again.

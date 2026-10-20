@@ -10,7 +10,13 @@
 // page it opened (`openUrl`). A change of the setting has the page on screen open again, as Rust
 // does. The browser's reports of what a page loads don't reach the fake, so it tells them itself,
 // from the hosts each page fixture names (`pageHosts`), as Rust would. Keys pressed inside a frame,
-// which only Rust sees, come from `frameKey`.
+// which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, with
+// where its targets are in a note as the test gives them (Rust's core would find them), which
+// answers with what the UI replies, as Rust would wait for it; what became of a `show` the UI asked
+// the reader about, which it tells Rust later, is kept in `agentAnswers`. Targets found again
+// (`agentPlaces`) are looked for in the note as the window's last open read it, as Rust keeps it;
+// and a `show` of that note, changed since (`setDoc`, `setText`), has `doc-changed` sent first, as
+// Rust has the window show it afresh before the request goes to it.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -23,7 +29,8 @@
 // follows.
 //
 // Two WSL distributions are installed, Ubuntu (Windows' default) and Debian (`wslDistros`), for
-// the *WSL distribution* setting in Preferences.
+// the *WSL distribution* setting in Preferences. Lectern is installed on a drive WSL mounts
+// (`exe`, unless `FakeOptions.portable`), for the commands Preferences gives to connect Claude Code.
 //
 // Review comments live in an in-memory store, seeded by tests. Comments are anchored against core's
 // text for each fixture (`textBlocks`), simplified: a quote found in it is anchored, at its stored
@@ -33,10 +40,15 @@
 // with each review command, as its bridge reported it, a block a line; a comment added on a page
 // takes the lines of where its quote is found, as core gives them.
 import type { Backend, BackendEvent } from "../src/backend";
+import type { AgentCall } from "../src/generated/AgentCall";
+import type { AgentReply } from "../src/generated/AgentReply";
+import type { AgentRequest } from "../src/generated/AgentRequest";
+import type { AskAnswer } from "../src/generated/AskAnswer";
 import { DEFAULT_SETTINGS } from "../src/app";
 import { QUOTE_CAP, matchPart } from "../src/comments-model";
 import { normalize } from "../src/comments-text";
 import { DOCUMENT_PATH } from "../src/dom";
+import type { AgentAuthor } from "../src/generated/AgentAuthor";
 import type { AnchorState } from "../src/generated/AnchorState";
 import type { Candidate } from "../src/generated/Candidate";
 import type { ClaudeKind } from "../src/generated/ClaudeKind";
@@ -55,6 +67,7 @@ import type { LibraryPayload } from "../src/generated/LibraryPayload";
 import type { OpenResult } from "../src/generated/OpenResult";
 import type { OpenWhere } from "../src/generated/OpenWhere";
 import type { PageBlock } from "../src/generated/PageBlock";
+import type { PathForms } from "../src/generated/PathForms";
 import type { RecentEntry } from "../src/generated/RecentEntry";
 import type { RenderedDoc } from "../src/generated/RenderedDoc";
 import type { ReviewOp } from "../src/generated/ReviewOp";
@@ -66,8 +79,11 @@ import type { Segment } from "../src/generated/Segment";
 import type { Settings } from "../src/generated/Settings";
 import type { SettingsPatch } from "../src/generated/SettingsPatch";
 import type { SettingsSnapshot } from "../src/generated/SettingsSnapshot";
+import type { ShowAt } from "../src/generated/ShowAt";
 import type { StartupPayload } from "../src/generated/StartupPayload";
 import type { StatusChange } from "../src/generated/StatusChange";
+import type { Target } from "../src/generated/Target";
+import type { TextPlace } from "../src/generated/TextPlace";
 import type { TreeNode } from "../src/generated/TreeNode";
 import type { UnreadableView } from "../src/generated/UnreadableView";
 import type { UpdateInfo } from "../src/generated/UpdateInfo";
@@ -112,6 +128,10 @@ export interface FakeOptions {
   current?: string | null;
   /** Whether this is the process's first startup, which checks for updates; true when not given. */
   primary?: boolean;
+  /** Where an agent's `show` takes the reader in `initial`, opened for it as the window started. */
+  agentTarget?: ShowAt;
+  /** Whether this copy of Lectern is portable; false when not given. */
+  portable?: boolean;
 }
 
 /** A workspace in the fake's model. */
@@ -244,7 +264,11 @@ export interface FakeControl {
    * a sidecar if it has none.
    */
   agentComment(path: string, comment: AgentComment): void;
-  /** Replaces core's text for a note, as if the note were edited. */
+  /**
+   * Replaces core's text for a note, as if the note were edited. A block over several lines may
+   * carry them joined by newlines, so a line target finds its own line (`agentPlaces`); core's
+   * text has a space there instead, one character either way, as the window reads it.
+   */
   setText(path: string, blocks: [number, number, string][]): void;
   /** Core's text blocks for a note, as `setText` takes them. */
   blocksOf(path: string): [number, number, string][];
@@ -286,6 +310,26 @@ export interface FakeControl {
   readonly followed: FollowTarget[];
   /** Where the UI said the keyboard focus was, each time it said, in order. */
   readonly frameFocus: FrameFocus[];
+  /**
+   * Sends an agent's request to the UI (`agent-request`), from the agent named `agent` as the
+   * reader sees it ("Claude" when not given), with where Rust found its targets in a note
+   * (`places`, none when not given) and how long Rust waits for the answer (`withinMs`: 5 s when
+   * not given, as Rust gives a window that's up; null for no deadline, as Rust sends a show it
+   * has stopped waiting for, held for the window's start); answers with the UI's reply. The
+   * requests are numbered from 1. A show of the note the window last opened, changed since that
+   * open read it, has `doc-changed` sent first, as Rust does, whether or not a test has sent one.
+   */
+  agentRequest(
+    request: AgentRequest,
+    agent?: string,
+    places?: TextPlace[],
+    withinMs?: number | null,
+  ): Promise<AgentReply>;
+  /**
+   * What became of each `show` the UI asked the reader about, as it told Rust, in order, with why
+   * when it `failed`.
+   */
+  readonly agentAnswers: { id: number; answer: AskAnswer; message?: string }[];
 }
 
 /** What an agent writes when it starts a comment (see `agentComment`). */
@@ -343,6 +387,33 @@ declare global {
 /** Paths compare as on Windows: case-insensitively, either separator. */
 function key(path: string): string {
   return path.toLowerCase().replaceAll("/", "\\");
+}
+
+/**
+ * The source line of the heading in `html` that `anchor` names, as core finds a show's `#anchor`
+ * (simplified): the heading whose id is the anchor as written, else percent-decoded, else its slug.
+ * Null when none is.
+ */
+function anchoredLine(html: string, anchor: string): number | null {
+  const headings = [...html.matchAll(/<h[1-6]\b([^>]*)>/g)].map(([, attrs = ""]) => ({
+    id: /\bid=(["'])(.*?)\1/.exec(attrs)?.[2] ?? "",
+    line: Number(/\bdata-sourcepos=(["'])(\d+):/.exec(attrs)?.[2] ?? NaN),
+  }));
+  let decoded = anchor;
+  try {
+    decoded = decodeURIComponent(anchor);
+  } catch {
+    // Not valid encoding: as written.
+  }
+  const slug = decoded
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc} -]/gu, "")
+    .replace(/ /g, "-");
+  for (const wanted of [anchor, decoded, slug]) {
+    const found = headings.find((h) => h.id !== "" && h.id === wanted);
+    if (found && !Number.isNaN(found.line)) return found.line;
+  }
+  return null;
 }
 
 function baseName(path: string): string {
@@ -417,28 +488,35 @@ function resolveState(c: StoredComment, text: string | null): AnchorState {
  * one after the text most like its prefix, then the one nearest its first line, then the first.
  * Null when it isn't there.
  */
-function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [number, number] | null {
-  const text = blocks.map(([, , t]) => t).join(" ");
-  const needle = normalize(matchPart(c.quote));
-  // Where each block's text starts in the note's.
+/** Where each of `blocks` starts in the note's text (their texts joined by spaces). */
+function blockStarts(blocks: [number, number, string][]): number[] {
   const starts: number[] = [];
   let offset = 0;
   for (const [, , t] of blocks) {
     starts.push(offset);
     offset += t.length + 1;
   }
-  const linesOf = (from: number, to: number): [number, number] => {
-    let first = Infinity;
-    let last = -Infinity;
-    blocks.forEach(([start, end, t], i) => {
-      const at = starts[i] ?? 0;
-      if (at < to && from < at + t.length) {
-        first = Math.min(first, start);
-        last = Math.max(last, end);
-      }
-    });
-    return [first, last];
-  };
+  return starts;
+}
+
+/** The first and last line of the blocks that the note's text from `from` to `to` touches. */
+function linesOf(blocks: [number, number, string][], from: number, to: number): [number, number] {
+  const starts = blockStarts(blocks);
+  let first = Infinity;
+  let last = -Infinity;
+  blocks.forEach(([start, end, t], i) => {
+    const at = starts[i] ?? 0;
+    if (at < to && from < at + t.length) {
+      first = Math.min(first, start);
+      last = Math.max(last, end);
+    }
+  });
+  return [first, last];
+}
+
+function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [number, number] | null {
+  const text = blocks.map(([, , t]) => t).join(" ");
+  const needle = normalize(matchPart(c.quote));
   const agreement = (at: number): number => {
     let n = 0;
     while (
@@ -456,7 +534,7 @@ function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [numbe
     at !== -1;
     at = text.indexOf(needle, at + 1)
   ) {
-    const [first, last] = linesOf(at, at + needle.length);
+    const [first, last] = linesOf(blocks, at, at + needle.length);
     const fit =
       first >= c.startLine && last <= c.endLine
         ? 0
@@ -506,6 +584,14 @@ function entry(
 /** One of your entries. */
 function yours(text: string): EntryView {
   return entry("you", "You", null, text);
+}
+
+/** As core: an agent's entry, under its name when the sidecar reads it back, else "An agent". */
+function agents(author: AgentAuthor, text: string): EntryView {
+  const readable =
+    /^\p{L}(?:[\p{L}\p{Nd} ._-]{0,30}[\p{L}\p{Nd}._-])?$/u.test(author.name) &&
+    author.name.toLowerCase() !== "you";
+  return entry("agent", readable ? author.name : "An agent", author.kind, text);
 }
 
 /** As core: the id for a new comment, one more than any in the sidecar, unreadable ones too. */
@@ -576,6 +662,11 @@ export class FakeBackend implements Backend, FakeControl {
   systemFonts = ["Calibri", "Cascadia Code", "Constantia", "Segoe UI"];
   /** What `listWslDistros` answers: Windows' default and the installed distributions. */
   wslDistros: WslDistros = { default: "Ubuntu", installed: ["Debian", "Ubuntu"] };
+  /** What `lecternExe` answers: an installed copy's path, on a drive WSL mounts. */
+  exe: PathForms = {
+    windows: "C:\\Users\\me\\AppData\\Local\\Lectern\\lectern.exe",
+    wsl: "/mnt/c/Users/me/AppData/Local/Lectern/lectern.exe",
+  };
   private readonly docs = new Map<string, { path: string; doc: RenderedDoc; mtimeMs: number }>();
   /** The kind of each document that isn't Markdown, by path key. */
   private readonly kinds = new Map<string, DocKind>();
@@ -587,6 +678,10 @@ export class FakeBackend implements Backend, FakeControl {
   private clock = 0;
   private readonly listeners = new Map<BackendEvent, Set<(payload: unknown) => void>>();
   private readonly drops = new Set<(paths: string[]) => void>();
+  /** Agents' requests sent to the UI and not answered yet, by id. */
+  private readonly agentCalls = new Map<number, (reply: AgentReply) => void>();
+  private agentCallId = 0;
+  readonly agentAnswers: { id: number; answer: AskAnswer; message?: string }[] = [];
   /** Sidecars, by note path key. */
   private readonly reviews = new Map<string, StoredReview>();
   /** Core's text blocks, by path key. */
@@ -597,6 +692,23 @@ export class FakeBackend implements Backend, FakeControl {
   private pageOpens = 0;
   /** The document last opened, which a change of the *HTML pages* setting opens again. */
   private onScreen: string | null = null;
+  /**
+   * As Rust keeps for the window's document: the note it last opened, as it was then (core's
+   * text and the HTML), which an agent's targets are found in again (`agentPlaces`), never the
+   * note as it is since. Null for none, or one that didn't open.
+   */
+  private rendered: { path: string; blocks: [number, number, string][]; html: string } | null =
+    null;
+  /**
+   * As Rust: the generation the window last left or kept its document at. An open numbered below
+   * never becomes the fake's document, however late it is run.
+   */
+  private cutoff = 0;
+  /**
+   * As Rust: the highest generation the window has sent, which its startup payload tells, so a
+   * page loaded over the same state numbers above it.
+   */
+  private generation = 0;
   /** The settings every window shares; a workspace's own theme is applied over them. */
   private settings: Settings = { ...DEFAULT_SETTINGS };
   /** The settings revision: bumped by every change to the settings or a workspace's theme. */
@@ -663,12 +775,19 @@ export class FakeBackend implements Backend, FakeControl {
       recent: this.recent,
       initial: initial === undefined ? null : this.open(initial),
       version: "0.0.0-fake",
-      portable: false,
+      portable: this.options.portable ?? false,
       startupNotice: null,
       workspace: current ? this.summary(current) : null,
       workspaces: this.summaries(),
       primary: this.options.primary ?? true,
+      generation: this.generation,
+      ...(this.options.agentTarget ? { agentTarget: this.options.agentTarget } : {}),
     });
+  }
+
+  /** As Rust: the window sent `generation`, the highest so far. */
+  private numbered(generation: number): void {
+    this.generation = Math.max(this.generation, generation);
   }
 
   /** A root as the library shows it: the fixtures' ready, the offline share's unavailable. */
@@ -701,8 +820,9 @@ export class FakeBackend implements Backend, FakeControl {
     };
   }
 
-  openDocument(path: string): Promise<OpenResult> {
-    return Promise.resolve(this.open(path));
+  openDocument(path: string, generation: number): Promise<OpenResult> {
+    this.numbered(generation);
+    return Promise.resolve(this.open(path, generation));
   }
 
   /**
@@ -710,10 +830,11 @@ export class FakeBackend implements Backend, FakeControl {
    * the library unless it nests with a root. In a blank window a folder opens and joins nothing,
    * and the answer says it is one.
    */
-  openUserPath(path: string): Promise<UserOpen> {
+  openUserPath(path: string, generation: number): Promise<UserOpen> {
+    this.numbered(generation);
     if (DOCUMENT_PATH.test(path) || this.docs.has(key(path))) {
       return Promise.resolve({
-        doc: this.open(path),
+        doc: this.open(path, generation),
         library: structuredClone(this.library),
         folder: false,
       });
@@ -726,7 +847,7 @@ export class FakeBackend implements Backend, FakeControl {
     }
     const readme = `${path}\\README.md`;
     return Promise.resolve({
-      doc: this.docs.has(key(readme)) ? this.open(readme) : null,
+      doc: this.docs.has(key(readme)) ? this.open(readme, generation) : null,
       library: structuredClone(this.library),
       folder: false,
     });
@@ -882,18 +1003,19 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve(this.reviewPayload(path));
   }
 
-  /** The five operations, on the store, as core applies them. */
+  /** The five operations, on the store, as core applies them: the review, with what changed. */
   reviewOp(path: string, op: ReviewOp, page?: PageBlock[]): Promise<ReviewPayload> {
     this.reviewCount++;
+    let changed: number;
     try {
       this.takePage(path, page);
-      this.applyOp(path, op);
+      changed = this.applyOp(path, op);
     } catch (e) {
       // Rust's commands fail with a message.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       return Promise.reject(e instanceof Error ? e.message : String(e));
     }
-    return Promise.resolve(this.reviewPayload(path));
+    return Promise.resolve({ ...this.reviewPayload(path), changed });
   }
 
   setReview(path: string, payload: ReviewPayload | null): void {
@@ -1021,7 +1143,11 @@ export class FakeBackend implements Backend, FakeControl {
     c.jumpLine = c.startLine;
   }
 
-  private applyOp(path: string, op: ReviewOp): void {
+  /**
+   * Applies `op` as core does, and gives the comment it changed. An agent's entry (`author`) is
+   * added after the comment's count of seen entries, so its kind gives the status.
+   */
+  private applyOp(path: string, op: ReviewOp): number {
     const failure = this.reviewFailure;
     this.reviewFailure = null;
     if (failure !== null) {
@@ -1040,7 +1166,7 @@ export class FakeBackend implements Backend, FakeControl {
       const added: StoredComment = {
         id: nextId(review),
         status: "open",
-        seen: 1,
+        seen: op.author ? 0 : 1,
         startLine: op.anchor.startLine,
         endLine: op.anchor.endLine,
         headingPath: [],
@@ -1048,7 +1174,7 @@ export class FakeBackend implements Backend, FakeControl {
         prefix: op.anchor.prefix,
         textStart: null,
         textEnd: null,
-        entries: [yours(text)],
+        entries: [op.author ? agents(op.author, text) : yours(text)],
         state: "anchored",
         movedTo: null,
         jumpLine: op.anchor.startLine,
@@ -1058,7 +1184,7 @@ export class FakeBackend implements Backend, FakeControl {
       this.placeOnPage(path, added);
       review.comments.push(added);
       this.reviews.set(key(path), review);
-      return;
+      return added.id;
     }
     const c = review.comments.find((x) => x.id === op.id);
     if (!c) {
@@ -1068,6 +1194,12 @@ export class FakeBackend implements Backend, FakeControl {
     c.status = effectiveStatus(c);
     switch (op.op) {
       case "reply":
+        if (op.author) {
+          const text = cleanText(op.text);
+          c.seen = c.entries.length;
+          c.entries.push(agents(op.author, text));
+          return c.id;
+        }
         c.entries.push(yours(cleanText(op.text)));
         c.status = "open";
         break;
@@ -1099,6 +1231,7 @@ export class FakeBackend implements Backend, FakeControl {
       }
     }
     c.seen = c.entries.length;
+    return c.id;
   }
 
   /** A sidecar with no comments yet, as the first comment on `path` creates. */
@@ -1137,15 +1270,22 @@ export class FakeBackend implements Backend, FakeControl {
       } else if (state === "anchored") {
         span = quoteSpan(c, blocks);
       }
+      // As core places a comment's lines where its quote sits: its lines as stored while the
+      // quote is still on them, else where the quote is now, as after an edit above it.
+      let [startLine, endLine] = [c.startLine, c.endLine];
+      if (blocks !== undefined && state === "anchored" && span !== null) {
+        const [first, last] = linesOf(blocks, span[0], span[1]);
+        if (last < c.startLine || first > c.endLine) [startLine, endLine] = [first, last];
+      }
       return {
         id: c.id,
         status: effectiveStatus(c),
         state,
-        startLine: c.startLine,
-        endLine: c.endLine,
+        startLine,
+        endLine,
         headingPath: [...c.headingPath],
         // Detached by an edit, as core with no heading left: the note's top, its first block.
-        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : c.startLine,
+        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : startLine,
         pinnedHeading: detached && c.state === "detached" ? c.pinnedHeading : null,
         pinnedAt: detached && c.state === "detached" ? c.pinnedAt : null,
         quote: c.quote,
@@ -1416,6 +1556,158 @@ export class FakeBackend implements Backend, FakeControl {
     return Promise.resolve();
   }
 
+  agentRequest(
+    request: AgentRequest,
+    agent = "Claude",
+    places: TextPlace[] = [],
+    withinMs: number | null = 5000,
+  ): Promise<AgentReply> {
+    const id = ++this.agentCallId;
+    const replied = new Promise<AgentReply>((resolve) => {
+      this.agentCalls.set(id, resolve);
+    });
+    const call: AgentCall = { id, request, agent };
+    if (places.length > 0) call.places = places;
+    if (withinMs !== null) call.withinMs = withinMs;
+    const afresh = request.tool === "show" ? this.changedSinceOpen(request.path) : null;
+    if (afresh !== null) {
+      // As Rust: the window shows the note afresh first, as the watcher would once it noticed.
+      this.emit("doc-changed", { path: afresh });
+    }
+    this.emit("agent-request", call);
+    return replied;
+  }
+
+  /**
+   * As Rust decides before an agent's show of `path` goes to the window: the path of the note or
+   * text file the window last opened, when it is `path` and has changed since that open read it
+   * (its HTML or core's text isn't what the open had); else null.
+   */
+  private changedSinceOpen(path: string): string | null {
+    const shown = this.rendered;
+    const now = this.docs.get(key(path));
+    const kind = this.kinds.get(key(path)) ?? "markdown";
+    const changed =
+      shown !== null &&
+      now !== undefined &&
+      key(shown.path) === key(path) &&
+      (kind === "markdown" || kind === "text") &&
+      (now.doc.html !== shown.html ||
+        JSON.stringify(this.textBlocks.get(key(path)) ?? []) !== JSON.stringify(shown.blocks));
+    return changed ? shown.path : null;
+  }
+
+  /**
+   * As Rust: the window left its document for none, or it went missing; either way nothing is on
+   * screen to act on, and no open numbered below `generation` becomes the document. (The fake
+   * watches nothing: a test tells of a missing file's return.)
+   */
+  leaveDocument(_missing: boolean, generation: number): Promise<void> {
+    this.numbered(generation);
+    this.cutoff = generation;
+    this.onScreen = null;
+    this.rendered = null;
+    return Promise.resolve();
+  }
+
+  /**
+   * As Rust: the window keeps `path` on screen, and no open numbered below `generation` becomes
+   * the document; false when another open became the document first (the fake's opens do at
+   * once, as asked).
+   */
+  keepDocument(path: string, generation: number): Promise<boolean> {
+    this.numbered(generation);
+    this.cutoff = generation;
+    return Promise.resolve(this.onScreen !== null && key(this.onScreen) === key(path));
+  }
+
+  /**
+   * As core finds an agent's targets again, simplified, in the note the window shows, as it was
+   * when it opened (`rendered`), never as it is since: a quote where it first is, a heading by its
+   * block's text, a line by its own text in a block whose lines `setText` kept apart, else by the
+   * block holding it (else alone, as a line with no text is), a show's `#anchor` by the id of a
+   * heading in the HTML (`anchoredLine`); each with where it starts in its block's own text, as
+   * core sends it. Refused, as Rust refuses it, for a note the window doesn't show.
+   */
+  agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
+    const shown = this.rendered;
+    if (shown === null || key(shown.path) !== key(path)) {
+      return Promise.reject(new Error("That file isn't shown in this window."));
+    }
+    const blocks = shown.blocks;
+    const starts: number[] = [];
+    let at = 0;
+    for (const [, , text] of blocks) {
+      starts.push(at);
+      at += text.length + 1;
+    }
+    const text = blocks.map(([, , t]) => t).join(" ");
+    const blockAt = (offset: number): number => starts.filter((s) => s <= offset).length - 1;
+    const place = (from: number, to: number): TextPlace => ({
+      startLine: blocks[blockAt(from)]?.[0] ?? 1,
+      endLine: blocks[blockAt(to - 1)]?.[1] ?? 1,
+      textStart: from,
+      textEnd: to,
+      blockOffset: from - (starts[blockAt(from)] ?? 0),
+    });
+    const whole = (i: number): TextPlace | null => {
+      const block = blocks[i];
+      const start = starts[i];
+      return block && start !== undefined ? place(start, start + block[2].length) : null;
+    };
+    return Promise.resolve(
+      targets.map((target) => {
+        if ("quote" in target) {
+          const quote = normalize(target.quote);
+          const found = quote === "" ? -1 : text.indexOf(quote);
+          return found === -1 ? null : place(found, found + quote.length);
+        }
+        if ("heading" in target) {
+          const wanted = (target.heading.split("›").pop() ?? "").trim().toLowerCase();
+          return whole(blocks.findIndex(([, , t]) => t.toLowerCase() === wanted));
+        }
+        if ("line" in target) {
+          const i = blocks.findIndex(([s, e]) => s <= target.line && target.line <= e);
+          const block = blocks[i];
+          if (block === undefined) {
+            // No block holds a line with no text, such as a frontmatter's: core gives it alone.
+            return { startLine: target.line, endLine: target.line };
+          }
+          // Inside a block whose lines are kept apart, its own line, as core places one.
+          const lines = block[2].split("\n");
+          const k = target.line - block[0];
+          const own = lines.length > 1 ? lines[k] : undefined;
+          if (own === undefined) {
+            return whole(i);
+          }
+          const from =
+            (starts[i] ?? 0) + lines.slice(0, k).reduce((n, line) => n + line.length + 1, 0);
+          return {
+            ...place(from, from + own.length),
+            startLine: target.line,
+            endLine: target.line,
+          };
+        }
+        if ("anchor" in target) {
+          const line = anchoredLine(shown.html, target.anchor);
+          return line === null ? null : whole(blocks.findIndex(([s]) => s === line));
+        }
+        return null;
+      }),
+    );
+  }
+
+  replyToAgent(id: number, reply: AgentReply): Promise<void> {
+    if (reply.kind === "answered") {
+      const { answer, message } = reply;
+      this.agentAnswers.push(message === undefined ? { id, answer } : { id, answer, message });
+      return Promise.resolve();
+    }
+    this.agentCalls.get(id)?.(reply);
+    this.agentCalls.delete(id);
+    return Promise.resolve();
+  }
+
   savePosition(path: string, position: SavedPosition): Promise<void> {
     this.positions.set(key(path), position);
     if (this.options.persist) {
@@ -1439,6 +1731,10 @@ export class FakeBackend implements Backend, FakeControl {
 
   listWslDistros(): Promise<WslDistros> {
     return Promise.resolve(structuredClone(this.wslDistros));
+  }
+
+  lecternExe(): Promise<PathForms> {
+    return Promise.resolve(structuredClone(this.exe));
   }
 
   checkUpdate(automatic: boolean): Promise<UpdateInfo | null> {
@@ -1545,9 +1841,23 @@ export class FakeBackend implements Backend, FakeControl {
     return this.docs.get(key(path))?.doc.html ?? null;
   }
 
-  private open(path: string): OpenResult {
+  /**
+   * As Rust opens `path`: the document, or why it didn't open. It becomes the fake's document at
+   * once (as Rust's can before the window drops it) unless the window left or kept its document
+   * since numbering it `generation` (`cutoff`); an open of the fake's own (startup's) always does.
+   */
+  private open(path: string, generation = Infinity): OpenResult {
     const found = this.docs.get(key(path));
-    this.onScreen = path;
+    if (generation >= this.cutoff) {
+      this.onScreen = path;
+      this.rendered = found
+        ? {
+            path,
+            blocks: structuredClone(this.textBlocks.get(key(path)) ?? []),
+            html: found.doc.html,
+          }
+        : null;
+    }
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };
     }

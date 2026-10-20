@@ -1,5 +1,6 @@
 //! Lectern's core logic. Pure Rust with no Tauri dependency, so it builds and tests on Linux.
 
+pub mod agent;
 pub mod cache;
 pub mod cli;
 pub mod frame_keys;
@@ -27,6 +28,6 @@ mod tests {
 
     #[test]
     fn version_matches_the_workspace_manifest() {
-        assert_eq!(version(), "0.4.3");
+        assert_eq!(version(), "0.5.0");
     }
 }

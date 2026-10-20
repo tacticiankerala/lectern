@@ -12,9 +12,9 @@
 //!
 //! Locks are taken in this order, and never held across file system calls or emits: the app's
 //! `lifecycle`, `settings`, `workspaces`, `trust`, `assets`, `state`, then a window's `library`,
-//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus`, `update_check` and
-//! `page_opens`, and a window's `workspace`, `layout`, `placement`, `watch` and `frame_focus`,
-//! are leaves: nothing else is locked while one is held.
+//! `cache`, `current`. The app's `mapper`, `notice`, `windows`, `focus`, `update_check`,
+//! `page_opens` and `agent_calls`, and a window's `workspace`, `layout`, `placement`, `watch`
+//! and `frame_focus`, are leaves: nothing else is locked while one is held.
 //! `lifecycle` is held while windows are bound to workspaces or let go of, and never while a
 //! window is built or focused, which waits on the main thread. The app's `backgrounds` is taken
 //! with nothing else held, and stays held while the grammars' release is told, which then may
@@ -23,6 +23,7 @@
 //! settings holds, and read under its read lock with the settings it stamps, so a snapshot's
 //! settings and revision agree.
 
+mod agent;
 mod assets;
 mod doc;
 mod follow;
@@ -81,7 +82,9 @@ pub use self::sync::Slot;
 pub use self::watch_control::{Watch, WatchControl};
 pub use self::windows::is_folder;
 
+use self::agent::AgentCalls;
 use self::assets::AssetScope;
+use self::doc::{CachedRender, Stamp};
 use self::grammars::AppGrammars;
 use self::library::Library;
 use self::pages::PageOptions;
@@ -114,6 +117,8 @@ pub struct Timings {
     pub scan_delay: Duration,
     /// The compiled grammars are released once every window has been in the background this long.
     pub release_after: Duration,
+    /// How long an agent's request waits for a window to show before bringing it forward.
+    pub shown: Duration,
 }
 
 impl Default for Timings {
@@ -126,6 +131,7 @@ impl Default for Timings {
             root: Duration::from_secs(8),
             scan_delay: Duration::from_secs(2),
             release_after: Duration::from_secs(60),
+            shown: Duration::from_secs(4),
         }
     }
 }
@@ -133,8 +139,9 @@ impl Default for Timings {
 /// The document on screen.
 struct Current {
     path: PathBuf,
-    /// The `open_document` call that made it current; an older call never replaces it.
-    seq: u64,
+    /// The generation of the open that made it current, as the UI numbered it (`open_numbered`):
+    /// an older open never replaces it.
+    generation: u64,
     /// Rendered without its root in the index, or with wikilinks the index couldn't resolve:
     /// worth rendering again once the index changes.
     stale: bool,
@@ -144,6 +151,13 @@ struct Current {
     refreshed_at: Option<u64>,
     /// What it rendered to, for the languages to warm first.
     doc: Option<Arc<RenderedDoc>>,
+    /// The text a note or a text file rendered from: what an agent's targets are found in again
+    /// (`agent_places`), the revision the window shows, never the file as it is on disk since.
+    source: Option<Arc<str>>,
+    /// The file's modified time and size as it was read: an agent's show of it compares them with
+    /// the file's on disk, to have the window show it afresh first when it changed since
+    /// (`WindowState::show_afresh_if_changed`).
+    stamp: Option<Stamp>,
 }
 
 /// Everything `App` needs from boot.
@@ -157,7 +171,8 @@ pub struct Boot {
     pub early: Arc<Slot<Early>>,
     /// Starts the highlighter's warm-up; the first paint may be what it waits for.
     pub warm: Arc<StartupWarmUp>,
-    /// Second launches held for the first window.
+    /// Second launches held for the first window, marked `launched` when the command line named
+    /// a path.
     pub opens: Arc<OpenQueue>,
     pub timings: Timings,
     /// Not running from the folder Lectern was installed in (`updater::detect_portable`).
@@ -239,6 +254,8 @@ pub struct App {
     quitting: AtomicBool,
     /// Second launches, routed one at a time on a thread of their own.
     launches: Sender<Option<OpenRequest>>,
+    /// Agents' requests sent to windows' UIs, waiting for their answers.
+    agent_calls: AgentCalls,
 }
 
 impl App {
@@ -311,6 +328,7 @@ impl App {
             update_check: Mutex::new(UpdateCheck::Unclaimed),
             quitting: AtomicBool::new(false),
             launches: spawn_launcher(weak.clone()),
+            agent_calls: AgentCalls::default(),
         });
         if migrated || opened {
             app.saver.workspaces(&read(&app.workspaces));
@@ -688,11 +706,20 @@ pub struct WindowState {
     /// Bumped, under the cache lock, whenever the index changes: a render begun before then
     /// isn't cached.
     index_gen: AtomicU64,
-    cache: Mutex<RenderCache>,
+    cache: Mutex<RenderCache<CachedRender>>,
     content: ContentCache,
     current: Mutex<Option<Current>>,
-    /// Numbers opens, so only the latest becomes the current document.
+    /// Counts opens, launches, and the UI's leaves and keeps of its document, since startup: a
+    /// boot render landing late stays quiet once anything came (`early_landed_late`).
     open_seq: AtomicU64,
+    /// The UI's latest generation. The UI numbers its opens, and its leaves and keeps of its
+    /// document, in the order it sends them, which the blocking pool may run in another, so the
+    /// numbers order them (`make_current`). An open of Rust's own (startup's) takes the latest.
+    generation: AtomicU64,
+    /// The generation the UI last left or kept its document at (`leave_document`,
+    /// `document_missing`, `keep_document`): an open numbered below it never becomes current,
+    /// however late it runs.
+    cutoff: AtomicU64,
     snapshots_loaded: Gate,
     /// The window's ready gate: it is showing its first document, so scans may start.
     ui_shown: Gate,
@@ -754,6 +781,8 @@ impl WindowState {
             content: ContentCache::new(),
             current: Mutex::new(None),
             open_seq: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            cutoff: AtomicU64::new(0),
             snapshots_loaded: Gate::default(),
             ui_shown: Gate::default(),
             early,
@@ -816,8 +845,16 @@ impl WindowState {
         self.app.mapper()
     }
 
-    fn next_seq(&self) -> u64 {
-        self.open_seq.fetch_add(1, Ordering::SeqCst) + 1
+    /// Counts an open (from its start, before anything slow), a launch, or a leave or keep of
+    /// the document (`open_seq`). A user path's file counts twice, which changes nothing: only
+    /// whether anything came since startup is read.
+    fn count_open(&self) {
+        self.open_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The UI's latest generation (`generation`), for an open of Rust's own.
+    fn ui_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Whether Lectern may touch `path`: local, or on a network host the user chose.
@@ -1412,11 +1449,15 @@ mod tests {
         let page = dir.file("vault/artifacts/report.html", "<h1>Report</h1>");
         let other = dir.file("vault/artifacts/other.html", "<h1>Other</h1>");
         let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
-        let stale: Vec<u64> = (0..6).map(|_| f.state.next_seq()).collect();
-        let path = open_page(&f, &page);
-        for seq in stale {
+        // The page is numbered after the six opens that finish late.
+        let OpenResult::Ok { doc } = f.state.open_numbered(7, &path_string(&page)) else {
+            panic!("the page didn't open");
+        };
+        let url = doc.frame_url.expect("a frame URL");
+        let path = url.strip_prefix(PAGE_ORIGIN).unwrap().to_owned();
+        for generation in 1..=6 {
             let rendered = f.state.load(&other);
-            f.state.finish_open(seq, &other, rendered);
+            f.state.finish_open(generation, &other, rendered);
         }
         assert_eq!(current(&f).0, page);
         assert_eq!(get(&f, &path).status, 200);

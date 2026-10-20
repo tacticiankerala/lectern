@@ -4,14 +4,15 @@ import { DOCUMENT_EXTENSIONS } from "./generated/document-extensions";
 import { MARKDOWN_EXTENSIONS } from "./generated/markdown-extensions";
 
 /**
- * The layout inside `#lx-app`: the header, progress bar, library, document pane, outline,
- * overlays and toasts, which the stylesheets place and the app's modules fill.
+ * The layout inside `#lx-app`: the header, progress bar, library, document pane, an agent's request
+ * over its top, outline, overlays and toasts, which the stylesheets place and the app's modules
+ * fill.
  */
 const LAYOUT = `
 <header id="lx-header"><nav id="lx-history-nav"></nav><nav id="lx-breadcrumbs"></nav><div id="lx-header-actions"></div></header>
 <div id="lx-progress"></div>
 <aside id="lx-library" class="sidebar"></aside><div class="resizer" data-for="library"></div>
-<main id="lx-doc-pane"><div id="lx-banner" hidden></div><section id="lx-properties" class="props" hidden></section><article id="lx-doc" class="doc"></article></main>
+<main id="lx-doc-pane"><div id="lx-banner" hidden></div><section id="lx-properties" class="props" hidden></section><article id="lx-doc" class="doc"></article></main><div id="lx-agent-ask" hidden></div>
 <div class="resizer" data-for="outline"></div><aside id="lx-outline" class="sidebar"></aside>
 <div id="lx-overlay-root"></div><div id="lx-toasts" aria-live="polite"></div>`;
 
@@ -27,6 +28,8 @@ export interface Layout {
   banner: HTMLElement;
   properties: HTMLElement;
   doc: HTMLElement;
+  /** An agent's request to show another file, over the top of the document (agent.ts). */
+  agentAsk: HTMLElement;
   outline: HTMLElement;
   overlayRoot: HTMLElement;
   toasts: HTMLElement;
@@ -54,6 +57,7 @@ export function buildLayout(root: HTMLElement): Layout {
     banner: part("lx-banner"),
     properties: part("lx-properties"),
     doc: part("lx-doc"),
+    agentAsk: part("lx-agent-ask"),
     outline: part("lx-outline"),
     overlayRoot: part("lx-overlay-root"),
     toasts: part("lx-toasts"),
@@ -83,6 +87,35 @@ function cssEscape(value: string): string {
 /** The element inside `scope` whose id is exactly `id`. */
 export function findById(scope: ParentNode, id: string): HTMLElement | null {
   return scope.querySelector<HTMLElement>(`[id="${cssEscape(id)}"]`);
+}
+
+/**
+ * The closed `<details>` of `doc` that hide `el`: those it sits in, outside their summary. Find
+ * opens them around a match, and a landing around its target.
+ */
+export function closedAround(doc: HTMLElement, el: Element): HTMLDetailsElement[] {
+  const closed: HTMLDetailsElement[] = [];
+  for (
+    let details = el.closest("details");
+    details instanceof HTMLDetailsElement && doc.contains(details);
+    details = details.parentElement?.closest("details") ?? null
+  ) {
+    if (!details.open && !details.querySelector(":scope > summary")?.contains(el)) {
+      closed.push(details);
+    }
+  }
+  return closed;
+}
+
+/**
+ * Opens the closed `<details>` of `doc` that fold `node` away (`closedAround`), as find opens
+ * those around a match: folded away, it has no box to scroll to, and doesn't show.
+ */
+export function unfold(doc: HTMLElement, node: Node): void {
+  const el = node instanceof Element ? node : node.parentElement;
+  for (const details of el === null ? [] : closedAround(doc, el)) {
+    details.open = true;
+  }
 }
 
 /** An element with attributes and children; strings become text nodes, never markup. */

@@ -3,6 +3,7 @@ import type { LibraryPayload } from "./LibraryPayload";
 import type { OpenResult } from "./OpenResult";
 import type { RecentEntry } from "./RecentEntry";
 import type { Settings } from "./Settings";
+import type { ShowAt } from "./ShowAt";
 import type { WorkspaceSummary } from "./WorkspaceSummary";
 
 /**
@@ -35,4 +36,15 @@ workspaces: Array<WorkspaceSummary>,
  * asked for its startup payload, each time it starts again (it turned to another workspace),
  * until a check has run.
  */
-primary: boolean, };
+primary: boolean, 
+/**
+ * The highest number this window's UI has given an open, or a leave or keep of its document
+ * (`open_document`'s `generation`), so a page loaded over the same window state (a reload)
+ * numbers from above it; 0 for a fresh window.
+ */
+generation: number, 
+/**
+ * Where an agent's `show` takes the reader in `initial`, when the window opened it for an
+ * agent while starting.
+ */
+agentTarget?: ShowAt, };

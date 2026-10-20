@@ -363,8 +363,10 @@ mod tests {
                 end_line: 5,
                 quote: "batches of at most 50".into(),
                 prefix: String::new(),
+                text_start: None,
             },
             text: "Why 50?".into(),
+            author: None,
         };
         apply_op(&sidecar, "tide.md", NOTE, &add, NOW).unwrap();
         (dir, sidecar)
@@ -379,6 +381,7 @@ mod tests {
         ReviewOp::Reply {
             id: 1,
             text: "Per station.".into(),
+            author: None,
         }
     }
 

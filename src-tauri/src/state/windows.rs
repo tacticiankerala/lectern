@@ -18,6 +18,7 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 
+use lectern_core::agent::show::{route_show, AgentRoute};
 use lectern_core::ipc::{
     OpenRequest, OpenWhere, SettingsSnapshot, WorkspaceOutcome, WorkspaceSummary,
 };
@@ -424,15 +425,7 @@ impl App {
 
     /// Where an open of `path` goes, over the windows and the workspaces none of them shows.
     fn route(&self, path: &Path, is_dir: bool) -> Route {
-        let windows: Vec<OpenWindow> = self
-            .windows()
-            .iter()
-            .map(|window| OpenWindow {
-                label: window.label.clone(),
-                workspace: window.workspace_id(),
-                roots: window.roots(),
-            })
-            .collect();
+        let windows = self.open_windows();
         let shown: HashSet<&str> = windows
             .iter()
             .filter_map(|w| w.workspace.as_deref())
@@ -451,8 +444,40 @@ impl App {
         route_open(path, is_dir, &windows, &closed, &focus)
     }
 
+    /// Where an agent's `show` of the file `path` goes (`route_show`), in the workspace named
+    /// `named` when there is one, in a new window when `new_window`.
+    pub(super) fn route_agent(
+        &self,
+        path: &Path,
+        named: Option<&str>,
+        new_window: bool,
+    ) -> Result<AgentRoute, String> {
+        let windows = self.open_windows();
+        let focus = lock(&self.focus).clone();
+        route_show(
+            path,
+            named,
+            new_window,
+            &windows,
+            &read(&self.workspaces),
+            &focus,
+        )
+    }
+
+    /// The open windows, as routing sees them.
+    fn open_windows(&self) -> Vec<OpenWindow> {
+        self.windows()
+            .iter()
+            .map(|window| OpenWindow {
+                label: window.label.clone(),
+                workspace: window.workspace_id(),
+                roots: window.roots(),
+            })
+            .collect()
+    }
+
     /// Which window shows each workspace: workspace id to window label.
-    fn shown(&self) -> HashMap<String, String> {
+    pub(super) fn shown(&self) -> HashMap<String, String> {
         self.windows()
             .iter()
             .filter_map(|window| window.workspace_id().map(|id| (id, window.label.clone())))
@@ -499,7 +524,7 @@ impl App {
     /// workspace's window was last, else a little right of and below the focused window. `focus`: it takes the focus, so it counts as the most
     /// recently focused window; otherwise it is restored at launch and counts as the least.
     /// Returns its label; `build` then opens the window itself.
-    fn bind_window(self: &Arc<Self>, workspace: Option<String>, focus: bool) -> String {
+    pub(super) fn bind_window(self: &Arc<Self>, workspace: Option<String>, focus: bool) -> String {
         let label = format!("win-{}", self.next_label.fetch_add(1, Ordering::SeqCst));
         if let Some(id) = &workspace {
             self.change_workspace(id, |ws| !std::mem::replace(&mut ws.open, true));
@@ -582,7 +607,7 @@ impl App {
     }
 
     /// Builds the window `label`. If that fails, its state goes and its workspace is closed.
-    fn build(&self, label: &str, focus: bool) -> Result<(), String> {
+    pub(super) fn build(&self, label: &str, focus: bool) -> Result<(), String> {
         self.host.open_window(label, focus).inspect_err(|e| {
             log::error!("couldn't open the window {label}: {e}");
             let _life = lock(&self.lifecycle);
@@ -605,7 +630,7 @@ impl App {
 
     /// Changes the workspaces with `change` and, unless it fails, saves them, with
     /// `settings.json` too when the first workspace's libraries or layout changed.
-    fn change_workspaces<R>(
+    pub(super) fn change_workspaces<R>(
         &self,
         change: impl FnOnce(&mut Workspaces) -> Result<R, String>,
     ) -> Result<R, String> {
@@ -621,7 +646,7 @@ impl App {
     }
 
     /// Tells every window the workspaces changed.
-    fn workspaces_changed(&self) {
+    pub(super) fn workspaces_changed(&self) {
         self.host.emit(Target::All, UiEvent::WorkspacesChanged);
     }
 }
@@ -676,6 +701,8 @@ impl WindowState {
         drop(watch);
         // Its pages' opens go with it: their URLs serve nothing, and their reports go nowhere.
         lock(&self.app.page_opens).forget(&self.label);
+        // So do the agents' requests it was sent: whoever waits on one wakes now (`App::show_in`).
+        self.app.agent_calls.forget_window(&self.label);
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -1033,7 +1060,6 @@ mod tests {
         let garden = add(&mut profile, "Garden", &[], false);
         let f = fixture_in(dir, profile, FakeHost::default());
         // An open of the older note is rendering...
-        let seq = f.state.next_seq();
         let rendered = f.state.load(&older);
         // ...when the window turns to Garden, and Work opens in a new window, on the newer note.
         f.app
@@ -1044,7 +1070,7 @@ mod tests {
             .unwrap();
         opened_path(&window(&f, "win-1").open_document(&path_string(&newer)));
         // The older open finishes in the retired state.
-        opened_path(&f.state.finish_open(seq, &older, rendered));
+        opened_path(&f.state.finish_open(1, &older, rendered));
         let saved = saved_workspaces(&f);
         let work_ws = saved.get("w1").unwrap();
         assert_eq!(work_ws.last_doc, Some(path_string(&newer)));

@@ -74,6 +74,49 @@ When the note changes, each comment follows its text. One whose text was reworde
 
 The comments button beside **Aa** shows how many are open. Click it, or press Ctrl+Shift+M, to hide or show them. To turn comments off altogether, untick **Review comments** under **Reading** in Preferences.
 
+## Let Claude drive Lectern
+
+While you work through a plan with Claude Code, Claude can put the right note in front of you, at the right passage, instead of naming a path and a heading for you to find. Lectern is an MCP server (`lectern.exe mcp`), so any agent that speaks MCP, Codex included, can do the same.
+
+**Connect it once.** Preferences › Agents, under **Connect Claude Code**, gives two commands made for your copy of Lectern, each with a **Copy** button. Run one of them once, in the shell you run Claude Code from.
+
+From WSL:
+
+```bash
+claude mcp add --scope user lectern -- '/mnt/c/Users/me/AppData/Local/Lectern/lectern.exe' mcp --distro "$WSL_DISTRO_NAME"
+```
+
+From PowerShell or Command Prompt:
+
+```
+claude mcp add --scope user lectern -- "C:\Users\me\AppData\Local\Lectern\lectern.exe" mcp
+```
+
+From WSL, the shell fills in the distribution you run it in, so a Linux path Claude gives, such as `/home/me/notes/plan.md`, opens from that distribution. Lectern starts by itself the first time Claude needs it. A portable copy must stay where it is, or be registered again after you move it.
+
+**What Claude can do,** with nine tools:
+
+- **status** tells what each window shows: its workspace, the file, the section in view and what you've selected, so "explain this bit" works without copying it.
+- **show** opens a file, in the window of the workspace that holds it, at a heading, a line, a quoted passage, a PDF's page or a comment thread. It can wait up to a minute for your answer.
+- **workspace** switches to a workspace, reopening it if it's closed, or creates a new one holding the folders Claude names.
+- **highlight** points at passages in the file on screen.
+- **read** gives Claude the text of the file on screen as you see it, an HTML page's after its scripts ran.
+- **comment** starts a comment thread on a passage, and **comments** lists a file's threads as the Comments tab shows them.
+- **reply** answers a thread, and **resolve** resolves one.
+
+Claude can give Windows paths (`S:\Notes\My Vault\plan.md`) or WSL paths (`/mnt/s/Notes/My Vault/plan.md`), and it gets every path back in both forms.
+
+**Two settings**, under Preferences › Agents:
+
+- **When an agent opens a file:** **Ask**, the default, or **Switch right away**. Ask shows a bar over the document, such as "Claude wants to show plan.md › Rollout", with **Show** and **Not now**, before another file replaces the one you're reading. Only the newest request is offered. Moving within the file you're reading never asks, and Alt+← takes you back.
+- **When an agent shows something:** **Bring Lectern to front**, the default, **Show without taking focus**, or **Leave windows alone**, which only flashes the taskbar.
+
+**What stays yours:**
+
+- **Network shares.** Claude reaches a share only when Lectern already trusts it: a library folder's, a path mapping's, WSL's, or one you opened a file from yourself. A path in a note can't make Lectern connect somewhere new.
+- **Highlights are temporary.** Claude's are never saved, and they go when you leave the file.
+- **Comments are normal threads.** Claude's go in the note's `.review.md` under its own name, such as `**Claude (question):**`, never yours, and you reply to and resolve them as you would any other. The review tools need **Review comments** turned on.
+
 ## HTML pages, PDFs and text files
 
 The library shows HTML pages (`.html`, `.htm`), PDFs and text files (`.txt`) beside your notes, each marked with its type. Quick open finds them by name, search reads text files as well as notes, and a link to one from a note opens it in Lectern.

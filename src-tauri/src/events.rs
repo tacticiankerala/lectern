@@ -3,9 +3,12 @@
 //! in a fake host.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use lectern_core::agent::show::FocusStep;
+use lectern_core::agent::AgentCall;
 use lectern_core::ipc::{
-    DocChanged, FrameKey, LibraryPayload, OpenRequest, PageLoads, SettingsSnapshot,
+    AgentFocus, DocChanged, FrameKey, LibraryPayload, OpenRequest, PageLoads, SettingsSnapshot,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget};
@@ -35,6 +38,9 @@ pub const CLOSE_REQUESTED: &str = "close-requested";
 pub const PAGE_LOADS: &str = "page-loads";
 /// One of Lectern's shortcuts was pressed while the focus was inside a frame (`FrameKey`).
 pub const FRAME_KEY: &str = "frame-key";
+/// An agent asks the window's UI for something only it knows, such as what it shows
+/// (`AgentCall`); the UI answers with the command `agent_reply`.
+pub const AGENT_REQUEST: &str = "agent-request";
 
 /// Which windows an event is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +67,7 @@ pub enum UiEvent {
     CloseRequested,
     PageLoads(PageLoads),
     FrameKey(FrameKey),
+    AgentRequest(AgentCall),
 }
 
 /// What the app state needs from Tauri.
@@ -72,6 +79,10 @@ pub trait Host: Send + Sync {
     fn open_window(&self, label: &str, focus: bool) -> Result<(), String>;
     /// Brings the window `label` forward, unminimised, if it is showing yet.
     fn focus_window(&self, label: &str);
+    /// Brings the window `label` forward for an agent as `mode` has it (`win::bring_forward`), and
+    /// says how far it came, waiting at most `within` to hear; `None` when it isn't showing, or
+    /// didn't say in time.
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep>;
 }
 
 /// The real host.
@@ -98,6 +109,7 @@ impl Host for TauriHost {
             UiEvent::CloseRequested => emit(app, target, CLOSE_REQUESTED, ()),
             UiEvent::PageLoads(loads) => emit(app, target, PAGE_LOADS, loads),
             UiEvent::FrameKey(key) => emit(app, target, FRAME_KEY, key),
+            UiEvent::AgentRequest(call) => emit(app, target, AGENT_REQUEST, call),
         }
     }
 
@@ -111,6 +123,10 @@ impl Host for TauriHost {
 
     fn focus_window(&self, label: &str) {
         crate::app::focus_window(&self.0, label);
+    }
+
+    fn agent_focus(&self, label: &str, mode: AgentFocus, within: Duration) -> Option<FocusStep> {
+        crate::app::agent_focus(&self.0, label, mode, within)
     }
 }
 

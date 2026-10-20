@@ -19,7 +19,8 @@ pub const WORKSPACES_FILE: &str = "workspaces.json";
 const VERSION: u32 = 1;
 /// The name of the workspace an older Lectern's profile becomes.
 const MIGRATED_NAME: &str = "Main";
-const MAX_NAME_CHARS: usize = 60;
+/// The longest workspace name, in characters: a longer one is cut.
+pub const MAX_NAME_CHARS: usize = 60;
 
 const LAST_WORKSPACE: &str = "Lectern needs at least one workspace.";
 const STILL_OPEN: &str = "Close its window first.";
@@ -280,6 +281,13 @@ impl Workspaces {
         self.items.iter().find(|w| w.id == id)
     }
 
+    /// The workspace named `name`, compared as names are kept (trimmed, cut to
+    /// [`MAX_NAME_CHARS`]) and in any letter case.
+    pub fn find_by_name(&self, name: &str) -> Option<&Workspace> {
+        let name = clean_name(name)?.to_lowercase();
+        self.items.iter().find(|w| w.name.to_lowercase() == name)
+    }
+
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Workspace> {
         self.items.iter_mut().find(|w| w.id == id)
     }
@@ -389,6 +397,8 @@ pub fn apply_patch(
         html_pages,
         recent_in_menu,
         wsl_distro,
+        agent_opens,
+        agent_focus,
     } = patch;
     let mut effect = PatchEffect::default();
     let (layout, changed) = match shown {
@@ -429,6 +439,8 @@ pub fn apply_patch(
     *changed |= set(&mut shared.recent_in_menu, recent_in_menu);
     // `""`, Windows' default, becomes `None` as the settings are clamped.
     *changed |= set(&mut shared.wsl_distro, wsl_distro.map(Some));
+    *changed |= set(&mut shared.agent_opens, agent_opens);
+    *changed |= set(&mut shared.agent_focus, agent_focus);
     shared.clamp();
     effect
 }

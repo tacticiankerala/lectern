@@ -11,7 +11,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::ipc::{
-    EditorPref, HtmlPages, Measure, RecentEntry, SavedPosition, Settings, ThemeId, ThemeMode,
+    AgentFocus, AgentOpens, EditorPref, HtmlPages, Measure, RecentEntry, SavedPosition, Settings,
+    ThemeId, ThemeMode,
 };
 use crate::library::path_key;
 
@@ -53,6 +54,8 @@ impl Default for Settings {
             html_pages: HtmlPages::Full,
             recent_in_menu: 10,
             wsl_distro: None,
+            agent_opens: AgentOpens::Ask,
+            agent_focus: AgentFocus::Front,
         }
     }
 }

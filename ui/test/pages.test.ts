@@ -784,9 +784,9 @@ describe("an HTML page", () => {
     loaded();
     const gate = deferred();
     const original = fake.openDocument.bind(fake);
-    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path) => {
+    const opens = vi.spyOn(fake, "openDocument").mockImplementation(async (path, generation) => {
       if (path === A) await gate.promise;
-      return original(path);
+      return original(path, generation);
     });
     const going = app.open(A, { push: true });
     loaded();

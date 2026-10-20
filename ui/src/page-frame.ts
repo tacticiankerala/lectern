@@ -14,8 +14,9 @@
 // page, and at most one a second, so a page can't send Lectern anywhere by itself, nor many places
 // at once; one within the page's open (its own URL's folder, `/o/<token>/`, and below) goes to the
 // file it names there. The page's text is taken at most every half second, the latest, so a page
-// that keeps changing doesn't rebuild find and the outline all the time. An anchor, or a place to
-// restore, waits until the page is ready; an anchor wins.
+// that keeps changing doesn't rebuild find and the outline all the time. A passage to go to (an
+// agent's target, found in the page's text), an anchor, or a place to restore, waits until the page
+// is ready; the passage wins, then the anchor.
 import type { PageSurface } from "./comments-page";
 import { h } from "./dom";
 import type { FindPage, Span } from "./find";
@@ -36,6 +37,12 @@ const NOTICE_HOSTS = 3;
 const TEXT_EVERY_MS = 500;
 /** How often a link is followed, at most, in milliseconds. */
 const FOLLOW_EVERY_MS = 1000;
+
+/**
+ * Where to go in a page once it is ready: where in its text, found in it then; null when it isn't
+ * there.
+ */
+export type PageAim = (page: PageFrame) => number | null;
 
 /** A heading of the page: its block's text, its element's id, and where its block starts. */
 export interface PageHeading {
@@ -68,10 +75,12 @@ export type BridgeMessage =
       type: "ready";
       headings: PageHeading[];
       blocks: PageBlock[];
+      /** The page stopped its text short, at the limit it reports. */
+      truncated: boolean;
       scroll: PageScroll;
       dark: boolean;
     }
-  | { type: "blocks"; headings: PageHeading[]; blocks: PageBlock[] }
+  | { type: "blocks"; headings: PageHeading[]; blocks: PageBlock[]; truncated: boolean }
   | { type: "selection"; selection: PageSelection | null }
   | { type: "scroll"; scroll: PageScroll }
   | { type: "link"; href: string }
@@ -135,6 +144,12 @@ function blocks(value: unknown): PageBlock[] | null {
   return out;
 }
 
+/** Whether the page stopped its text short: `true`, or left out; null for anything else. */
+function truncated(value: unknown): boolean | null {
+  if (value === undefined) return false;
+  return typeof value === "boolean" ? value : null;
+}
+
 function scroll(value: unknown): PageScroll | null {
   if (!isObject(value)) return null;
   const { fraction, top } = value;
@@ -169,13 +184,15 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
         const h = headings(data.headings);
         const b = blocks(data.blocks);
         const s = scroll(data.scroll);
-        if (!h || !b || !s || typeof data.dark !== "boolean") {
+        const cut = truncated(data.truncated);
+        if (!h || !b || !s || cut === null || typeof data.dark !== "boolean") {
           return null;
         }
         return {
           type: "ready",
           headings: h,
           blocks: b,
+          truncated: cut,
           scroll: s,
           dark: data.dark,
         };
@@ -183,7 +200,10 @@ export function parseBridgeMessage(data: unknown): BridgeMessage | null {
       case "blocks": {
         const h = headings(data.headings);
         const b = blocks(data.blocks);
-        return h && b ? { type: "blocks", headings: h, blocks: b } : null;
+        const cut = truncated(data.truncated);
+        return h && b && cut !== null
+          ? { type: "blocks", headings: h, blocks: b, truncated: cut }
+          : null;
       }
       case "selection": {
         const s = selection(data.selection);
@@ -360,6 +380,7 @@ function pageTheme(): Record<string, Colours> {
     "find-current": { background: value("--accent"), color: value("--bg") },
     comment: { background: value("--comment") },
     "comment-focus": { background: value("--comment-focus") },
+    agent: { background: value("--agent-highlight") },
   };
 }
 
@@ -374,6 +395,8 @@ export class PageFrame implements FindPage, PageSurface {
   text = "";
   /** The blocks, as the page reported them. */
   blocks: PageBlock[] = [];
+  /** The page stopped its text short, at the limit it reports (`MAX_TEXT`). */
+  truncated = false;
   /** Where each block starts in `text`. */
   starts: number[] = [];
   /** How far down the page is scrolled, 0 to 1, as it last said. */
@@ -384,7 +407,8 @@ export class PageFrame implements FindPage, PageSurface {
   dark = false;
   /** The text selected in the page, as it last said. */
   selection: PageSelection | null = null;
-  private headings: PageHeading[] = [];
+  /** The page's headings, as it last reported them, in order. */
+  headings: PageHeading[] = [];
   /** The block at the top of the view. */
   private topBlock = 0;
   /** This page's open: its token, which its reports of what it loads carry, and what it reaches. */
@@ -395,11 +419,16 @@ export class PageFrame implements FindPage, PageSurface {
   private followedAt = -Infinity;
   /** When the page's text was last taken, and the latest that came since, waiting its turn. */
   private textTaken = 0;
-  private waiting: { headings: PageHeading[]; blocks: PageBlock[] } | null = null;
+  private waiting: { headings: PageHeading[]; blocks: PageBlock[]; truncated: boolean } | null =
+    null;
   private textTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Where to scroll once the page is ready: a saved fraction, and an anchor, which wins. */
+  /**
+   * Where to scroll once the page is ready: a saved fraction, an anchor, which wins over it, and a
+   * passage to find, which wins over both.
+   */
   private restoreTo: number | null;
   private anchorTo: string | null;
+  private aimTo: PageAim | null;
 
   /** The session of the page `doc` in `frame`, its notice in `notice`. */
   constructor(
@@ -407,16 +436,32 @@ export class PageFrame implements FindPage, PageSurface {
     private readonly notice: HTMLElement,
     doc: { path: string; frameUrl: string | null },
     private readonly host: PageHost,
-    start: { fraction: number | null; anchor: string | null },
+    start: { fraction: number | null; anchor: string | null; aim?: PageAim | null },
   ) {
     this.open = pageOpen(doc.frameUrl, doc.path);
     this.restoreTo = start.fraction;
     this.anchorTo = start.anchor;
+    this.aimTo = start.aim ?? null;
   }
 
   /** Where the view's top is in the text: the start of the block there. */
   get top(): number {
     return this.starts[this.topBlock] ?? 0;
+  }
+
+  /**
+   * The heading the view's top is under, after the headings it sits under, outermost first; empty
+   * above the first heading.
+   */
+  headingPath(): string[] {
+    const top = this.top;
+    const path: PageHeading[] = [];
+    for (const heading of this.headings) {
+      if (heading.offset > top) break;
+      while (path.length > 0 && (path[path.length - 1]?.level ?? 0) >= heading.level) path.pop();
+      path.push(heading);
+    }
+    return path.map((h) => h.text);
   }
 
   /** A message the frame's own window posted (frame-view.ts checked where it came from). */
@@ -433,22 +478,27 @@ export class PageFrame implements FindPage, PageSurface {
         this.dark = message.dark;
         this.takeScroll(message.scroll);
         this.sendTheme();
-        this.takeText(message.headings, message.blocks);
+        this.takeText(message);
         if (again !== null) {
           this.post({ type: "scroll-to", fraction: again });
           break;
         }
-        if (this.anchorTo !== null && this.scrollToHeading(this.anchorTo)) {
+        const aimed = this.aimTo?.(this) ?? null;
+        if (aimed !== null) {
+          // At the passage, over any anchor or saved place.
+          this.scrollTo(aimed);
+        } else if (this.anchorTo !== null && this.scrollToHeading(this.anchorTo)) {
           // At the anchor, over any saved place.
         } else if (this.restoreTo !== null) {
           this.post({ type: "scroll-to", fraction: this.restoreTo });
         }
+        this.aimTo = null;
         this.anchorTo = null;
         this.restoreTo = null;
         break;
       }
       case "blocks":
-        this.textLater(message.headings, message.blocks);
+        this.textLater(message);
         break;
       case "scroll":
         this.takeScroll(message.scroll);
@@ -523,6 +573,22 @@ export class PageFrame implements FindPage, PageSurface {
     }
     this.post({ type: "scroll-to", offset: heading.offset });
     return true;
+  }
+
+  /**
+   * Scrolls the passage `aim` finds to the top once the page is ready, over any anchor or saved
+   * place; true unless the ready page hasn't got it.
+   */
+  aim(aim: PageAim): boolean {
+    if (!this.ready) {
+      this.aimTo = aim;
+      return true;
+    }
+    const at = aim(this);
+    if (at !== null) {
+      this.scrollTo(at);
+    }
+    return at !== null;
   }
 
   /**
@@ -631,8 +697,12 @@ export class PageFrame implements FindPage, PageSurface {
   }
 
   /** Takes the page's changed text now, or, when it was taken lately, the latest a moment later. */
-  private textLater(headings: PageHeading[], blocks: PageBlock[]): void {
-    this.waiting = { headings, blocks };
+  private textLater(text: {
+    headings: PageHeading[];
+    blocks: PageBlock[];
+    truncated: boolean;
+  }): void {
+    this.waiting = text;
     if (this.textTimer !== null) {
       return;
     }
@@ -651,12 +721,21 @@ export class PageFrame implements FindPage, PageSurface {
     const waiting = this.waiting;
     this.waiting = null;
     if (waiting) {
-      this.takeText(waiting.headings, waiting.blocks);
+      this.takeText(waiting);
     }
   }
 
-  private takeText(headings: PageHeading[], blocks: PageBlock[]): void {
+  private takeText({
+    headings,
+    blocks,
+    truncated,
+  }: {
+    headings: PageHeading[];
+    blocks: PageBlock[];
+    truncated: boolean;
+  }): void {
     this.textTaken = Date.now();
+    this.truncated = truncated;
     const starts: number[] = [];
     let at = 0;
     for (const block of blocks) {

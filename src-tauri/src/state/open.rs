@@ -18,7 +18,7 @@ use lectern_core::store::State;
 
 use super::doc::{
     breadcrumbs, check_size, framed, now_ms, opened_kind, read_text, readme_in, render_doc,
-    stat_doc, Rendered,
+    stat_doc, Rendered, Stamp,
 };
 use super::paths::{is_under, path_string, same_path};
 use super::sync::{lock, read, write};
@@ -26,25 +26,29 @@ use super::{trust, Current, WindowState};
 use crate::events::UiEvent;
 
 impl WindowState {
-    /// Opens `path`. One on a network host the user hasn't chosen is refused before anything
-    /// touches it, and doesn't become the current document.
+    /// Opens `path` at the UI's latest generation (`open_numbered`): an open of Rust's own, at
+    /// startup, before the UI has numbered any.
     pub fn open_document(self: &Arc<Self>, path: &str) -> OpenResult {
-        if !self.trusts(path) {
-            return refused(path);
-        }
-        let seq = self.next_seq();
-        self.open_numbered(seq, path)
+        self.open_numbered(self.ui_generation(), path)
     }
 
-    /// Opens `path` as the open numbered `seq`, which was numbered when it was asked for: a newer
-    /// open, numbered while this one waited, stays the current document.
-    pub(super) fn open_numbered(self: &Arc<Self>, seq: u64, path: &str) -> OpenResult {
+    /// Opens `path` as the open the UI numbered `generation`. The UI numbers its opens, and its
+    /// leaves and keeps of its document, in the order it sends them, and the blocking pool may run
+    /// them in another, so the number decides (`make_current`): a newer open stays the current
+    /// document, and one numbered below the UI's last leave or keep never becomes it. One on a
+    /// network host the user hasn't chosen is refused before anything touches it, and doesn't
+    /// become the current document.
+    pub fn open_numbered(self: &Arc<Self>, generation: u64, path: &str) -> OpenResult {
+        self.generation.fetch_max(generation, Ordering::SeqCst);
         if !self.trusts(path) {
             return refused(path);
         }
+        // Counted before anything slow (the file, a share), so a boot render landing meanwhile
+        // stays quiet (`early_landed_late`).
+        self.count_open();
         let path = PathBuf::from(path);
         let result = self.load(&path);
-        self.finish_open(seq, &path, result)
+        self.finish_open(generation, &path, result)
     }
 
     /// Reads and renders `path`, or takes its render from the cache. An HTML page or a PDF is
@@ -71,15 +75,17 @@ impl WindowState {
             size: stamp.size,
             version: RENDER_VERSION,
         };
-        if let Some(doc) = lock(&self.cache).get(&key) {
+        if let Some((doc, source)) = lock(&self.cache).get(&key) {
             return Ok(Rendered {
                 kind,
                 doc,
                 framed: None,
                 mtime_ms: stamp.mtime_ms,
+                size: stamp.size,
                 lossy: false,
                 covered,
                 gen,
+                source: Some(source),
             });
         }
         let text = read_text(path)?;
@@ -89,11 +95,12 @@ impl WindowState {
         let doc = Arc::new(render_doc(
             path, kind, &text.text, with_index, &mapper, &hosts,
         ));
+        let source: Arc<str> = Arc::from(text.text);
         // Lossy renders aren't cached, so a cache hit is never lossy.
         if !text.lossy {
             let mut cache = lock(&self.cache);
             if self.index_gen.load(Ordering::SeqCst) == gen {
-                cache.put(key, Arc::clone(&doc));
+                cache.put(key, (Arc::clone(&doc), Arc::clone(&source)));
             }
         }
         Ok(Rendered {
@@ -101,15 +108,19 @@ impl WindowState {
             doc,
             framed: None,
             mtime_ms: stamp.mtime_ms,
+            size: stamp.size,
             lossy: text.lossy,
             covered,
             gen,
+            source: Some(source),
         })
     }
 
+    /// Finishes the open numbered `generation` of `path`, which loaded as `result`: it becomes the
+    /// current document unless a newer one has, or the UI left or kept its document since.
     pub(super) fn finish_open(
         self: &Arc<Self>,
-        seq: u64,
+        generation: u64,
         path: &Path,
         result: Result<Rendered, OpenError>,
     ) -> OpenResult {
@@ -117,7 +128,7 @@ impl WindowState {
             Ok(rendered) => rendered,
             Err(error) => {
                 // Watched even while missing, so its return is noticed.
-                self.make_current(seq, path, None);
+                self.make_current(generation, path, None);
                 return OpenResult::Err { error };
             }
         };
@@ -128,9 +139,9 @@ impl WindowState {
             .as_deref()
             .map(|page| self.app.open_page(&self.label, page, folder_of(page)));
         let doc = self.doc_payload(path, &rendered, &self.index(), open.as_ref());
-        let current = self.make_current(seq, path, Some(&rendered));
+        let current = self.make_current(generation, path, Some(&rendered));
         if current {
-            self.pin_open(seq, open.as_ref().map(|o| o.token.as_str()));
+            self.pin_open(generation, open.as_ref().map(|o| o.token.as_str()));
             // An index installed while this rendered has already looked for stale documents and
             // found the previous one; this one gets its look now.
             self.refresh_if_stale(None);
@@ -152,7 +163,7 @@ impl WindowState {
             write(&self.app.assets).add_folder(dir);
         }
         if current {
-            self.ensure_root_for(path, seq);
+            self.ensure_root_for(path, generation);
         }
         OpenResult::Ok { doc }
     }
@@ -207,11 +218,19 @@ impl WindowState {
         }
     }
 
-    /// Makes `path` the current document unless a newer open (a higher `seq`) already did; true
-    /// when it did. The watcher is told under the same lock, so it always polls the current one.
-    pub(super) fn make_current(&self, seq: u64, path: &Path, rendered: Option<&Rendered>) -> bool {
+    /// Makes `path` the current document unless a newer open (a higher `generation`) already did,
+    /// or the UI left or kept its document since this one was numbered (`cutoff`); true when it
+    /// did. The watcher is told under the same lock, so it always polls the current one.
+    pub(super) fn make_current(
+        &self,
+        generation: u64,
+        path: &Path,
+        rendered: Option<&Rendered>,
+    ) -> bool {
         let mut current = lock(&self.current);
-        if current.as_ref().is_some_and(|c| c.seq > seq) {
+        if current.as_ref().is_some_and(|c| c.generation > generation)
+            || self.cutoff.load(Ordering::SeqCst) > generation
+        {
             return false;
         }
         let refreshed_at = current
@@ -220,17 +239,69 @@ impl WindowState {
             .and_then(|c| c.refreshed_at);
         *current = Some(Current {
             path: path.to_path_buf(),
-            seq,
+            generation,
             stale: follows_the_index(path)
                 && rendered.is_some_and(|r| !r.covered || r.doc.has_unresolved_wikilinks),
             rendered_gen: rendered.map_or(0, |r| r.gen),
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
+            source: rendered.and_then(|r| r.source.clone()),
+            stamp: rendered.map(|r| Stamp {
+                mtime_ms: r.mtime_ms,
+                size: r.size,
+            }),
         });
         if let Some(watch) = &*lock(&self.watch) {
             watch.doc(Some(path.to_path_buf()));
         }
         true
+    }
+
+    /// The UI left its document for none (the welcome page), numbering the leave `generation` as
+    /// it numbers its opens: there is no current document, so nothing acts on the one it showed
+    /// (an agent's read, highlight or comment, a review command), and an open numbered below
+    /// `generation` (sent before the leave) never becomes current, however late it runs. The
+    /// watcher stops watching it.
+    pub fn leave_document(&self, generation: u64) {
+        let mut current = lock(&self.current);
+        self.cut_off(generation);
+        *current = None;
+        if let Some(watch) = &*lock(&self.watch) {
+            watch.doc(None);
+        }
+    }
+
+    /// The UI's document was deleted or moved away while open, and the window says so, numbered
+    /// `generation`. As after an open that failed, its path stays current with nothing rendered,
+    /// so no agent takes it for the file shown (`shown_file`); but the watcher keeps watching it,
+    /// so its return reloads the window. An open numbered below `generation` never becomes
+    /// current, as after `leave_document`.
+    pub fn document_missing(&self, generation: u64) {
+        let mut current = lock(&self.current);
+        self.cut_off(generation);
+        if let Some(current) = current.as_mut() {
+            current.doc = None;
+            current.source = None;
+        }
+    }
+
+    /// The UI dropped an open on its way and keeps `path` on screen (an agent's newer show of the
+    /// file there), numbered `generation`: an open numbered below never becomes current, as after
+    /// `leave_document`, and the current document stays. True when it is `path`; false when such
+    /// an open had become current first, so the UI opens `path` again.
+    pub fn keep_document(&self, path: &Path, generation: u64) -> bool {
+        let current = lock(&self.current);
+        self.cut_off(generation);
+        current.as_ref().is_some_and(|c| same_path(&c.path, path))
+    }
+
+    /// The UI left or kept its document at `generation`: an open it numbered below never becomes
+    /// current. Called under the `current` lock, which `make_current` holds too, so an open can't
+    /// slip between the two.
+    fn cut_off(&self, generation: u64) {
+        self.count_open();
+        self.generation.fetch_max(generation, Ordering::SeqCst);
+        self.cutoff.fetch_max(generation, Ordering::SeqCst);
     }
 
     /// Asks the UI to reload the current document when it is stale and an index newer than its
@@ -294,12 +365,12 @@ impl WindowState {
         }
     }
 
-    /// The open numbered `seq` is on screen, with the page or PDF open `token` (none for any other
-    /// document): that open is kept however many come after it. Under the lock that made it
-    /// current, so a newer open's pin is never undone by an older one's.
-    fn pin_open(&self, seq: u64, token: Option<&str>) {
+    /// The open numbered `generation` is on screen, with the page or PDF open `token` (none for
+    /// any other document): that open is kept however many come after it. Under the lock that
+    /// made it current, so a newer open's pin is never undone by an older one's.
+    fn pin_open(&self, generation: u64, token: Option<&str>) {
         let current = lock(&self.current);
-        if current.as_ref().is_some_and(|c| c.seq == seq) {
+        if current.as_ref().is_some_and(|c| c.generation == generation) {
             lock(&self.app.page_opens).pin(&self.label, token);
         }
     }
@@ -699,11 +770,11 @@ mod tests {
         let mapper = PathMapper::default();
         let (ra, rb) = (render_file(&a, &mapper, &[]), render_file(&b, &mapper, &[]));
         // A became current, then B did, before A got to its ad-hoc root.
-        let (seq_a, seq_b) = (f.state.next_seq(), f.state.next_seq());
-        assert!(f.state.make_current(seq_a, &a, ra.as_ref().ok()));
-        assert!(f.state.make_current(seq_b, &b, rb.as_ref().ok()));
-        f.state.ensure_root_for(&b, seq_b);
-        f.state.ensure_root_for(&a, seq_a);
+        let (gen_a, gen_b) = (1, 2);
+        assert!(f.state.make_current(gen_a, &a, ra.as_ref().ok()));
+        assert!(f.state.make_current(gen_b, &b, rb.as_ref().ok()));
+        f.state.ensure_root_for(&b, gen_b);
+        f.state.ensure_root_for(&a, gen_a);
         let lib = lock(&f.state.library);
         assert!(lib
             .roots
@@ -721,7 +792,6 @@ mod tests {
         wait_until("the root is indexed", || settled(&f, &root));
         f.state.window_shown();
         // The render starts, an index lands while it runs, then it becomes current.
-        let seq = f.state.next_seq();
         let rendered = f.state.load(&doc);
         f.state.index_changed(Some(&root));
         assert_eq!(
@@ -729,7 +799,7 @@ mod tests {
             0,
             "nothing was current to refresh yet"
         );
-        f.state.finish_open(seq, &doc, rendered);
+        f.state.finish_open(1, &doc, rendered);
         assert_eq!(f.host.doc_changes(), 1);
     }
 }

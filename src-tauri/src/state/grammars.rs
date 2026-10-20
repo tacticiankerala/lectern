@@ -122,14 +122,13 @@ mod tests {
         let jsx = f.dir.file("two/chart.md", "```jsx\n<b />\n```\n");
         let mapper = PathMapper::default();
         let rendered = render_file(&ruby, &mapper, &[]);
-        f.state
-            .make_current(f.state.next_seq(), &ruby, rendered.as_ref().ok());
+        f.state.make_current(1, &ruby, rendered.as_ref().ok());
         assert_eq!(f.app.current_languages(), ["ruby"]);
         f.app
             .add_window("second", None, Arc::new(OpenQueue::default()), None);
         let second = f.app.window("second").unwrap();
         let rendered = render_file(&jsx, &mapper, &[]);
-        second.make_current(second.next_seq(), &jsx, rendered.as_ref().ok());
+        second.make_current(1, &jsx, rendered.as_ref().ok());
         f.app.window_focused("second");
         assert_eq!(f.app.current_languages(), ["jsx"]);
         f.app.window_focused("main");

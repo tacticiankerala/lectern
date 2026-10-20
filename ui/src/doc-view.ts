@@ -1,8 +1,10 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
-// buttons, tags and images, scrolling to anchors, lines and saved positions (position.ts), and room
-// after the text for its last heading to reach the top. An HTML page or a PDF shows in a frame
-// instead (frame-view.ts): a page keeps its scroll fraction as its reading position, its headings
-// are its anchors, and its links go through Lectern's link rules; a PDF keeps no reading position.
+// buttons, tags and images, scrolling to anchors, lines (opening a closed `<details>` folding one
+// away; an agent's target far down a long block to its own text, and one above every block to the
+// top) and saved positions (position.ts), and room after the text for its last heading to reach
+// the top. An HTML page or a PDF shows in a frame instead (frame-view.ts): a page keeps its
+// scroll fraction as its reading position, its headings are its anchors, and its links go through
+// Lectern's link rules; a PDF keeps no reading position.
 // A page whose frame another page fills is opened again, with a toast; one that keeps doing so is
 // let go, the document area saying so.
 //
@@ -10,7 +12,7 @@
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
-import { HEADINGS, findById, samePath } from "./dom";
+import { HEADINGS, findById, samePath, unfold } from "./dom";
 import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
@@ -18,11 +20,17 @@ import type { FollowResult } from "./generated/FollowResult";
 import type { FollowTarget } from "./generated/FollowTarget";
 import type { PageLoads } from "./generated/PageLoads";
 import type { SavedPosition } from "./generated/SavedPosition";
-import type { PageFrame } from "./page-frame";
+import type { PageAim, PageFrame } from "./page-frame";
 import { blockAt, capture, restore } from "./position";
-import { placeAt } from "./reflow";
+import { placeAt, stopPlacing } from "./reflow";
 import { effectiveTheme } from "./themes";
 import { renderNavigatingAway } from "./welcome";
+
+/**
+ * Where a target's own text is in the document `doc` once it is on screen (an agent's line or
+ * quote, which core found there), found in its block's own text; null when it isn't there.
+ */
+export type Passage = (doc: HTMLElement) => Range | null;
 
 /** Where an anchor or line lands below the pane's top edge, in pixels. */
 const TOP_GAP = 12;
@@ -109,11 +117,16 @@ export class DocView {
     }
   }
 
-  render(doc: DocPayload): void {
+  /**
+   * Shows `doc`; a PDF at its page `pdfPage` when given, else its first. A placement still settling
+   * in the document it replaces stops, so it never scrolls this one.
+   */
+  render(doc: DocPayload, pdfPage?: number): void {
+    stopPlacing(this.app.scroller);
     if (doc.frameUrl !== null) {
       // A page or a PDF shows in a frame, in place of the document.
       this.host.replaceChildren();
-      this.frame.show(doc, doc.frameUrl);
+      this.frame.show(doc, doc.frameUrl, pdfPage);
       this.lastHeading = null;
       this.fitRoom();
       return;
@@ -185,13 +198,86 @@ export class DocView {
     }
   }
 
-  /** Scrolls the block holding source line `line` to the top of the pane. */
+  /**
+   * Scrolls the HTML page showing to the passage `aim` finds, once it is ready, over its anchor or
+   * saved place; false when the ready page hasn't got it, or nothing showing is a page.
+   */
+  aimPage(aim: PageAim): boolean {
+    return this.frame.aim(aim);
+  }
+
+  /** Takes the PDF showing to its page `page`; nothing for anything else. */
+  toPdfPage(page: number): void {
+    this.frame.toPdfPage(page);
+  }
+
+  /**
+   * Scrolls the block holding source line `line` to the top of the pane, opening first any closed
+   * `<details>` it is folded away in (`unfold`).
+   */
   scrollToLine(line: number): boolean {
     const block = blockAt(this.host, line);
     if (block) {
+      unfold(this.host, block);
       placeAt(this.app.scroller, block, TOP_GAP);
     }
     return block !== null;
+  }
+
+  /**
+   * Scrolls an agent's target on source line `line` to the top of the pane: its own text there,
+   * `passage`, when that is inside a block longer than the view, past where the block's landing
+   * would show it (a line or a quote far down a long paragraph or code block); else, as for a
+   * passage in a short block, or when it isn't found, the block (`scrollToLine`). Any closed
+   * `<details>` the block is folded away in opens first, so it is measured as it will show.
+   */
+  scrollToPassage(line: number, passage: Passage): boolean {
+    const block = blockAt(this.host, line);
+    if (block !== null) {
+      unfold(this.host, block);
+    }
+    const text = block === null ? null : passage(this.host);
+    if (block === null || text === null || !this.belowLanding(block, text)) {
+      return this.scrollToLine(line);
+    }
+    placeAt(this.app.scroller, text, TOP_GAP);
+    return true;
+  }
+
+  /** Whether a note or a text file shows, whose source lines a target names. */
+  showsLines(): boolean {
+    return this.app.state.doc !== null && !this.frame.shown;
+  }
+
+  /**
+   * Scrolls an agent's target on source line `line` to the top of the pane: by its own text there,
+   * `passage`, when given (`scrollToPassage`), else by its block (`scrollToLine`); a line before
+   * the first block (a note's frontmatter, blank lines) to the document's top. False, moving
+   * nowhere, when no note or text file shows (`showsLines`).
+   */
+  scrollToTarget(line: number, passage?: Passage): boolean {
+    if (!this.showsLines()) {
+      return false;
+    }
+    const landed =
+      passage === undefined ? this.scrollToLine(line) : this.scrollToPassage(line, passage);
+    if (!landed) {
+      // No block starts on or before the line: it is above them all. A placement still settling
+      // would pull the view back down.
+      stopPlacing(this.app.scroller);
+      this.app.scroller.scrollTop = 0;
+    }
+    return true;
+  }
+
+  /**
+   * Whether `text`, in `block`, would end below the pane were the block landed at its top. Its
+   * offset into the block is measured, not the block's height, which content-visibility may still
+   * estimate off screen.
+   */
+  private belowLanding(block: HTMLElement, text: Range): boolean {
+    const bottom = text.getBoundingClientRect().bottom;
+    return bottom - block.getBoundingClientRect().top > this.app.scroller.clientHeight - TOP_GAP;
   }
 
   /**

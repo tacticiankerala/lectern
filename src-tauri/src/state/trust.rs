@@ -2,7 +2,8 @@
 //! credentials, so a path that comes from a note may only lead to a host the user chose: a
 //! library root's in any workspace, open or closed (its canonical form included), a path
 //! mapping's, WSL's, or one the user opened a file from by launching Lectern with it. Local paths
-//! are always fine.
+//! are always fine. An agent's path reaches only a host trusted already, and an agent's open never
+//! adds one; a workspace an agent creates takes only a host the user configured (`state::agent`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -89,6 +90,22 @@ impl Trust {
         hosts.dedup();
         hosts
     }
+
+    /// The hosts the user configured, sorted: the library roots' (their canonical forms too), the
+    /// path mappings' and WSL's, without those trusted only because the user opened a file there
+    /// this session. A new workspace's roots must be on one, as a root would make that session's
+    /// trust last.
+    pub fn configured_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = self
+            .configured
+            .iter()
+            .chain(self.canonical.values())
+            .cloned()
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
 }
 
 /// The host of a UNC path, unless it is a verbatim or device path (`\\?\…`, `\\.\…`), whose
@@ -167,6 +184,9 @@ mod tests {
         trust.opened_by_user(Path::new(r"\\fileserver\docs\plan.md"));
         assert!(trust.allows(r"\\FileServer\docs\other.md"));
         assert!(!trust.allows(r"\\elsewhere\docs\other.md"));
+        // For this session only: it isn't one the user configured.
+        assert!(trust.hosts().contains(&"fileserver".to_owned()));
+        assert_eq!(trust.configured_hosts(), ["wsl$", "wsl.localhost"]);
     }
 
     #[test]

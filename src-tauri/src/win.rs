@@ -1,6 +1,7 @@
 //! Windows integrations: the process start time, the boot mutex that tells a second launch apart,
-//! title-bar colours through DWM, keeping a reopened window behind another, DirectWrite font
-//! families, the WSL distributions and reading the current user's registry.
+//! title-bar colours through DWM, keeping a reopened window behind another, bringing a window
+//! forward for an agent, DirectWrite font families, the WSL distributions and reading the current
+//! user's registry.
 //! Handing files to the shell or an editor is in `shell.rs`.
 //!
 //! Lectern targets Windows only, so this module is compiled unconditionally.
@@ -8,9 +9,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
+use lectern_core::agent::show::FocusStep;
+use lectern_core::ipc::AgentFocus;
+
 use windows::core::{w, BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL, E_INVALIDARG, FILETIME, HWND,
+    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
+    E_INVALIDARG, FILETIME, HWND,
 };
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::DirectWrite::{
@@ -24,11 +29,18 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
+    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentThreadId, GetProcessTimes,
+    OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetGUIThreadInfo, SetWindowPos, GUITHREADINFO, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE,
+    BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetGUIThreadInfo,
+    GetWindowThreadProcessId, IsHungAppWindow, IsIconic, SetForegroundWindow, SetWindowPos,
+    ShowWindow, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG, GUITHREADINFO, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_RESTORE,
+    SW_SHOWNOACTIVATE,
 };
 
 /// 100 ns intervals from 1601-01-01, the `FILETIME` epoch, to the Unix epoch.
@@ -291,14 +303,190 @@ pub fn put_behind(window: HWND, front: HWND) -> Result<(), String> {
     .map_err(|e| format!("SetWindowPos: {e}"))
 }
 
+/// What bringing a window forward for an agent (`bring_forward`) does to it, a Win32 call or two
+/// at a time: behind a trait, so the ladder's decisions are tested without a desktop.
+pub trait Desktop {
+    /// It is minimised.
+    fn minimized(&self) -> bool;
+    /// Restores it from minimised, activating it (`SW_RESTORE`) or not (`SW_SHOWNOACTIVATE`).
+    fn restore(&self, activate: bool);
+    /// It is the foreground window.
+    fn in_front(&self) -> bool;
+    /// `SetForegroundWindow`, which Windows grants only to a process it lets take the foreground.
+    fn ask_foreground(&self);
+    /// Input from this process, which Windows counts towards letting it take the foreground: a
+    /// mouse move by nothing (`SendInput`). Never a tap of Alt: UIPI blocks it where it blocks the
+    /// move, and a stray Alt can leave the window in front in menu mode.
+    fn nudge(&self);
+    /// With this thread's input attached to the foreground window's thread's, `SetForegroundWindow`
+    /// and `BringWindowToTop`; then detached.
+    fn attach_and_raise(&self);
+    /// The foreground window has stopped answering (`IsHungAppWindow`): attaching to its thread's
+    /// input could stall this one.
+    fn front_is_hung(&self) -> bool;
+    /// Topmost, then not: on top of the other windows, without taking the focus.
+    fn raise(&self);
+    /// Flashes its taskbar button until it is focused.
+    fn flash(&self);
+}
+
+/// Brings `window` forward for an agent as `mode`, the `agentFocus` setting, has it, and says how
+/// far it came.
+///
+/// - **`front`:** a ladder, checking after each step whether the window is in front. It is
+///   restored if minimised; then asked for the foreground; then asked again after a nudge of
+///   input; then asked with this thread's input attached to the foreground thread's, unless the
+///   foreground window has stopped answering. When no step works, it settles for `raise` and a
+///   taskbar flash, and answers `raised`.
+/// - **`raise`:** restored without activation if minimised, and raised without the focus.
+/// - **`none`:** only a taskbar flash; the window stays where it is.
+///
+/// Runs on the thread that owns the window.
+pub fn bring_forward(window: &impl Desktop, mode: AgentFocus) -> FocusStep {
+    match mode {
+        AgentFocus::Front => {
+            if window.minimized() {
+                window.restore(true);
+            }
+            if window.in_front() {
+                return FocusStep::Foreground;
+            }
+            let ladder: [&dyn Fn(); 3] = [
+                &|| window.ask_foreground(),
+                &|| {
+                    window.nudge();
+                    window.ask_foreground();
+                },
+                // Never attached to a thread that has stopped answering, which could stall ours.
+                &|| {
+                    if !window.front_is_hung() {
+                        window.attach_and_raise();
+                    }
+                },
+            ];
+            for step in ladder {
+                step();
+                if window.in_front() {
+                    return FocusStep::Foreground;
+                }
+            }
+            window.raise();
+            window.flash();
+            FocusStep::Raised
+        }
+        AgentFocus::Raise => {
+            if window.minimized() {
+                window.restore(false);
+            }
+            window.raise();
+            FocusStep::Raised
+        }
+        AgentFocus::None => {
+            window.flash();
+            FocusStep::Flashed
+        }
+    }
+}
+
+/// A top-level window of the calling thread, as `bring_forward` works it.
+pub struct Win32Window(pub HWND);
+
+impl Desktop for Win32Window {
+    fn minimized(&self) -> bool {
+        // SAFETY: a plain query of a window handle; a stale one answers false.
+        unsafe { IsIconic(self.0) }.as_bool()
+    }
+
+    fn restore(&self, activate: bool) {
+        let show = if activate {
+            SW_RESTORE
+        } else {
+            SW_SHOWNOACTIVATE
+        };
+        // SAFETY: a plain call on a window handle; it returns whether it was visible before.
+        let _ = unsafe { ShowWindow(self.0, show) };
+    }
+
+    fn in_front(&self) -> bool {
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() };
+        front == self.0
+    }
+
+    fn ask_foreground(&self) {
+        // SAFETY: a plain call on a window handle; refused, it flashes the button instead.
+        let _ = unsafe { SetForegroundWindow(self.0) };
+    }
+
+    fn nudge(&self) {
+        let size = size_of::<INPUT>() as i32;
+        let mouse = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: the input is a live local, and `size` is an INPUT's.
+        let _ = unsafe { SendInput(&[mouse], size) };
+    }
+
+    fn front_is_hung(&self) -> bool {
+        // SAFETY: plain queries of window handles; a stale one answers false.
+        unsafe { IsHungAppWindow(GetForegroundWindow()) }.as_bool()
+    }
+
+    fn attach_and_raise(&self) {
+        // SAFETY: plain calls on window handles and thread ids; the input is detached again only
+        // when it was attached, before this returns.
+        unsafe {
+            let theirs = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            let ours = GetCurrentThreadId();
+            let attached =
+                theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, true).as_bool();
+            let _ = SetForegroundWindow(self.0);
+            let _ = BringWindowToTop(self.0);
+            if attached {
+                let _ = AttachThreadInput(ours, theirs, false);
+            }
+        }
+    }
+
+    fn raise(&self) {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        // SAFETY: plain calls on a window handle, moving and sizing nothing.
+        unsafe {
+            let _ = SetWindowPos(self.0, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(self.0, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+        }
+    }
+
+    fn flash(&self) {
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: self.0,
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: `info` is a live FLASHWINFO with its size set.
+        let _ = unsafe { FlashWindowEx(&info) };
+    }
+}
+
 /// Whether another Lectern is already running or starting, by a named mutex this process then
 /// holds until it exits. A second launch skips its boot work and lets the single-instance plugin
 /// hand its arguments over. `false` when the mutex can't be made, so Lectern still starts.
 pub fn another_instance_is_running(identifier: &str) -> bool {
-    let name = HSTRING::from(format!(r"Local\{identifier}.boot"));
     // SAFETY: the name is a NUL-terminated HSTRING; the handle is deliberately never closed, so
     // the mutex lives as long as the process.
-    match unsafe { CreateMutexW(None, true, &name) } {
+    match unsafe { CreateMutexW(None, true, &boot_mutex(identifier)) } {
         Ok(_handle) => {
             // SAFETY: reads the calling thread's last error, set by CreateMutexW just above.
             let last = unsafe { GetLastError() };
@@ -309,6 +497,26 @@ pub fn another_instance_is_running(identifier: &str) -> bool {
             false
         }
     }
+}
+
+/// Whether a Lectern of the app `identifier` runs, or is starting, in this session: whether its
+/// boot mutex (`another_instance_is_running`) is there.
+pub fn lectern_runs(identifier: &str) -> bool {
+    // SAFETY: the name is a NUL-terminated HSTRING; a handle opened is closed at once.
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, &boot_mutex(identifier)) } {
+        Ok(handle) => {
+            // SAFETY: the handle was just opened here, and is closed once.
+            let _ = unsafe { CloseHandle(handle) };
+            true
+        }
+        // There, but not this process's to open.
+        Err(e) => e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    }
+}
+
+/// The name of the boot mutex of the app `identifier`, in this session's namespace.
+fn boot_mutex(identifier: &str) -> HSTRING {
+    HSTRING::from(format!(r"Local\{identifier}.boot"))
 }
 
 /// The installed font families, in the user's language (else US English), sorted
@@ -506,6 +714,149 @@ mod tests {
         let missing = TestKey::new("no-lxss");
         assert!(distros_under(&missing.0).is_empty());
         assert_eq!(default_distro_under(&missing.0), None);
+    }
+
+    /// A window on a pretend desktop: it records each call, and comes in front once the call
+    /// `works` is made (never, for none; at once, for "already").
+    struct Pretend {
+        minimized: bool,
+        works: Option<&'static str>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+        front: std::cell::Cell<bool>,
+        /// The window in front has stopped answering.
+        front_hung: bool,
+    }
+
+    impl Pretend {
+        fn new(minimized: bool, works: Option<&'static str>) -> Self {
+            Self {
+                minimized,
+                works,
+                calls: std::cell::RefCell::new(Vec::new()),
+                front: std::cell::Cell::new(works == Some("already")),
+                front_hung: false,
+            }
+        }
+
+        fn call(&self, name: &'static str) {
+            self.calls.borrow_mut().push(name);
+            if self.works == Some(name) {
+                self.front.set(true);
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Desktop for Pretend {
+        fn minimized(&self) -> bool {
+            self.minimized
+        }
+        fn restore(&self, activate: bool) {
+            self.call(if activate {
+                "restore"
+            } else {
+                "restore quietly"
+            });
+        }
+        fn in_front(&self) -> bool {
+            self.front.get()
+        }
+        fn ask_foreground(&self) {
+            self.call("ask");
+        }
+        fn nudge(&self) {
+            self.call("nudge");
+        }
+        fn attach_and_raise(&self) {
+            self.call("attach");
+        }
+        fn front_is_hung(&self) -> bool {
+            self.front_hung
+        }
+        fn raise(&self) {
+            self.call("raise");
+        }
+        fn flash(&self) {
+            self.call("flash");
+        }
+    }
+
+    /// Front climbs the ladder only as far as it must, checking after each step.
+    #[test]
+    fn front_climbs_the_ladder_until_the_window_is_in_front() {
+        let table: [(bool, Option<&'static str>, &[&str]); 6] = [
+            (false, Some("already"), &[]),
+            (true, Some("restore"), &["restore"]),
+            (false, Some("ask"), &["ask"]),
+            // The ask after the nudge is the one that works.
+            (false, Some("nudge"), &["ask", "nudge", "ask"]),
+            (false, Some("attach"), &["ask", "nudge", "ask", "attach"]),
+            (
+                true,
+                Some("attach"),
+                &["restore", "ask", "nudge", "ask", "attach"],
+            ),
+        ];
+        for (minimized, works, calls) in table {
+            let window = Pretend::new(minimized, works);
+            assert_eq!(
+                bring_forward(&window, AgentFocus::Front),
+                FocusStep::Foreground,
+                "{works:?}"
+            );
+            assert_eq!(window.calls(), calls, "{works:?}");
+        }
+    }
+
+    /// When no step brings it in front, it settles for coming to the top without the focus,
+    /// flashing as well.
+    #[test]
+    fn front_settles_for_raised_and_a_flash_when_every_step_fails() {
+        let window = Pretend::new(false, None);
+        assert_eq!(bring_forward(&window, AgentFocus::Front), FocusStep::Raised);
+        assert_eq!(
+            window.calls(),
+            ["ask", "nudge", "ask", "attach", "raise", "flash"]
+        );
+    }
+
+    /// Behind a window that has stopped answering, the ladder never attaches to its thread's
+    /// input, which could stall Lectern's UI thread: it settles for raised and a flash.
+    #[test]
+    fn front_never_attaches_to_a_hung_foreground_window() {
+        let window = Pretend {
+            front_hung: true,
+            ..Pretend::new(false, Some("attach"))
+        };
+        assert_eq!(bring_forward(&window, AgentFocus::Front), FocusStep::Raised);
+        assert_eq!(window.calls(), ["ask", "nudge", "ask", "raise", "flash"]);
+    }
+
+    /// A Lectern runs while its boot mutex is held: what `mcp` checks before starting one.
+    #[test]
+    fn a_lectern_runs_while_its_boot_mutex_is_held() {
+        let identifier = format!("io.github.example.lectern-test-{}", std::process::id());
+        assert!(!lectern_runs(&identifier));
+        // Made, and held until this process exits, as a Lectern holds it.
+        assert!(!another_instance_is_running(&identifier));
+        assert!(lectern_runs(&identifier));
+    }
+
+    #[test]
+    fn raise_comes_to_the_top_without_activating_and_none_only_flashes() {
+        let window = Pretend::new(true, Some("restore"));
+        assert_eq!(bring_forward(&window, AgentFocus::Raise), FocusStep::Raised);
+        assert_eq!(window.calls(), ["restore quietly", "raise"]);
+        let window = Pretend::new(false, None);
+        assert_eq!(bring_forward(&window, AgentFocus::Raise), FocusStep::Raised);
+        assert_eq!(window.calls(), ["raise"]);
+        // Left alone: even a minimised window only flashes.
+        let window = Pretend::new(true, None);
+        assert_eq!(bring_forward(&window, AgentFocus::None), FocusStep::Flashed);
+        assert_eq!(window.calls(), ["flash"]);
     }
 
     #[test]

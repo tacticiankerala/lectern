@@ -417,6 +417,53 @@ body.focus .page-notice {
   color: var(--fg);
 }
 
+/* ---- An agent's request (agent.ts) ---- */
+
+/* Over the top of the document, so it never moves the text, until the reader answers. */
+#lx-agent-ask {
+  grid-area: doc;
+  align-self: start;
+  justify-self: center;
+  z-index: 20;
+  box-sizing: border-box;
+  width: min(640px, 100% - 32px);
+  margin-top: 12px;
+}
+
+.agent-ask {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 8px 7px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.2);
+  font: var(--ui-size) / 1.45 var(--ui-font);
+}
+
+.agent-ask-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-ask-file {
+  font-weight: 600;
+}
+
+.agent-ask-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.agent-ask .btn {
+  padding: 5px 12px;
+}
+
 /* ---- Properties strip ---- */
 
 #lx-properties {
@@ -1569,6 +1616,16 @@ body.resizing {
   margin-top: 6px;
 }
 
+.prefs-choices + .prefs-hint {
+  margin-bottom: 10px;
+}
+
+.prefs-choices-label {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .prefs-number {
   display: flex;
   align-items: center;
@@ -1582,6 +1639,34 @@ body.resizing {
 
 .prefs-hint code {
   font: 11px / 1 var(--code-font);
+}
+
+.prefs-connect {
+  margin-top: 14px;
+}
+
+.prefs-connect-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
+  margin-top: 10px;
+}
+
+.prefs-connect-shell {
+  grid-column: 1 / -1;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.prefs-connect-command {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font: 11.5px / 1.45 var(--code-font);
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .prefs-version {

@@ -1,6 +1,7 @@
 //! Mapping paths written in notes to files on this machine, and local files to asset and page
 //! URLs.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -102,17 +103,21 @@ impl PathMapper {
         Some(windows_join(&format!(r"\\wsl.localhost\{distro}"), raw))
     }
 
-    /// The path a WSL shell knows a local file by, the reverse of [`PathMapper::map`]:
+    /// The path a WSL shell in the mapper's distribution knows a local file by, the reverse of
+    /// [`PathMapper::map`]:
     /// 1. the longest user mapping from a Linux folder whose Windows side covers whole folders of
     ///    `path` (any letter case, either separator) gives that Linux folder;
-    /// 2. `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` give `/…`;
+    /// 2. `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` give `/…` when `<distro>` is
+    ///    [`PathMapper::wsl_distro`], in any letter case, or any distribution when that isn't
+    ///    named: in another, `/…` is another file;
     /// 3. `X:\…` gives `/mnt/x/…`.
     ///
-    /// Any other path, such as a share on another machine, has none.
+    /// Any other path, such as a share on another machine or another distribution's file, has
+    /// none.
     pub fn to_wsl(&self, path: &Path) -> Option<String> {
         let raw = path.to_string_lossy();
         self.user_unmapped(&raw)
-            .or_else(|| wsl_share_path(&raw))
+            .or_else(|| wsl_share_path(&raw, self.wsl_distro.as_deref()))
             .or_else(|| mnt_path(&raw))
     }
 
@@ -167,8 +172,46 @@ impl PathMapper {
     }
 }
 
-/// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`.
-fn wsl_share_path(raw: &str) -> Option<String> {
+/// Where the path is in `raw`: without surrounding whitespace, quotes or backticks, and without a
+/// trailing `#anchor`, `:line`, `:line:col` or `#Lline`. A `#` is an anchor only after a file name
+/// with an extension (`plan.md#next-steps`), so `Meeting #3.md` and the folder in `C:\C#\x.cs`
+/// keep theirs.
+fn bare_span(raw: &str) -> Range<usize> {
+    let path = raw.trim_start_matches(quoted);
+    let start = raw.len() - path.len();
+    let path = path.trim_end_matches(quoted);
+    let path = match path.rsplit_once('#') {
+        Some((file, anchor)) if !anchor.contains(['/', '\\']) && has_extension(file) => file,
+        _ => path,
+    };
+    // What `split_line_suffix` leaves is the start of `path`.
+    start..start + split_line_suffix(path).path.len()
+}
+
+/// Whitespace, or a quote or backtick a path may be written in.
+fn quoted(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’')
+}
+
+/// `raw`, a path written as text, such as one an agent gives: the path itself, and what follows
+/// it, a `:line`, `:line:col`, `#Lline` or `#anchor`. The whitespace, quotes and backticks around
+/// both are dropped.
+pub fn split_path_suffix(raw: &str) -> (&str, &str) {
+    let span = bare_span(raw);
+    (&raw[span.clone()], raw[span.end..].trim_end_matches(quoted))
+}
+
+/// Whether the last component of `path` is a file name with an extension, such as `plan.md`.
+fn has_extension(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+/// `\\wsl.localhost\Ubuntu\home\me` (or `\\wsl$\…`, with either separator) → `/home/me`, when
+/// the distribution named is `distro` (in any letter case), or any when `distro` is none.
+fn wsl_share_path(raw: &str, distro: Option<&str>) -> Option<String> {
     let mut parts = raw
         .strip_prefix(r"\\")
         .or_else(|| raw.strip_prefix("//"))?
@@ -177,7 +220,10 @@ fn wsl_share_path(raw: &str) -> Option<String> {
     if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
         return None;
     }
-    parts.next().filter(|distro| !distro.is_empty())?;
+    parts
+        .next()
+        .filter(|named| !named.is_empty())
+        .filter(|named| distro.is_none_or(|own| named.eq_ignore_ascii_case(own)))?;
     let rest: Vec<&str> = parts.filter(|part| !part.is_empty()).collect();
     Some(format!("/{}", rest.join("/")))
 }

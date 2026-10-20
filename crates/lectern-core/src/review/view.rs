@@ -84,6 +84,10 @@ pub struct ReviewPayload {
     pub unreadable: Vec<UnreadableView>,
     /// The comments whose effective status is still open.
     pub open_count: u32,
+    /// The comment the operation that answered with this changed (or added); none for a load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub changed: Option<u32>,
 }
 
 /// What [`build_payload`] builds from.
@@ -163,6 +167,7 @@ pub fn build_payload(input: PayloadInput, render: &dyn Fn(&str) -> String) -> Re
         comments,
         unreadable,
         open_count: review.map_or(0, Review::open_count),
+        changed: None,
     }
 }
 
@@ -231,7 +236,7 @@ fn comment_view(
 
 /// The UTF-16 code-unit offsets into `text` of the byte offsets `at`, each on a character
 /// boundary, in one pass over the text.
-fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
+pub(crate) fn utf16_offsets(text: &str, at: &[usize]) -> Vec<u32> {
     let unit = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     if text.is_ascii() {
         return at.iter().map(|&b| unit(b)).collect();

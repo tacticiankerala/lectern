@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lectern_core::ipc::{
-    EditorPref, HtmlPages, Measure, PathMapping, Settings, SettingsPatch, ThemeId, ThemeMode,
+    AgentFocus, AgentOpens, EditorPref, HtmlPages, Measure, PathMapping, Settings, SettingsPatch,
+    ThemeId, ThemeMode,
 };
 use lectern_core::store::State;
 use lectern_core::workspace::{
@@ -836,6 +837,8 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
             html_pages: Some(HtmlPages::Static),
             recent_in_menu: Some(99),
             wsl_distro: Some("Debian".to_owned()),
+            agent_opens: Some(AgentOpens::Switch),
+            agent_focus: Some(AgentFocus::Raise),
             ..SettingsPatch::default()
         },
     );
@@ -862,6 +865,8 @@ fn every_other_setting_goes_to_shared_and_is_clamped() {
     assert_eq!(shared.html_pages, HtmlPages::Static);
     assert_eq!(shared.recent_in_menu, 20);
     assert_eq!(shared.wsl_distro.as_deref(), Some("Debian"));
+    assert_eq!(shared.agent_opens, AgentOpens::Switch);
+    assert_eq!(shared.agent_focus, AgentFocus::Raise);
 }
 
 // Open routing.

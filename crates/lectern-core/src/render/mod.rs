@@ -158,7 +158,26 @@ pub fn render(source: &str, ctx: &RenderContext) -> RenderedDoc {
 /// The note's AST exactly as [`render`] starts from it, without the front matter, for the review
 /// text map. Sharing [`parse`] keeps its source lines the same as the rendered `data-sourcepos`.
 pub(crate) fn parse_for_text<'a>(arena: &'a Arena<'a>, source: &str) -> &'a AstNode<'a> {
+    #[cfg(test)]
+    TEXT_PARSES.with(|parses| parses.set(parses.get() + 1));
     parse(arena, source, &options::comrak_options()).0
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has parsed a note for its text (`parse_for_text`): what a test
+    /// counts the parses of some work by.
+    pub(crate) static TEXT_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The `id` of each heading of the note `source`, as [`render`] gives it, by the heading's first
+/// source line: what the reader's own links to a `#heading` find it by.
+pub(crate) fn heading_ids(source: &str) -> Vec<(u32, String)> {
+    let arena = Arena::new();
+    let (_, ids) = collect_headings(parse_for_text(&arena, source));
+    ids.into_iter()
+        .map(|((line, _), id)| (u32::try_from(line).unwrap_or(u32::MAX), id))
+        .collect()
 }
 
 /// The first steps of a render: parses the note, takes its front matter out of the AST and applies

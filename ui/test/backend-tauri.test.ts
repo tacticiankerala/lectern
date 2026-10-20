@@ -84,6 +84,22 @@ describe("TauriBackend", () => {
     ]);
   });
 
+  it("numbers its opens, and tells Rust whether it left its document, lost it, or keeps it", async () => {
+    const backend = new TauriBackend();
+    await backend.openDocument("C:\\V\\a.md", 1);
+    await backend.openUserPath("C:\\V\\notes", 2);
+    await backend.leaveDocument(false, 3);
+    await backend.leaveDocument(true, 4);
+    await backend.keepDocument("C:\\V\\a.md", 5);
+    expect(tauri.invoke.mock.calls).toEqual([
+      ["open_document", { path: "C:\\V\\a.md", generation: 1 }],
+      ["open_user_path", { path: "C:\\V\\notes", generation: 2 }],
+      ["leave_document", { missing: false, generation: 3 }],
+      ["leave_document", { missing: true, generation: 4 }],
+      ["keep_document", { path: "C:\\V\\a.md", generation: 5 }],
+    ]);
+  });
+
   it("tells Rust where the keyboard focus is, and hears the keys and loads of frames", async () => {
     const backend = new TauriBackend();
     await backend.setFrameFocus("page");
