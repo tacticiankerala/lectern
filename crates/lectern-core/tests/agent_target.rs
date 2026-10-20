@@ -487,20 +487,36 @@ fn offsets_are_counted_as_the_ui_counts_them() {
 
 // Anchors.
 
+fn anchor(text: &str) -> Target {
+    Target::Anchor {
+        anchor: text.to_owned(),
+    }
+}
+
 /// A `#anchor` after a path names a heading as the reader's own links do: the heading whose id is
-/// the anchor as written, else its slug. The show goes to that heading, by its path.
+/// the anchor as written, else its slug. The show goes to that heading, its target the anchor as
+/// the agent wrote it.
 #[test]
 fn an_anchor_names_a_heading_by_its_id_or_its_slug() {
     let source = "# Plan\n\n## Rollout plan\n\nText.\n\n## Notes\n\n## Notes\n";
     let text = TextMap::build(source);
     let at = |anchor: &str| show_anchor(&text, source, "plan.md", anchor);
-    let rollout = ShowAt {
-        target: heading("Plan › Rollout plan"),
-        place: Some(at_(source, "Rollout plan", 0, (3, 3))),
-    };
-    assert_eq!(at("rollout-plan"), Ok(rollout.clone()));
+    let rollout = Some(at_(source, "Rollout plan", 0, (3, 3)));
+    assert_eq!(
+        at("rollout-plan"),
+        Ok(ShowAt {
+            target: anchor("rollout-plan"),
+            place: rollout.clone(),
+        })
+    );
     // Not an id, the anchor is slugged as the reader's links slug it.
-    assert_eq!(at("Rollout Plan"), Ok(rollout));
+    assert_eq!(
+        at("Rollout Plan"),
+        Ok(ShowAt {
+            target: anchor("Rollout Plan"),
+            place: rollout,
+        })
+    );
     // Two headings alike: the second's id has a number after it.
     assert_eq!(
         at("notes").map(|a| a.place),
@@ -522,6 +538,41 @@ fn an_anchor_names_a_heading_by_its_id_or_its_slug() {
             notes,
             "notes.txt",
             "rollout-plan"
+        ),
+        Err("There's no heading #rollout-plan in notes.txt.".to_owned())
+    );
+}
+
+/// A show's anchor is found again as it was found first (a window finding its target again in the
+/// file as it shows it): the same heading, the second of two alike included, never the first by
+/// its text; one no heading has is the same error.
+#[test]
+fn an_anchor_is_found_again_as_it_was_found_first() {
+    let source = "# Plan\n\n## Rollout plan\n\nText.\n\n## Notes\n\n## Notes\n";
+    let text = TextMap::build(source);
+    for wanted in ["notes", "notes-1", "Rollout Plan"] {
+        let shown = show_anchor(&text, source, "plan.md", wanted).unwrap();
+        assert_eq!(
+            resolve_target(&text, source, "plan.md", &shown.target).map(Some),
+            Ok(shown.place),
+            "{wanted}"
+        );
+    }
+    assert_eq!(
+        place(source, &anchor("notes-1")),
+        Ok(at_(source, "Notes", 1, (9, 9)))
+    );
+    assert_eq!(
+        place(source, &anchor("risks")),
+        Err("There's no heading #risks in plan.md.".to_owned())
+    );
+    let notes = "Rollout plan\n\nText.\n";
+    assert_eq!(
+        resolve_target(
+            &TextMap::from_plain(notes),
+            notes,
+            "notes.txt",
+            &anchor("rollout-plan")
         ),
         Err("There's no heading #rollout-plan in notes.txt.".to_owned())
     );
@@ -638,10 +689,13 @@ fn only_an_html_page_takes_an_anchor_target() {
         check_target(DocKind::Pdf, &anchor, "brief.pdf"),
         Err("brief.pdf is a PDF: give a page target.".to_owned())
     );
-    let text = TextMap::of_note("plan.md", "# Plan\n\n## Rollout plan\n").unwrap();
+    // A show's `#anchor` after a note's path, found again, is the heading it names (as
+    // `show_anchor` found it first).
+    let source = "# Plan\n\n## Rollout plan\n";
+    let text = TextMap::of_note("plan.md", source).unwrap();
     assert_eq!(
-        resolve_target(&text, "# Plan\n", "plan.md", &anchor),
-        Err("Only an HTML page takes #rollout-plan as a target, not plan.md.".to_owned())
+        resolve_target(&text, source, "plan.md", &anchor).map(|p| p.start_line),
+        Ok(3)
     );
 }
 

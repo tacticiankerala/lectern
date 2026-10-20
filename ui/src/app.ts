@@ -173,6 +173,18 @@ export interface OpenOptions {
    * its block when it is far down a long one.
    */
   passage?: Passage;
+  /**
+   * `line` is an agent's target: one above every block (a note's frontmatter) lands at the top,
+   * never where the reader left the file (`DocView.scrollToTarget`).
+   */
+  agentLine?: boolean;
+  /**
+   * Where it lands, found once the file has opened and before it shows, while this is still the
+   * navigation on its way (an agent's target held on the bar, found again in the file as it is
+   * now): options laid over these. A change to the file meanwhile waits, as for any navigation,
+   * so it renders over where this landed. Never rejects.
+   */
+  findLanding?: () => Promise<OpenOptions>;
   /** A PDF's page to open at. */
   page?: number;
   /** A passage of an HTML page to scroll to once it is ready, found in its text then. */
@@ -924,11 +936,13 @@ export class App {
       // Scrolled to the anchor.
     } else if (
       opts.line !== undefined &&
-      (opts.passage === undefined
-        ? this.view.scrollToLine(opts.line)
-        : this.view.scrollToPassage(opts.line, opts.passage))
+      (opts.agentLine === true
+        ? this.view.scrollToTarget(opts.line, opts.passage)
+        : opts.passage === undefined
+          ? this.view.scrollToLine(opts.line)
+          : this.view.scrollToPassage(opts.line, opts.passage))
     ) {
-      // Scrolled to the line.
+      // Scrolled to the line, or for an agent's line above every block, to the top.
     } else if (doc.position) {
       // Where the reader left it last time.
       this.view.restore(doc.position);
@@ -1132,7 +1146,7 @@ export class App {
       page: () => this.view.page,
       shownPath: () => this.nav.currentPath(),
       opens: () => this.state.settings.agentOpens,
-      open: (path, landing) => this.openForAgent(path, landing),
+      open: (path, landing, find) => this.openForAgent(path, landing, find),
       move: (landing) => this.moveForAgent(landing),
       pageReady: (within) => this.pageReady(within),
       navigation: () => this.navigation,
@@ -1178,7 +1192,7 @@ export class App {
         void this.showThread(path, landing.comment, this.agentLanded(), this.navigation);
         return {};
       }
-      return landing ?? {};
+      return landing === null ? {} : agentOpenAt(landing);
     } catch (e) {
       warn(e);
       return {};
@@ -1186,13 +1200,24 @@ export class App {
   }
 
   /**
-   * Opens `path` for an agent, on the history, at `landing` when given. Once it has landed: null
+   * Opens `path` for an agent, on the history, at `landing` when given, or where `find` finds once
+   * the file has opened, before it shows (`OpenOptions.findLanding`). Once it has landed: null
    * when it is on screen, else why it isn't.
    */
-  private async openForAgent(path: string, landing: Landing | null): Promise<string | null> {
+  private async openForAgent(
+    path: string,
+    landing: Landing | null,
+    find?: () => Promise<Landing | null>,
+  ): Promise<string | null> {
     const landed = this.agentLanded();
     const thread = landing !== null && "comment" in landing ? landing.comment : null;
-    const at: OpenOptions = landing === null || "comment" in landing ? {} : landing;
+    const at: OpenOptions = landing === null || "comment" in landing ? {} : agentOpenAt(landing);
+    if (find !== undefined) {
+      at.findLanding = async () => {
+        const found = await find();
+        return found === null || "comment" in found ? {} : agentOpenAt(found);
+      };
+    }
     // The navigation this open starts, taken before it awaits (it is assigned synchronously): a
     // reader's navigation that overtakes it leaves the thread's reveal carrying this stale number,
     // so it never jumps back here once the reader's file has taken the screen.
@@ -1294,8 +1319,9 @@ export class App {
 
   /**
    * Moves within the document on screen to `landing` for an agent, marking where the reader was
-   * on the history first, so Back returns there. False, moving nowhere, when it is a passage the
-   * HTML page on screen, ready, hasn't got.
+   * on the history first, so Back returns there. A line lands as `DocView.scrollToTarget` has it,
+   * one above every block at the top. False, moving nowhere, when it is a passage the HTML page on
+   * screen, ready, hasn't got, or a line with no note or text file on screen.
    */
   private moveForAgent(landing: Landing): boolean {
     const landed = this.agentLanded();
@@ -1310,17 +1336,14 @@ export class App {
     }
     const page = this.view.page;
     const found = "aim" in landing && page?.ready === true ? landing.aim(page) : undefined;
-    if (found === null) {
+    if (found === null || ("line" in landing && !this.view.showsLines())) {
       return false;
     }
     this.nav.markHere();
     if ("line" in landing) {
-      if (landing.passage === undefined) {
-        this.view.scrollToLine(landing.line);
-      } else {
-        this.view.scrollToPassage(landing.line, landing.passage);
-      }
-    } else if ("page" in landing) {
+      return this.view.scrollToTarget(landing.line, landing.passage);
+    }
+    if ("page" in landing) {
       this.view.toPdfPage(landing.page);
     } else if (found !== undefined) {
       page?.scrollTo(found);
@@ -1520,6 +1543,14 @@ export class App {
     this.rightPanel.setCommentsEnabled(this.commentsShown());
     this.emit("settings");
   }
+}
+
+/**
+ * Where an agent's `landing`, other than a comment thread's, opens its file: a line one above
+ * every block at the top (`OpenOptions.agentLine`).
+ */
+function agentOpenAt(landing: Exclude<Landing, { comment: number }>): OpenOptions {
+  return "line" in landing ? { ...landing, agentLine: true } : landing;
 }
 
 /** A path's file name without its extension. */

@@ -84,6 +84,7 @@ pub use self::windows::is_folder;
 
 use self::agent::AgentCalls;
 use self::assets::AssetScope;
+use self::doc::CachedRender;
 use self::grammars::AppGrammars;
 use self::library::Library;
 use self::pages::PageOptions;
@@ -150,6 +151,9 @@ struct Current {
     refreshed_at: Option<u64>,
     /// What it rendered to, for the languages to warm first.
     doc: Option<Arc<RenderedDoc>>,
+    /// The text a note or a text file rendered from: what an agent's targets are found in again
+    /// (`agent_places`), the revision the window shows, never the file as it is on disk since.
+    source: Option<Arc<str>>,
 }
 
 /// Everything `App` needs from boot.
@@ -698,7 +702,7 @@ pub struct WindowState {
     /// Bumped, under the cache lock, whenever the index changes: a render begun before then
     /// isn't cached.
     index_gen: AtomicU64,
-    cache: Mutex<RenderCache>,
+    cache: Mutex<RenderCache<CachedRender>>,
     content: ContentCache,
     current: Mutex<Option<Current>>,
     /// Counts opens, launches, and the UI's leaves and keeps of its document, since startup: a

@@ -89,6 +89,35 @@ export function findById(scope: ParentNode, id: string): HTMLElement | null {
   return scope.querySelector<HTMLElement>(`[id="${cssEscape(id)}"]`);
 }
 
+/**
+ * The closed `<details>` of `doc` that hide `el`: those it sits in, outside their summary. Find
+ * opens them around a match, and a landing around its target.
+ */
+export function closedAround(doc: HTMLElement, el: Element): HTMLDetailsElement[] {
+  const closed: HTMLDetailsElement[] = [];
+  for (
+    let details = el.closest("details");
+    details instanceof HTMLDetailsElement && doc.contains(details);
+    details = details.parentElement?.closest("details") ?? null
+  ) {
+    if (!details.open && !details.querySelector(":scope > summary")?.contains(el)) {
+      closed.push(details);
+    }
+  }
+  return closed;
+}
+
+/**
+ * Opens the closed `<details>` of `doc` that fold `node` away (`closedAround`), as find opens
+ * those around a match: folded away, it has no box to scroll to, and doesn't show.
+ */
+export function unfold(doc: HTMLElement, node: Node): void {
+  const el = node instanceof Element ? node : node.parentElement;
+  for (const details of el === null ? [] : closedAround(doc, el)) {
+    details.open = true;
+  }
+}
+
 /** An element with attributes and children; strings become text nodes, never markup. */
 export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,

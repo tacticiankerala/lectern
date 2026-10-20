@@ -16,7 +16,9 @@
 // - `doc-changed` for the open document reloads it in place, keeping the reading position; when
 //   the file changed on disk, the properties strip notes the time. Refreshes are numbered apart
 //   from navigations: one never cancels a navigation, and one that arrives while a navigation is
-//   in flight waits for it, applying only if it lands on that path.
+//   in flight waits for it, applying only if it lands on that path. A navigation may find where it
+//   lands once its file has opened, before it shows (an agent's target found again in the file as
+//   it is now): still in flight meanwhile, so a change then renders over where it landed.
 // - A navigation that lands somewhere else saves the reading position in the document it leaves.
 //   Those that ask to `push` also record it, with that position, on the history; back and forward
 //   restore it. A travel changes the history only once it lands, and a second one in flight goes
@@ -182,8 +184,9 @@ export class Navigation {
 
   /**
    * Fetches a document and shows it unless a newer navigation started meanwhile, then sends the
-   * time from call to paint. `landed` runs once it is accepted, just before it shows. True when it
-   * was shown.
+   * time from call to paint. Where it lands may be found once it has opened (`findLanding`), before
+   * it shows, while this is still the navigation on its way. `landed` runs once it is accepted,
+   * just before it shows. True when it was shown.
    */
   private async load(
     fetch: () => Promise<OpenResult | null>,
@@ -193,8 +196,16 @@ export class Navigation {
     const t0 = performance.now();
     const navigation = this.beginNavigation();
     let result: OpenResult | null;
+    let at = opts;
     try {
       result = await fetch();
+      if (
+        result?.status === "ok" &&
+        opts.findLanding !== undefined &&
+        navigation === this.navigations
+      ) {
+        at = { ...opts, ...(await opts.findLanding()) };
+      }
     } catch (e) {
       if (this.endNavigation(navigation)) {
         this.app.toast(String(e));
@@ -211,9 +222,9 @@ export class Navigation {
       return false;
     }
     landed?.();
-    this.leave(result, opts.push === true);
+    this.leave(result, at.push === true);
     this.app.state.updated = null;
-    this.app.show(result, opts, opts.position);
+    this.app.show(result, at, at.position);
     void this.settleDeferred();
     await nextPaint();
     this.app.backend.perfMark("doc-switch", performance.now() - t0);

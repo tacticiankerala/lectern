@@ -511,7 +511,8 @@ pub fn keep_document(
 }
 
 /// Where each of an agent's `targets` is now in `path`, the note or text file the calling window
-/// shows, for its highlights after the file changed: none for one that's gone.
+/// shows, in the text it rendered from: for a target held on the ask bar once its file has opened,
+/// and for the agent's highlights after the file changed. None for one that's gone.
 #[tauri::command]
 pub async fn agent_places(
     path: String,

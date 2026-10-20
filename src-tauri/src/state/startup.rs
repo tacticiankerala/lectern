@@ -22,7 +22,8 @@ impl WindowState {
     /// The window's startup payload, with every workspace for its title. The document rendered as
     /// the window started (during boot, for the first window) becomes the initial document, unless
     /// a second launch, or an agent's `show`, asked for another one meanwhile: the agent's comes
-    /// with its target, and its `show` hears whether it opened. An agent's never takes the place
+    /// with its target, found again in the file as it opened, and its `show` hears whether it
+    /// opened, or that its target isn't there now. An agent's never takes the place
     /// of the user's launch (the command line's file, or a second launch's): its request goes to
     /// the UI now, which answers it once it has shown the user's file. The payloads of the window
     /// that asked first are the primary ones, until the automatic update check has run
@@ -63,11 +64,18 @@ impl WindowState {
             let path = PathBuf::from(&request.path);
             if by_agent {
                 // A file, its host checked already (`state::agent`): opened as it is, trusting
-                // nothing new, then taken to the agent's target. Its `show` hears how it went.
+                // nothing new, then taken to the agent's target, found again in the file as it
+                // opened, which may have changed since the show found it. Its `show` hears how it
+                // went: shown, the open's error, or that the target isn't in the file now.
                 let opened = self.open_document(&request.path);
-                self.opens.opened(&request.path, &opened, settle);
+                match at.map(|at| self.found_again(&path, at)).transpose() {
+                    Ok(at) => {
+                        self.opens.opened(&request.path, &opened, settle);
+                        agent_target = at;
+                    }
+                    Err(missing) => self.opens.missed(&request.path, missing, settle),
+                }
                 initial = Some(opened);
-                agent_target = at;
             } else if self.blank_window_folder(&path) {
                 // The UI's listeners are in place before it asks for this payload.
                 self.emit(UiEvent::OpenRequest(OpenRequest {

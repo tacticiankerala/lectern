@@ -22,7 +22,15 @@
 // - Targets (`landing`): in a note or a text file, Rust's core found the target and sends where
 //   (`places`), so the window goes to its line; to its own text instead (a line's, a quote's,
 //   found in its block's text alone, never the whole document's) when that is far down a block
-//   longer than the view, while a heading lands by its block. In an HTML page the window finds it
+//   longer than the view, while a heading lands by its block, and a line above every block (a
+//   note's frontmatter) at the top. A line with no note or text file on screen fails. One an open
+//   goes to (at once, or once the reader says Show on the bar) is found again by core once the
+//   file has opened, before it shows, as the file may have changed since core found it as the
+//   show came, or while the bar waited (a change while it opens renders over where it landed):
+//   gone, it fails as a missing target does, the file staying open; and any navigation after the
+//   open's own leaves it, as the reader's, not shown. (A window starting for an agent has Rust
+//   find it again as its startup opens the file.) A closed
+//   `<details>` folding a target away opens (doc-view.ts). In an HTML page the window finds it
 //   in what the page's bridge reported (`pageSpan`): a quote by its text, whitespace aside, told
 //   apart from others like it by the text before and after it (256 characters of each at most); a
 //   heading by its whole text or its path, in the page's blocks (the outline's list shortens
@@ -39,7 +47,8 @@
 // - `highlight`: the agent's highlights, on a layer of their own (`agent`) over the comments' and
 //   under find's, at most 20, the oldest dropped first, a passage painted already not added again
 //   (the count is of distinct passages): in a note or a text file where core found
-//   them (else over the blocks on their lines), in an HTML page through its bridge. Each keeps its
+//   them (else over the blocks on their lines), any closed `<details>` folding one away opened so
+//   the reader can see it; in an HTML page through its bridge. Each keeps its
 //   target: when the text changes (the file shown afresh, a page's text reported again), they are
 //   found again, a note's by core, and painted where they are now, never at the old places; one
 //   that's gone is dropped. They are never saved, and go when the window shows another file, or
@@ -69,7 +78,7 @@ import {
   type TextIndex,
 } from "./comments-text";
 import type { Passage } from "./doc-view";
-import { h, HEADINGS, samePath } from "./dom";
+import { h, HEADINGS, samePath, unfold } from "./dom";
 import type { Span } from "./find";
 import type { AgentCall } from "./generated/AgentCall";
 import type { AgentOpens } from "./generated/AgentOpens";
@@ -155,14 +164,15 @@ export type Landing =
 
 /**
  * Where `target` takes the reader, found by core at `place` in a note or a text file: its line,
- * and a line's or a quote's own text there (`passageIn`); a heading lands by its block. Null for
- * none.
+ * and a line's or a quote's own text there (`passageIn`); a heading, or the `#anchor` naming one,
+ * lands by its block. Null for none.
  */
 export function landing(target: Target | undefined, place: TextPlace | undefined): Landing | null {
   if (place !== undefined) {
     const { textStart, textEnd, blockOffset } = place;
     return target !== undefined &&
       !("heading" in target) &&
+      !("anchor" in target) &&
       textStart !== undefined &&
       textEnd !== undefined &&
       blockOffset !== undefined
@@ -238,6 +248,15 @@ interface Pending {
   doc: DocPayload | null;
 }
 
+/**
+ * Finding a note's target again as an open renders it (`Agent.findInOpen`): what the open asks
+ * (`find`), and why it went nowhere once it has (`missing`, null once found).
+ */
+interface FindInOpen {
+  find: () => Promise<Landing | null>;
+  missing: () => string | null;
+}
+
 /** Whether the CSS Custom Highlight API is there to paint with. */
 const supported = (): boolean => typeof Highlight === "function" && "highlights" in CSS;
 
@@ -262,13 +281,20 @@ export interface AgentHost extends DocHost {
   /** Whether an agent's open of another file asks the reader first, or switches at once. */
   opens(): AgentOpens;
   /**
-   * Opens `path` on the history, at `landing` when given. Once it has landed: null when it is on
-   * screen, else why it isn't.
+   * Opens `path` on the history, at `landing` when given, or where `find` finds once the file has
+   * opened, before it shows, while the open is still the navigation on its way (null for nowhere;
+   * it never rejects). The open's navigation has started once this returns: `navigation()` is its
+   * own then. Once it has landed: null when it is on screen, else why it isn't.
    */
-  open(path: string, landing: Landing | null): Promise<string | null>;
+  open(
+    path: string,
+    landing: Landing | null,
+    find?: () => Promise<Landing | null>,
+  ): Promise<string | null>;
   /**
    * Moves within the document on screen to `landing`, marking where the reader was on the history
-   * first; false, moving nowhere, for a passage the HTML page on screen hasn't got.
+   * first; false, moving nowhere, for a passage the HTML page on screen hasn't got, or a line with
+   * no note or text file on screen.
    */
   move(landing: Landing): boolean;
   /**
@@ -324,10 +350,15 @@ interface Ask {
   agent: string;
   /** The heading it is about, as its target names it (or the anchor after a page's path). */
   heading: string | null;
-  /** Where the file opens. */
+  /** Where the file opens: none for `inNote`'s target, found again as it opens. */
   landing: Landing | null;
   /** An HTML page's passage, found once the page has loaded; null for any other target. */
   inPage: Target | null;
+  /**
+   * A note's or a text file's target, which core found as the bar went up: found again in the file
+   * Show opens, as it opens, as it may have changed meanwhile; null for any other target.
+   */
+  inNote: Target | null;
   showing: Showing;
   /** When Rust stops waiting for the reader's answer, in ms since the epoch; 0 when it doesn't. */
   answerBy: number;
@@ -519,6 +550,8 @@ export class Agent {
     const showing: Showing = { id, navigation: null };
     const inPage =
       target !== undefined && places.length === 0 && foundInPage(target) ? target : null;
+    // Where core found a note's target, as the show came: an open finds it again as it renders.
+    const inNote = target !== undefined && places[0] !== undefined ? target : null;
     const land = inPage ? this.pageLanding(inPage, showing, args.path) : landing(target, places[0]);
     void this.settle("replaced");
     // The file on screen stays unless this opens another: an older request's open on its way is
@@ -551,14 +584,21 @@ export class Agent {
       return { kind: "shown" };
     }
     if (route === "open") {
-      const opened = await this.open(args.path, land);
+      const again = inNote === null ? null : this.findInOpen(args.path, inNote);
+      const opening = this.open(args.path, again === null ? land : null, again?.find);
+      // The open's own navigation, started before it awaits: any later one is the reader's.
+      const own = this.host.navigation();
+      const opened = await opening;
+      if (again !== null && opened.kind === "shown") {
+        return this.foundInOpen(id, args.path, own, again.missing());
+      }
       if (!inPage || !land || opened.kind !== "shown" || !this.pageShown()) {
         // Not on its way to a page's passage: a failed open's target goes nowhere, later either.
         this.ended(showing);
         // One a newer request dropped on its way was replaced by it.
         return opened.kind === "failed" && this.lastShow !== id ? { kind: "replaced" } : opened;
       }
-      showing.navigation = this.host.navigation();
+      showing.navigation = own;
       this.aimed(showing, land);
       return this.reach(showing, args.path, inPage, land, by, false);
     }
@@ -572,7 +612,17 @@ export class Agent {
             : null;
     // Rust waits for the reader's answer `wait` seconds, when it waits.
     const answerBy = args.wait > 0 ? Date.now() + args.wait * 1000 : 0;
-    this.asking = { id, path: args.path, agent, heading, landing: land, inPage, showing, answerBy };
+    this.asking = {
+      id,
+      path: args.path,
+      agent,
+      heading,
+      landing: inNote === null ? land : null,
+      inPage,
+      inNote,
+      showing,
+      answerBy,
+    };
     this.renderBar();
     return { kind: "asked" };
   }
@@ -681,9 +731,13 @@ export class Agent {
     return { kind: "shown" };
   }
 
-  /** Opens `path` at `land`: shown, or failed with why. */
-  private async open(path: string, land: Landing | null): Promise<AgentReply> {
-    const failure = await this.host.open(path, land);
+  /** Opens `path` at `land`, or where `find` finds as it renders: shown, or failed with why. */
+  private async open(
+    path: string,
+    land: Landing | null,
+    find?: () => Promise<Landing | null>,
+  ): Promise<AgentReply> {
+    const failure = await this.host.open(path, land, find);
     return failure === null
       ? { kind: "shown" }
       : { kind: "failed", message: didNotOpen(path, failure) };
@@ -836,7 +890,8 @@ export class Agent {
 
   /**
    * Paints the agent's highlights in the document on screen: a note's or a text file's on the
-   * `agent` layer, an HTML page's through its bridge. None clears the layer.
+   * `agent` layer, any closed `<details>` folding one away opened, so the reader can see what the
+   * agent points at; an HTML page's through its bridge. None clears the layer.
    */
   private paint(): void {
     const doc = this.host.doc();
@@ -863,6 +918,10 @@ export class Agent {
       CSS.highlights.delete("agent");
       return;
     }
+    for (const range of ranges) {
+      unfold(el, range.startContainer);
+      unfold(el, range.endContainer);
+    }
     const highlight = new Highlight(...ranges);
     highlight.priority = HIGHLIGHT_PRIORITY;
     CSS.highlights.set("agent", highlight);
@@ -870,17 +929,25 @@ export class Agent {
 
   /**
    * Show, on the bar: the request comes off it, and settles once its file has opened (shown), or
-   * hasn't (failed, with why, which the window shows too). An HTML page's passage settles as an
-   * immediate show's does, once the page has loaded, waited for while Rust still waits for the
-   * answer, else as long as an immediate show waits: failed when it isn't there, replaced when a
-   * newer request came meanwhile.
+   * hasn't (failed, with why, which the window shows too). A note's or a text file's target is
+   * found again by core once the file has opened, before it shows, in the file as it is now, and
+   * the file shows there: failed, the file staying open, when it isn't there any more, as a
+   * missing target is. Any navigation after the open's own leaves it: replaced by a newer
+   * request, else failed, as a show on its way is. An HTML page's passage settles as an immediate
+   * show's does, once the page has loaded, waited for while Rust still waits for the answer, else
+   * as long as an immediate show waits: failed when it isn't there, replaced when a newer request
+   * came meanwhile.
    */
   private async showAsked(): Promise<void> {
     const ask = this.take();
     if (ask === null) {
       return;
     }
-    const failure = await this.host.open(ask.path, ask.landing);
+    const again = ask.inNote === null ? null : this.findInOpen(ask.path, ask.inNote);
+    const opening = this.host.open(ask.path, ask.landing, again?.find);
+    // The open's own navigation, started before it awaits: any later one is the reader's.
+    const navigation = this.host.navigation();
+    const failure = await opening;
     if (failure !== null) {
       // Dropped on its way by a newer request, it was replaced.
       await (this.lastShow === ask.id
@@ -888,11 +955,18 @@ export class Agent {
         : this.record(ask, "replaced"));
       return;
     }
+    if (again !== null) {
+      const found = this.foundInOpen(ask.id, ask.path, navigation, again.missing());
+      await (found.kind === "failed"
+        ? this.record(ask, "failed", found.message)
+        : this.record(ask, found.kind === "replaced" ? "replaced" : "shown"));
+      return;
+    }
     if (ask.inPage === null || ask.landing === null || !this.pageShown()) {
       await this.record(ask, "shown");
       return;
     }
-    ask.showing.navigation = this.host.navigation();
+    ask.showing.navigation = navigation;
     this.aimed(ask.showing, ask.landing);
     const by = Math.max(ask.answerBy, Date.now() + ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
     const reply = await this.reach(ask.showing, ask.path, ask.inPage, ask.landing, by, false);
@@ -900,6 +974,50 @@ export class Agent {
     await (reply.kind === "failed"
       ? this.record(ask, "failed", reply.message, true)
       : this.record(ask, reply.kind === "replaced" ? "replaced" : "shown", undefined, true));
+  }
+
+  /**
+   * Finding a note's or a text file's `target` again in `path` as an open renders it, before it
+   * shows (`AgentHost.open`'s `find`): core looks in that revision, as the file may have changed
+   * since core found the target, as the show came. `missing()` is why it went nowhere once looked
+   * for (that it isn't there, or why core couldn't look); null once found.
+   */
+  private findInOpen(path: string, target: Target): FindInOpen {
+    let missing: string | null = notThere(path);
+    return {
+      find: async () => {
+        try {
+          const [place = null] = await this.host.places(path, [target]);
+          missing = place === null ? notThere(path) : null;
+          return place === null ? null : landing(target, place);
+        } catch (e) {
+          missing = e instanceof Error ? e.message : String(e);
+          return null;
+        }
+      },
+      missing: () => missing,
+    };
+  }
+
+  /**
+   * What the show `id` of a note's target in `path`, found again as its open, the navigation
+   * `navigation`, rendered (`findInOpen`), comes to once that open has landed: replaced by a newer
+   * request; failed, as a show on its way is, after any navigation since the open's own; failed
+   * with why when the target went nowhere (`missing`), the file staying open; else shown.
+   */
+  private foundInOpen(
+    id: number,
+    path: string,
+    navigation: number,
+    missing: string | null,
+  ): AgentReply {
+    if (this.lastShow !== id) {
+      return { kind: "replaced" };
+    }
+    if (this.host.navigation() !== navigation) {
+      return { kind: "failed", message: notOnScreen(path) };
+    }
+    return missing === null ? { kind: "shown" } : { kind: "failed", message: missing };
   }
 
   /** The request being asked about, if any, settles as `answer` (see `take` and `record`). */

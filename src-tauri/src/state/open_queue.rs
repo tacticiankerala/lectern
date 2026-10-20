@@ -221,6 +221,14 @@ impl OpenQueue {
         lock(&self.inner).settle(path, settled, to);
     }
 
+    /// An agent's request for `path`, held for the UI's startup, opened, but its target isn't in
+    /// the file as it opened (`message`, core's sentence): failed, as a target that isn't there
+    /// is, the file open all the same. Its `show` (`to`), if one still waits, hears it, and
+    /// `status` keeps it.
+    pub(super) fn missed(&self, path: &str, message: String, to: Option<Sender<Settled>>) {
+        lock(&self.inner).settle(path, (AskAnswer::Failed, Some(message)), to);
+    }
+
     /// What became of the agents' requests held here, the oldest first, for `status`.
     pub(super) fn answers(&self) -> Vec<AskOutcome> {
         lock(&self.inner).answers.clone()

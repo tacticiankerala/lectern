@@ -2,10 +2,11 @@
 // outline marks as being read, which a navigation lands a little below the pane's top; `show` asks
 // with a bar over the document, and an agent's switch keeps a half-written comment. A target lands
 // at the top, with Back to where the reader was, and a line target inside a long paragraph or code
-// block lands that line, not the block's top; an agent's highlights paint on their own layer in
-// a note, and through its bridge in an HTML page, whose text `read` takes from the page. An agent's
-// comment on a page on screen is its own card, painted in the page, and `show` at a thread opens
-// the Comments tab on it.
+// block lands that line, not the block's top; one folded in a closed details opens it, and a line
+// in a note's frontmatter lands at the document's top; an agent's highlights paint on their own
+// layer in a note, and through its bridge in an HTML page, whose text `read` takes from the page.
+// An agent's comment on a page on screen is its own card, painted in the page, and `show` at a
+// thread opens the Comments tab on it.
 import { expect, test, type Page } from "@playwright/test";
 import type { Backend } from "../src/backend";
 import {
@@ -443,6 +444,228 @@ test("a line target in a long code block of a note lands that line at the top", 
     return null;
   }, wanted);
   expect(Math.abs((top ?? Infinity) - LANDING_PX)).toBeLessThanOrEqual(LANDING_SLACK_PX);
+});
+
+test("a quote folded in a closed details opens it, and lands with the quote in view", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  const path = fixturePath(ALPHA);
+  const quote = "surface at dusk";
+  await page.evaluate((path) => {
+    const paragraphs = (from: number, text: string) =>
+      Array.from({ length: 40 }, (_, i) => {
+        const line = String(from + 2 * i);
+        return `<p data-sourcepos="${line}:1-${line}:${String(text.length)}">${text}</p>`;
+      }).join("");
+    // As core renders Markdown between raw HTML: the details has no lines, its paragraph does.
+    // Far enough down to need a scroll, with enough after it to reach the top.
+    const html =
+      `<h1 id="alpha" data-sourcepos="1:1-1:7">Alpha</h1>${paragraphs(3, "Before.")}` +
+      `<details><summary>Field notes</summary>` +
+      `<p data-sourcepos="86:1-86:41">The lanternfish surface at dusk in spring.</p></details>` +
+      paragraphs(90, "After.");
+    window.__fake.setDoc(path, html);
+    window.__fake.emit("doc-changed", { path });
+  }, path);
+  const details = page.locator("#lx-doc details");
+  await expect(details).toHaveCount(1);
+  await expect(details).not.toHaveAttribute("open");
+  // Where core finds the quote: on line 86, at its text.
+  const place = await page.evaluate((quote) => {
+    const start = window.__lxDocText().indexOf(quote);
+    const blockOffset = window.__lxDocText("details p").indexOf(quote);
+    return {
+      startLine: 86,
+      endLine: 86,
+      textStart: start,
+      textEnd: start + quote.length,
+      blockOffset,
+    };
+  }, quote);
+  expect(place.textStart).toBeGreaterThan(0);
+  const shown = await page.evaluate(
+    ({ path, place, quote }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { quote }, newWindow: false, wait: 0 },
+        "Claude",
+        [place],
+      ),
+    { path, place, quote },
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await expect(details).toHaveAttribute("open", "");
+  await page.waitForTimeout(1000);
+  // The quote is laid out, inside the pane.
+  const box = await page.evaluate((quote) => {
+    const pane = document.getElementById("lx-doc-pane")?.getBoundingClientRect();
+    const node = document.querySelector("#lx-doc details p")?.firstChild;
+    if (!pane || !(node instanceof Text)) return null;
+    const range = document.createRange();
+    const at = node.data.indexOf(quote);
+    range.setStart(node, at);
+    range.setEnd(node, at + quote.length);
+    const r = range.getBoundingClientRect();
+    return {
+      height: r.height,
+      top: r.top - pane.top,
+      bottom: r.bottom - pane.top,
+      pane: pane.height,
+    };
+  }, quote);
+  expect(box?.height).toBeGreaterThan(0);
+  expect(box?.top).toBeGreaterThanOrEqual(0);
+  expect(box?.bottom).toBeLessThanOrEqual(box?.pane ?? 0);
+});
+
+test("a line before the first block, in a note's frontmatter, lands at the top", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  // Read well down the plan first.
+  const item = page.locator("#lx-outline li", { hasText: /^Section 12$/ });
+  await item.locator("a").click();
+  await expectLandedOn(page, "section-12");
+  const pane = page.locator("#lx-doc-pane");
+  expect(await pane.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  // Line 1 is the frontmatter's opening fence: core finds the line, with no text on it.
+  const shown = await page.evaluate(
+    (path) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { line: 1 }, newWindow: false, wait: 0 },
+        "Claude",
+        [{ startLine: 1, endLine: 1 }],
+      ),
+    fixturePath(BIG_PLAN),
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await expect.poll(() => pane.evaluate((el) => el.scrollTop)).toBe(0);
+  // Back returns to where the reader was.
+  await page.keyboard.press("Alt+ArrowLeft");
+  await expectLandedOn(page, "section-12");
+});
+
+test("an open at a line in a note's frontmatter lands at the top, not where the reader left it", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  const plan = fixturePath(BIG_PLAN);
+  await page.evaluate((plan) => {
+    window.__fake.settingsElsewhere({ agentOpens: "switch" });
+    // The reader left the plan at Section 12.
+    const backend = window.__fake as unknown as Pick<Backend, "savePosition">;
+    void backend.savePosition(plan, {
+      headingId: "section-12",
+      offset: 0,
+      line: null,
+      fraction: 0,
+    });
+  }, plan);
+  const shown = await page.evaluate(
+    (path) =>
+      window.__fake.agentRequest(
+        { tool: "show", path, target: { line: 1 }, newWindow: false, wait: 0 },
+        "Claude",
+        [{ startLine: 1, endLine: 1 }],
+      ),
+    plan,
+  );
+  expect(shown).toEqual({ kind: "shown" });
+  await expect(page).toHaveTitle("Big Plan — Lectern");
+  await page.waitForTimeout(1000);
+  expect(await page.locator("#lx-doc-pane").evaluate((el) => el.scrollTop)).toBe(0);
+});
+
+test("Show finds a held target in the revision it renders, though the file changes as it opens", async ({
+  page,
+}) => {
+  await openFixture(page, ALPHA);
+  const plan = fixturePath(BIG_PLAN);
+  // Where core finds Section 12 as the bar goes up: its heading's line.
+  const line = await page.evaluate(
+    (plan) => window.__fake.blocksOf(plan).find(([, , text]) => text === "Section 12")?.[0] ?? 0,
+    plan,
+  );
+  expect(line).toBeGreaterThan(1);
+  const asked = await page.evaluate(
+    ({ plan, line }) =>
+      window.__fake.agentRequest(
+        { tool: "show", path: plan, target: { heading: "Section 12" }, newWindow: false, wait: 0 },
+        "Claude",
+        [{ startLine: line, endLine: line }],
+      ),
+    { plan, line },
+  );
+  expect(asked).toEqual({ kind: "asked" });
+  // The plan changes on disk just after the open has read it, before the target is found again:
+  // a paragraph lands before Section 12, which moves two lines down; the watcher tells the window.
+  // The refresh that follows is held until the test lets it go (`letRefresh`).
+  await page.evaluate(
+    ({ plan, line }) => {
+      const fake = window.__fake as unknown as Backend & typeof window.__fake;
+      const open = fake.openDocument.bind(fake);
+      const held = new Promise<void>((resolve) => {
+        (window as unknown as { letRefresh: () => void }).letRefresh = resolve;
+      });
+      let changed = false;
+      fake.openDocument = async (path, generation) => {
+        if (changed && path === plan) {
+          await held;
+          return open(path, generation);
+        }
+        const result = await open(path, generation);
+        if (!changed && path === plan) {
+          changed = true;
+          const html = (fake.html(plan) ?? "").replace(
+            /data-sourcepos="(\d+):(\d+)-(\d+):(\d+)"/g,
+            (_, s: string, a: string, e: string, b: string) => {
+              const shift = (n: string) => String(Number(n) >= line ? Number(n) + 2 : Number(n));
+              return `data-sourcepos="${shift(s)}:${a}-${shift(e)}:${b}"`;
+            },
+          );
+          fake.setDoc(
+            plan,
+            html.replace(
+              '<h2 id="section-12"',
+              `<p data-sourcepos="${String(line)}:1-${String(line)}:9">Inserted.</p><h2 id="section-12"`,
+            ),
+          );
+          const blocks = fake
+            .blocksOf(plan)
+            .map(([s, e, text]): [number, number, string] => [
+              s >= line ? s + 2 : s,
+              e >= line ? e + 2 : e,
+              text,
+            ]);
+          const at = blocks.findIndex(([s]) => s > line);
+          blocks.splice(at, 0, [line, line, "Inserted."]);
+          fake.setText(plan, blocks);
+          fake.emit("doc-changed", { path: plan });
+        }
+        return result;
+      };
+    },
+    { plan, line },
+  );
+  await bar(page).getByRole("button", { name: "Show" }).click();
+  await expect(page).toHaveTitle("Big Plan — Lectern");
+  await expect
+    .poll(() => page.evaluate(() => window.__fake.agentAnswers))
+    .toEqual([{ id: 1, answer: "shown" }]);
+  // Landed in the revision on screen, the change not yet rendered: Section 12 at the top.
+  const inserted = page.locator("#lx-doc p", { hasText: /^Inserted\.$/ });
+  await expect(inserted).toHaveCount(0);
+  await expectLandedOn(page, "section-12");
+  // The change renders after the landing, keeping the place as for any edit: Section 12 in view.
+  await page.evaluate(() => {
+    (window as unknown as { letRefresh: () => void }).letRefresh();
+  });
+  await expect(inserted).toHaveCount(1);
+  await page.waitForTimeout(1000);
+  const offset = await headingOffset(page, "section-12");
+  const pane = await page.locator("#lx-doc-pane").evaluate((el) => el.clientHeight);
+  expect(offset).toBeGreaterThanOrEqual(0);
+  expect(offset).toBeLessThan(pane);
 });
 
 const REPORT = "artifacts/report.html";

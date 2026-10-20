@@ -1,7 +1,8 @@
 // The document: inserted with one innerHTML assignment, with delegated handlers for links, copy
-// buttons, tags and images, scrolling to anchors, lines (an agent's target far down a long block to
-// its own text) and saved positions (position.ts), and room after the text for its last heading to
-// reach the top. An HTML page or a PDF shows in a frame instead (frame-view.ts): a page keeps its
+// buttons, tags and images, scrolling to anchors, lines (opening a closed `<details>` folding one
+// away; an agent's target far down a long block to its own text, and one above every block to the
+// top) and saved positions (position.ts), and room after the text for its last heading to reach
+// the top. An HTML page or a PDF shows in a frame instead (frame-view.ts): a page keeps its
 // scroll fraction as its reading position, its headings are its anchors, and its links go through
 // Lectern's link rules; a PDF keeps no reading position.
 // A page whose frame another page fills is opened again, with a toast; one that keeps doing so is
@@ -11,7 +12,7 @@
 // `data-anchor` for doc links and wikilinks) plus `data-slug`. The exact id is tried first, then
 // the slug, always inside the document, never through `document.getElementById`.
 import type { App, OpenOptions } from "./app";
-import { HEADINGS, findById, samePath } from "./dom";
+import { HEADINGS, findById, samePath, unfold } from "./dom";
 import { FrameView } from "./frame-view";
 import type { DocPayload } from "./generated/DocPayload";
 import type { FollowKind } from "./generated/FollowKind";
@@ -210,10 +211,14 @@ export class DocView {
     this.frame.toPdfPage(page);
   }
 
-  /** Scrolls the block holding source line `line` to the top of the pane. */
+  /**
+   * Scrolls the block holding source line `line` to the top of the pane, opening first any closed
+   * `<details>` it is folded away in (`unfold`).
+   */
   scrollToLine(line: number): boolean {
     const block = blockAt(this.host, line);
     if (block) {
+      unfold(this.host, block);
       placeAt(this.app.scroller, block, TOP_GAP);
     }
     return block !== null;
@@ -223,15 +228,45 @@ export class DocView {
    * Scrolls an agent's target on source line `line` to the top of the pane: its own text there,
    * `passage`, when that is inside a block longer than the view, past where the block's landing
    * would show it (a line or a quote far down a long paragraph or code block); else, as for a
-   * passage in a short block, or when it isn't found, the block (`scrollToLine`).
+   * passage in a short block, or when it isn't found, the block (`scrollToLine`). Any closed
+   * `<details>` the block is folded away in opens first, so it is measured as it will show.
    */
   scrollToPassage(line: number, passage: Passage): boolean {
     const block = blockAt(this.host, line);
+    if (block !== null) {
+      unfold(this.host, block);
+    }
     const text = block === null ? null : passage(this.host);
     if (block === null || text === null || !this.belowLanding(block, text)) {
       return this.scrollToLine(line);
     }
     placeAt(this.app.scroller, text, TOP_GAP);
+    return true;
+  }
+
+  /** Whether a note or a text file shows, whose source lines a target names. */
+  showsLines(): boolean {
+    return this.app.state.doc !== null && !this.frame.shown;
+  }
+
+  /**
+   * Scrolls an agent's target on source line `line` to the top of the pane: by its own text there,
+   * `passage`, when given (`scrollToPassage`), else by its block (`scrollToLine`); a line before
+   * the first block (a note's frontmatter, blank lines) to the document's top. False, moving
+   * nowhere, when no note or text file shows (`showsLines`).
+   */
+  scrollToTarget(line: number, passage?: Passage): boolean {
+    if (!this.showsLines()) {
+      return false;
+    }
+    const landed =
+      passage === undefined ? this.scrollToLine(line) : this.scrollToPassage(line, passage);
+    if (!landed) {
+      // No block starts on or before the line: it is above them all. A placement still settling
+      // would pull the view back down.
+      stopPlacing(this.app.scroller);
+      this.app.scroller.scrollTop = 0;
+    }
     return true;
   }
 

@@ -13,7 +13,8 @@
 // which only Rust sees, come from `frameKey`. An agent's request comes from `agentRequest`, with
 // where its targets are in a note as the test gives them (Rust's core would find them), which
 // answers with what the UI replies, as Rust would wait for it; what became of a `show` the UI asked
-// the reader about, which it tells Rust later, is kept in `agentAnswers`.
+// the reader about, which it tells Rust later, is kept in `agentAnswers`. Targets found again
+// (`agentPlaces`) are looked for in the note as the window's last open read it, as Rust keeps it.
 //
 // Workspaces live in a model as `workspaces.json` has them, simplified: this window shows one (or,
 // blank, none), and the others are open in other windows or closed. By default there is one,
@@ -373,6 +374,33 @@ function key(path: string): string {
   return path.toLowerCase().replaceAll("/", "\\");
 }
 
+/**
+ * The source line of the heading in `html` that `anchor` names, as core finds a show's `#anchor`
+ * (simplified): the heading whose id is the anchor as written, else percent-decoded, else its slug.
+ * Null when none is.
+ */
+function anchoredLine(html: string, anchor: string): number | null {
+  const headings = [...html.matchAll(/<h[1-6]\b([^>]*)>/g)].map(([, attrs = ""]) => ({
+    id: /\bid=(["'])(.*?)\1/.exec(attrs)?.[2] ?? "",
+    line: Number(/\bdata-sourcepos=(["'])(\d+):/.exec(attrs)?.[2] ?? NaN),
+  }));
+  let decoded = anchor;
+  try {
+    decoded = decodeURIComponent(anchor);
+  } catch {
+    // Not valid encoding: as written.
+  }
+  const slug = decoded
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc} -]/gu, "")
+    .replace(/ /g, "-");
+  for (const wanted of [anchor, decoded, slug]) {
+    const found = headings.find((h) => h.id !== "" && h.id === wanted);
+    if (found && !Number.isNaN(found.line)) return found.line;
+  }
+  return null;
+}
+
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf("\\") + 1);
 }
@@ -642,6 +670,13 @@ export class FakeBackend implements Backend, FakeControl {
   private pageOpens = 0;
   /** The document last opened, which a change of the *HTML pages* setting opens again. */
   private onScreen: string | null = null;
+  /**
+   * As Rust keeps for the window's document: the note it last opened, as it was then (core's
+   * text and the HTML), which an agent's targets are found in again (`agentPlaces`), never the
+   * note as it is since. Null for none, or one that didn't open.
+   */
+  private rendered: { path: string; blocks: [number, number, string][]; html: string } | null =
+    null;
   /**
    * As Rust: the generation the window last left or kept its document at. An open numbered below
    * never becomes the fake's document, however late it is run.
@@ -1516,6 +1551,7 @@ export class FakeBackend implements Backend, FakeControl {
     this.numbered(generation);
     this.cutoff = generation;
     this.onScreen = null;
+    this.rendered = null;
     return Promise.resolve();
   }
 
@@ -1531,11 +1567,19 @@ export class FakeBackend implements Backend, FakeControl {
   }
 
   /**
-   * As core finds an agent's targets again, simplified, in a note's text (`textBlocks`): a quote
-   * where it first is, a heading by its block's text, a line by the block holding it.
+   * As core finds an agent's targets again, simplified, in the note the window shows, as it was
+   * when it opened (`rendered`), never as it is since: a quote where it first is, a heading by its
+   * block's text, a line by the block holding it (else alone, as a line with no text is), a
+   * show's `#anchor` by the id of a heading in the
+   * HTML (`anchoredLine`); each with where it starts in its block's own text, as core sends it.
+   * Refused, as Rust refuses it, for a note the window doesn't show.
    */
   agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
-    const blocks = this.textBlocks.get(key(path)) ?? [];
+    const shown = this.rendered;
+    if (shown === null || key(shown.path) !== key(path)) {
+      return Promise.reject(new Error("That file isn't shown in this window."));
+    }
+    const blocks = shown.blocks;
     const starts: number[] = [];
     let at = 0;
     for (const [, , text] of blocks) {
@@ -1549,6 +1593,7 @@ export class FakeBackend implements Backend, FakeControl {
       endLine: blocks[blockAt(to - 1)]?.[1] ?? 1,
       textStart: from,
       textEnd: to,
+      blockOffset: from - (starts[blockAt(from)] ?? 0),
     });
     const whole = (i: number): TextPlace | null => {
       const block = blocks[i];
@@ -1567,7 +1612,13 @@ export class FakeBackend implements Backend, FakeControl {
           return whole(blocks.findIndex(([, , t]) => t.toLowerCase() === wanted));
         }
         if ("line" in target) {
-          return whole(blocks.findIndex(([s, e]) => s <= target.line && target.line <= e));
+          // No block holds a line with no text, such as a frontmatter's: core gives it alone.
+          const i = blocks.findIndex(([s, e]) => s <= target.line && target.line <= e);
+          return i === -1 ? { startLine: target.line, endLine: target.line } : whole(i);
+        }
+        if ("anchor" in target) {
+          const line = anchoredLine(shown.html, target.anchor);
+          return line === null ? null : whole(blocks.findIndex(([s]) => s === line));
         }
         return null;
       }),
@@ -1727,6 +1778,13 @@ export class FakeBackend implements Backend, FakeControl {
     const found = this.docs.get(key(path));
     if (generation >= this.cutoff) {
       this.onScreen = path;
+      this.rendered = found
+        ? {
+            path,
+            blocks: structuredClone(this.textBlocks.get(key(path)) ?? []),
+            html: found.doc.html,
+          }
+        : null;
     }
     if (!found) {
       return { status: "err", error: { kind: "notFound", message: `Couldn't find ${path}`, path } };

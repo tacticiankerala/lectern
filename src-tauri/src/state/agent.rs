@@ -16,14 +16,16 @@
 //!   long for what became of the request, which the UI sends once it is settled
 //!   (`AgentReply::Answered`). A window that turns to another workspace meanwhile (its page
 //!   reloads) dismisses it; one that closes is the tool's error. With no target, a `#anchor` after
-//!   the path is the heading it names, and a PDF's `#page=N` its page.
+//!   the path is the heading it names (sent as the anchor written, so the window finds it again
+//!   the same way), and a PDF's `#page=N` its page.
 //! - **`workspace`:** switches to a workspace, bringing its window forward or reopening it in a
 //!   new one, or creates one in a new window; an open window never changes workspace.
 //! - **Targets:** a `show`'s target in a note or a text file is found by core, in the file as it
 //!   is on disk, before anything opens: one that isn't there is the tool's error. A file the open
 //!   wouldn't read (a text file over 20 MB) is refused unread, as the open refuses it. The window is
 //!   sent it with where it is (`AgentCall::places`); a window still starting gets it with the file
-//!   it opens first thing (`StartupPayload::agent_target`). An HTML page's target goes to the
+//!   it opens first thing (`StartupPayload::agent_target`), found again in the file as it opened
+//!   (`found_again`): one gone by then fails the show, the file open all the same. An HTML page's target goes to the
 //!   window as it is, to find in what the page reports, waiting for a page still loading as long
 //!   as the pipe gives it (`AgentCall::within_ms`): one that isn't there is the tool's error, and
 //!   one the page hadn't loaded in time for, or that a starting window will find, is `pending`. A
@@ -31,7 +33,9 @@
 //! - **`highlight`:** goes to the window showing the file (the most recently focused, and by
 //!   default the file it shows), with where core found each target in a note or a text file. No
 //!   window comes forward. A PDF can't be painted: the tool's error. Once the note changes, the
-//!   window asks core where its highlights are now (`WindowState::agent_places`).
+//!   window asks core where its highlights are now (`WindowState::agent_places`), as it asks where
+//!   a target held on the ask bar is once its file has opened: in the text the window's document
+//!   rendered from, never the file as it is on disk since.
 //! - **`read`:** a note's or a text file's text, as shown, read by Rust from the file; an HTML
 //!   page's from what its window's page reported, read as incomplete when its bridge cut it short
 //!   at its limit. A PDF has none.
@@ -726,8 +730,9 @@ impl App {
     }
 
     /// Where a `show` of `file`, given no target, goes for the `#anchor` after its path: in a note,
-    /// the heading the anchor names, found as the reader's own links find one (`show_anchor`), else
-    /// the tool's error naming it; in an HTML page, the anchor itself (`Target::Anchor`), which its
+    /// the heading the anchor names, found as the reader's own links find one (`show_anchor`), its
+    /// target the anchor as written, so the window finds it again the same way; else the tool's
+    /// error naming it; in an HTML page, the anchor itself (`Target::Anchor`), which its
     /// window finds as Lectern's links find one, by a heading's id or the slug of its text. (A
     /// PDF's is its page: `show_at_path`.)
     fn show_anchored(&self, file: &Path, anchor: &str, budget: Budget) -> Result<ShowAt, String> {
@@ -1078,19 +1083,23 @@ impl App {
 
 impl WindowState {
     /// Where each of `targets` is now in `path`, the note or text file the window shows, as core
-    /// finds them in the file as it is on disk (`resolve_target`); none for one that isn't there.
-    /// The window asks again for its agent's highlights once the file's text has changed.
+    /// finds them (`resolve_target`, a show's `#anchor` as `show_anchor` found it) in the text the
+    /// window's document rendered from: the revision on screen, never the file as it is on disk
+    /// since, which renders, and is asked about, in its turn. None for one that isn't there. The
+    /// window asks for a target held on the ask bar once its file has opened, and for its agent's
+    /// highlights once the file's text has changed.
     pub fn agent_places(
         &self,
         path: &str,
         targets: &[Target],
     ) -> Result<Vec<Option<TextPlace>>, String> {
         let file = PathBuf::from(path);
+        let not_shown = || "That file isn't shown in this window.".to_owned();
         if !self
             .shown_file()
             .is_some_and(|shown| same_path(&shown, &file))
         {
-            return Err("That file isn't shown in this window.".to_owned());
+            return Err(not_shown());
         }
         if !matches!(opened_kind(&file), DocKind::Markdown | DocKind::Text) {
             return Err("Only a note's or a text file's targets are found again.".to_owned());
@@ -1098,13 +1107,41 @@ impl WindowState {
         if targets.len() > TARGETS_MAX {
             return Err(format!("At most {TARGETS_MAX} targets are found at once."));
         }
-        let source = note_source(&file)?;
+        let source = self.shown_source(&file).ok_or_else(not_shown)?;
         let name = file_name(&file);
         let text = TextMap::of_note(&name, &source).unwrap_or_default();
         Ok(targets
             .iter()
             .map(|target| resolve_target(&text, &source, &name, target).ok())
             .collect())
+    }
+
+    /// `at`, an agent's show's target in `file`, the window's document just opened, found again in
+    /// the text it rendered from, as `agent_places` finds one: the file may have changed since the
+    /// show found the target on disk. Core's error, a sentence for the agent, when it isn't there
+    /// now. A target core didn't find (a page's, a PDF's page, a thread), or one in a file that
+    /// didn't open, as it is.
+    pub(super) fn found_again(&self, file: &Path, at: ShowAt) -> Result<ShowAt, String> {
+        let Some(source) = self.shown_source(file).filter(|_| at.place.is_some()) else {
+            return Ok(at);
+        };
+        let name = file_name(file);
+        let text = TextMap::of_note(&name, &source).unwrap_or_default();
+        let place = resolve_target(&text, &source, &name, &at.target)?;
+        Ok(ShowAt {
+            target: at.target,
+            place: Some(place),
+        })
+    }
+
+    /// The text the window's document rendered from, when that is `file`, a note or a text file
+    /// that opened; none for any other file, a page or a PDF, a blank window, the welcome page or a
+    /// file that didn't open.
+    fn shown_source(&self, file: &Path) -> Option<Arc<str>> {
+        lock(&self.current)
+            .as_ref()
+            .filter(|c| c.doc.is_some() && same_path(&c.path, file))
+            .and_then(|c| c.source.clone())
     }
 
     /// The file the window shows, which opened; none for a blank window, the welcome page or a
@@ -1673,6 +1710,16 @@ mod tests {
         f: &Fixture,
         request: AgentRequest,
     ) -> (Result<Value, String>, StartupPayload, Arc<WindowState>) {
+        shown_as_it_starts_after(f, request, || ())
+    }
+
+    /// As `shown_as_it_starts`, with `meanwhile` run once the file is held for the window and
+    /// before the window starts: the file changing on disk after the show found its target, say.
+    fn shown_as_it_starts_after(
+        f: &Fixture,
+        request: AgentRequest,
+        meanwhile: impl FnOnce(),
+    ) -> (Result<Value, String>, StartupPayload, Arc<WindowState>) {
         let shown = showing(f, request);
         let held = || {
             f.app
@@ -1683,6 +1730,7 @@ mod tests {
         wait_until("the file is held for the window's start", || {
             held().is_some()
         });
+        meanwhile();
         let window = held().unwrap();
         let payload = window.startup();
         (shown.join().unwrap(), payload, window)
@@ -2761,8 +2809,8 @@ mod tests {
     }
 
     /// A `#anchor` after the path, with no target, is the heading it names, as the reader's own
-    /// links find it (by its id, else its slug); one no heading has is the tool's error, naming it.
-    /// A target given wins.
+    /// links find it (by its id, else its slug), sent to the window as the anchor written, with
+    /// where core found it; one no heading has is the tool's error, naming it. A target given wins.
     #[test]
     fn a_shows_anchor_goes_to_the_heading_it_names() {
         let (f, plan) = shown_plan();
@@ -2776,7 +2824,9 @@ mod tests {
             assert_eq!(
                 shown_target(call),
                 (
-                    Some(heading("Plan › Rollout")),
+                    Some(AgentTarget::Anchor {
+                        anchor: anchor.to_owned()
+                    }),
                     vec![place((3, 3), (5, 12), 0)]
                 ),
                 "{anchor}"
@@ -2932,6 +2982,55 @@ mod tests {
             .unwrap();
         let (_, call) = answering.join().unwrap();
         assert_eq!(shown_target(call), (Some(quote("Rose")), vec![]));
+    }
+
+    /// A window starting for an agent finds a note's target again in the file as its startup
+    /// opens it, which may have changed since the show found the target: the payload carries where
+    /// it is in what the window renders.
+    #[test]
+    fn a_window_starting_for_an_agent_finds_its_target_in_the_file_it_opens() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", ROLLOUT);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        // Found on line 3 as the show comes; two lines land before it before the window starts.
+        let (answer, payload, _) =
+            shown_as_it_starts_after(&f, show_at(&plan, heading("rollout")), || {
+                fs::write(
+                    &plan,
+                    "# Plan\n\nIntro.\n\n## Rollout\n\nRoll back the migration first.\n",
+                )
+                .unwrap();
+            });
+        assert_eq!(answer.unwrap()["state"], "shown");
+        assert_eq!(
+            payload
+                .agent_target
+                .and_then(|at| at.place)
+                .map(|p| p.start_line),
+            Some(5)
+        );
+    }
+
+    /// A note's target gone from the file by the time a window starting for an agent opens it
+    /// fails the show, with core's sentence, as a target that isn't there does; the file opens all
+    /// the same, the window going nowhere in it.
+    #[test]
+    fn a_window_starting_for_an_agent_fails_a_target_gone_from_the_file_it_opens() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", ROLLOUT);
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        let (answer, payload, _) =
+            shown_as_it_starts_after(&f, show_at(&plan, heading("rollout")), || {
+                fs::write(&plan, "# Plan\n\nIntro.\n").unwrap();
+            });
+        assert_eq!(
+            answer,
+            Err("There's no heading “rollout” in plan.md.".to_owned())
+        );
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        assert_eq!(payload.agent_target, None);
     }
 
     /// A window still starting, or a new one, goes to the target once the file has opened: its
@@ -3273,8 +3372,9 @@ mod tests {
         assert!(agent_requests(&f.host).is_empty());
     }
 
-    /// The window finds its agent's highlights again after the note changes: core looks for each
-    /// target in the file as it is now, and one that's gone is none.
+    /// The window finds its agent's targets again through core, in the text its document rendered
+    /// from: the revision on screen, never the file as it is on disk since, which is found in once
+    /// the window shows it. One that's gone is none.
     #[test]
     fn the_window_finds_its_notes_targets_again_through_core() {
         let (f, plan) = shown_plan();
@@ -3284,21 +3384,22 @@ mod tests {
             heading("Rollout"),
             quote("Roll forward"),
         ];
-        assert_eq!(
-            f.state.agent_places(&path, &targets),
-            Ok(vec![
-                Some(place((5, 5), (13, 22), 0)),
-                Some(place((3, 3), (5, 12), 0)),
-                None
-            ])
-        );
-        // Changed on disk: "Plan Intro. Rollout Roll forward, then roll back." Each is looked
-        // for again.
+        let on_screen: Result<Vec<Option<TextPlace>>, String> = Ok(vec![
+            Some(place((5, 5), (13, 22), 0)),
+            Some(place((3, 3), (5, 12), 0)),
+            None,
+        ]);
+        assert_eq!(f.state.agent_places(&path, &targets), on_screen);
+        // Changed on disk: "Plan Intro. Rollout Roll forward, then roll back." Until the window
+        // shows the change, each is where it is on screen.
         fs::write(
             &plan,
             "# Plan\n\nIntro.\n\n## Rollout\n\nRoll forward, then roll back.\n",
         )
         .unwrap();
+        assert_eq!(f.state.agent_places(&path, &targets), on_screen);
+        // Shown, as the window's refresh opens it again: each is looked for again in it.
+        let _ = f.state.open_document(&path);
         assert_eq!(
             f.state.agent_places(&path, &targets),
             Ok(vec![
@@ -3312,6 +3413,38 @@ mod tests {
         assert_eq!(
             f.state.agent_places(&path_string(&notes), &targets),
             Err("That file isn't shown in this window.".to_owned())
+        );
+    }
+
+    /// A show's `#anchor` in a note, found again (as Show on the ask bar does once the file has
+    /// opened), is the heading it was found as first: the second of two alike stays the second.
+    #[test]
+    fn a_shows_anchor_is_found_again_as_it_was_found_first() {
+        let (f, plan) = shown_plan();
+        let path = path_string(&plan);
+        fs::write(
+            &plan,
+            "# Plan\n\n## Notes\n\nFirst.\n\n## Notes\n\nSecond.\n",
+        )
+        .unwrap();
+        let _ = f.state.open_document(&path);
+        let answering = ui_answers(&f, "main", vec![AgentReply::Shown { target: None }]);
+        f.app
+            .agent_answer(show(&format!("{path}#notes-1"), 0), &claude())
+            .unwrap();
+        let (_, call) = answering.join().unwrap();
+        let notes_1 = AgentTarget::Anchor {
+            anchor: "notes-1".to_owned(),
+        };
+        let (target, places) = shown_target(call);
+        assert_eq!(target, Some(notes_1.clone()));
+        assert_eq!(
+            places.iter().map(|p| p.start_line).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(
+            f.state.agent_places(&path, &[notes_1]),
+            Ok(places.into_iter().map(Some).collect::<Vec<_>>())
         );
     }
 

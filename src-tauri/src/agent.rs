@@ -185,7 +185,7 @@ impl Taken {
     /// A place in `count`, when fewer than `most` are taken.
     fn place(count: &Arc<AtomicUsize>, most: usize) -> Option<Self> {
         count
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < most).then_some(n + 1)
             })
             .ok()

@@ -4,7 +4,7 @@
 // Shift+Enter move through the matches, Esc closes. It searches again whenever the document
 // re-renders. An HTML page in its frame is searched through the text its bridge reports, and its
 // bridge paints the matches and scrolls to them (page-frame.ts). Loaded on first use.
-import { h } from "./dom";
+import { closedAround, h } from "./dom";
 
 /** The most matches highlighted; past it the count reads "5000+". */
 const MAX_MATCHES = 5000;
@@ -628,21 +628,6 @@ export class FindBar {
     }
     e.preventDefault();
   }
-}
-
-/** The closed `<details>` of `doc` that hide `el`: those it sits in, outside their summary. */
-function closedAround(doc: HTMLElement, el: Element): HTMLDetailsElement[] {
-  const closed: HTMLDetailsElement[] = [];
-  for (
-    let details = el.closest("details");
-    details instanceof HTMLDetailsElement && doc.contains(details);
-    details = details.parentElement?.closest("details") ?? null
-  ) {
-    if (!details.open && !details.querySelector(":scope > summary")?.contains(el)) {
-      closed.push(details);
-    }
-  }
-  return closed;
 }
 
 /** The child of `doc` holding the start of `range`. */

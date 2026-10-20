@@ -75,7 +75,7 @@ impl WindowState {
             size: stamp.size,
             version: RENDER_VERSION,
         };
-        if let Some(doc) = lock(&self.cache).get(&key) {
+        if let Some((doc, source)) = lock(&self.cache).get(&key) {
             return Ok(Rendered {
                 kind,
                 doc,
@@ -84,6 +84,7 @@ impl WindowState {
                 lossy: false,
                 covered,
                 gen,
+                source: Some(source),
             });
         }
         let text = read_text(path)?;
@@ -93,11 +94,12 @@ impl WindowState {
         let doc = Arc::new(render_doc(
             path, kind, &text.text, with_index, &mapper, &hosts,
         ));
+        let source: Arc<str> = Arc::from(text.text);
         // Lossy renders aren't cached, so a cache hit is never lossy.
         if !text.lossy {
             let mut cache = lock(&self.cache);
             if self.index_gen.load(Ordering::SeqCst) == gen {
-                cache.put(key, Arc::clone(&doc));
+                cache.put(key, (Arc::clone(&doc), Arc::clone(&source)));
             }
         }
         Ok(Rendered {
@@ -108,6 +110,7 @@ impl WindowState {
             lossy: text.lossy,
             covered,
             gen,
+            source: Some(source),
         })
     }
 
@@ -240,6 +243,7 @@ impl WindowState {
             rendered_gen: rendered.map_or(0, |r| r.gen),
             refreshed_at,
             doc: rendered.map(|r| Arc::clone(&r.doc)),
+            source: rendered.and_then(|r| r.source.clone()),
         });
         if let Some(watch) = &*lock(&self.watch) {
             watch.doc(Some(path.to_path_buf()));
@@ -271,6 +275,7 @@ impl WindowState {
         self.cut_off(generation);
         if let Some(current) = current.as_mut() {
             current.doc = None;
+            current.source = None;
         }
     }
 

@@ -4,9 +4,9 @@
 // which asks first with the bar when the window shows another file, settled once the reader's
 // answer has landed, or as the window leaves; and the agent settings in Preferences, with the
 // commands that connect Claude Code. Then targets:
-// where core found them in a note, an HTML page's found by the window, a PDF's page, with Back
-// after a move within the file on screen, and a window that started for an agent; the agent's
-// highlights; and an HTML page's text for `read`.
+// where core found them in a note, found again once the reader says Show, an HTML page's found by
+// the window, a PDF's page, with Back after a move within the file on screen, and a window that
+// started for an agent; the agent's highlights; and an HTML page's text for `read`.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeBackend, type FakeOptions, type FakeWorkspace } from "../dev/backend-fake";
 import {
@@ -1216,6 +1216,8 @@ describe("an agent's targets", () => {
 
   it("open another file at where core found them, at once or once the reader says Show", async () => {
     const { fake, app } = await launched(null);
+    // B as core renders it, Buzz a heading on line 3: each open finds its target again in it.
+    beeWith(fake, [], 3);
     const scrolled = passageLandings(app);
     const byBlock = vi.spyOn(app.view, "scrollToLine");
     // A heading lands by its block.
@@ -1286,6 +1288,279 @@ describe("an agent's targets", () => {
     expect(frameSrc()).toMatch(/[?&]v=\d+#page=7$/);
     expect(frameVersion()).not.toBe(first);
   });
+
+  it("open a note at its top for a line above every block, never where the reader left it", async () => {
+    const { fake, app } = await launched();
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    // Frontmatter on lines 1 to 3: nothing renders above line 5. The reader left it at Buzz.
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='5:1-5:5'>Bee</h1><h2 id='buzz' data-sourcepos='7:1-7:7'>Buzz</h2>",
+    );
+    await fake.savePosition(B, { headingId: "buzz", offset: 40, line: 7, fraction: 0.5 });
+    const restored = vi.spyOn(app.view, "restore");
+    app.scroller.scrollTop = 400;
+    expect(await fake.agentRequest(show(B, { line: 1 }), "Claude", [placed(1, 1)])).toEqual({
+      kind: "shown",
+    });
+    expect(app.state.doc?.path).toBe(B);
+    expect(restored).not.toHaveBeenCalled();
+    expect(app.scroller.scrollTop).toBe(0);
+  });
+
+  it("fail at a line with no note or text file on screen, rather than say shown", async () => {
+    const { fake } = await withPdf({ initial: PDF });
+    expect(await fake.agentRequest(show(PDF, { line: 3 }))).toEqual({
+      kind: "failed",
+      message: "That passage isn't in brief.pdf.",
+    });
+  });
+});
+
+/**
+ * B as core renders it and finds its text: Bee, then `between` (each a paragraph's line and text),
+ * then the heading Buzz on line `buzz` (none for null).
+ */
+function beeWith(fake: FakeBackend, between: [number, string][], buzz: number | null): void {
+  const blocks = buzz === null ? between : [...between, [buzz, "Buzz"] satisfies [number, string]];
+  const html = blocks.map(([line, text]) => {
+    const pos = `${String(line)}:1-${String(line)}:${String(text.length)}`;
+    return line === buzz
+      ? `<h2 id='buzz' data-sourcepos='${pos}'>${text}</h2>`
+      : `<p data-sourcepos='${pos}'>${text}</p>`;
+  });
+  fake.setDoc(B, `<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1>${html.join("")}`);
+  fake.setText(B, [
+    [1, 1, "Bee"],
+    ...blocks.map(([line, text]): [number, number, string] => [line, line, text]),
+  ]);
+}
+
+describe("a note's target an agent's open goes to at once", () => {
+  /** Two paragraphs landed before Buzz after core found it on line 3, as the show came. */
+  async function opened(initial: string | null, opens: AgentOpens) {
+    const { fake, app } = await launched(initial);
+    fake.settingsElsewhere({ agentOpens: opens });
+    beeWith(
+      fake,
+      [
+        [3, "New one."],
+        [5, "New two."],
+      ],
+      7,
+    );
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    const reply = await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [
+      placed(3, 3, [4, 8], 0),
+    ]);
+    return { app, fake, byBlock, reply };
+  }
+
+  it("is found in the revision the open renders, in a window that shows nothing", async () => {
+    const { app, byBlock, reply } = await opened(null, "ask");
+    expect(reply).toEqual({ kind: "shown" });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+  });
+
+  it("is found in the revision the open renders, when the setting is to switch", async () => {
+    const { app, byBlock, reply } = await opened(A, "switch");
+    expect(reply).toEqual({ kind: "shown" });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+    // On the history like any open: Back returns to the file the reader was on.
+    await app.nav.travel("back");
+    expect(app.state.doc?.path).toBe(A);
+  });
+
+  it("fails as a missing target does once it's gone from what opens, the file left open", async () => {
+    const { fake, app } = await launched(A);
+    fake.settingsElsewhere({ agentOpens: "switch" });
+    // Core found Buzz as the show came; it's gone by the time the open reads the file.
+    beeWith(fake, [[3, "Hum."]], null);
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    expect(
+      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
+    ).toEqual({ kind: "failed", message: "That passage isn't in b.md." });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a note's target the reader said Show to", () => {
+  it("is found again in the file Show opens, which changed while the bar waited", async () => {
+    const { fake, app } = await launched();
+    beeWith(fake, [], 3);
+    expect(
+      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
+    ).toEqual({ kind: "asked" });
+    // Two paragraphs land before Buzz while the bar waits: it is on line 7 now.
+    beeWith(
+      fake,
+      [
+        [3, "New one."],
+        [5, "New two."],
+      ],
+      7,
+    );
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    barButton("Show").click();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+    // Back returns to the file the reader was on.
+    await app.nav.travel("back");
+    expect(app.state.doc?.path).toBe(A);
+  });
+
+  it("fails as a missing target does once it's gone, the file left open", async () => {
+    const { fake, app } = await launched();
+    beeWith(fake, [], 3);
+    expect(
+      await fake.agentRequest(show(B, { quote: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
+    ).toEqual({ kind: "asked" });
+    // Buzz is gone while the bar waits.
+    beeWith(fake, [[3, "Hum."]], null);
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    const byText = passageLandings(app);
+    barButton("Show").click();
+    const message = "That passage isn't in b.md.";
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "failed", message }]);
+    });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).not.toHaveBeenCalled();
+    expect(byText).not.toHaveBeenCalled();
+  });
+
+  it("goes nowhere over the reader's own open of the file, made as it shows", async () => {
+    const { fake, app } = await launched();
+    beeWith(fake, [], 3);
+    expect(
+      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
+    ).toEqual({ kind: "asked" });
+    beeWith(
+      fake,
+      [
+        [3, "New one."],
+        [5, "New two."],
+      ],
+      7,
+    );
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // As the agent's open shows B, before it has painted, the reader opens B again at line 3.
+    const reader: { open: Promise<void> | null } = { open: null };
+    const stop = app.on("doc", () => {
+      if (reader.open === null && app.state.doc?.path === B) {
+        reader.open = app.open(B, { line: 3, push: true });
+      }
+    });
+    barButton("Show").click();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toHaveLength(1);
+    });
+    stop();
+    expect(reader.open).not.toBeNull();
+    await reader.open;
+    await settle();
+    expect(fake.agentAnswers).toEqual([
+      {
+        id: 1,
+        answer: "failed",
+        message: "b.md isn't on screen any more: another file took its place.",
+      },
+    ]);
+    // The reader's landing stands: nothing went to Buzz after it.
+    expect(byBlock.mock.calls.at(-1)).toEqual([3]);
+  });
+
+  it("lands before a change that came while its file opened renders, which keeps it there", async () => {
+    const { fake, app } = await launched();
+    beeWith(fake, [], 3);
+    expect(
+      await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", [placed(3, 3, [4, 8], 0)]),
+    ).toEqual({ kind: "asked" });
+    // B opens only once let go, and so does the change's refresh after it.
+    const opening = deferred();
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument")
+      .mockImplementationOnce(async (path, generation) => {
+        const result = await open(path, generation);
+        await opening.promise;
+        return result;
+      })
+      .mockImplementationOnce(async (path, generation) => {
+        await refreshing.promise;
+        return open(path, generation);
+      });
+    // Where the reader is, as a refresh keeps it: on Bee until Buzz is gone to.
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    const bee: SavedPosition = { headingId: "bee", offset: 0, line: 1, fraction: 0 };
+    const buzz: SavedPosition = { headingId: "buzz", offset: 0, line: 3, fraction: 0 };
+    vi.spyOn(app.view, "captureAnchor").mockImplementation(() =>
+      byBlock.mock.calls.some(([line]) => line === 3) ? buzz : bee,
+    );
+    const restored = vi.spyOn(app.view, "restore");
+    barButton("Show").click();
+    await settle();
+    // B changes on disk while it opens: a paragraph after Buzz.
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><h2 id='buzz' data-sourcepos='3:1-3:7'>Buzz</h2>" +
+        "<p data-sourcepos='5:1-5:4'>Hum.</p>",
+    );
+    fake.setText(B, [
+      [1, 1, "Bee"],
+      [3, 3, "Buzz"],
+      [5, 5, "Hum."],
+    ]);
+    fake.emit("doc-changed", { path: B });
+    opening.resolve();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    });
+    refreshing.resolve();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#lx-doc p")?.textContent).toBe("Hum.");
+    });
+    // The change rendered where Buzz was gone to, not where the file first opened.
+    expect(restored).toHaveBeenLastCalledWith(buzz);
+  });
+
+  it("keeps the #anchor the agent gave, found again as the second of two headings alike", async () => {
+    const { fake, app } = await launched();
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><h2 id='notes' data-sourcepos='3:1-3:8'>Notes</h2>" +
+        "<h2 id='notes-1' data-sourcepos='5:1-5:8'>Notes</h2>",
+    );
+    fake.setText(B, [
+      [1, 1, "Bee"],
+      [3, 3, "Notes"],
+      [5, 5, "Notes"],
+    ]);
+    // As core sends a show of b.md#notes-1: the anchor as written, and where the second Notes is.
+    expect(
+      await fake.agentRequest(show(B, { anchor: "notes-1" }), "Claude", [
+        placed(5, 5, [10, 15], 0),
+      ]),
+    ).toEqual({ kind: "asked" });
+    expect(bar()?.querySelector(".agent-ask-text")?.textContent).toBe(
+      "Claude wants to show b.md › notes-1",
+    );
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    barButton("Show").click();
+    await vi.waitFor(() => {
+      expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
+    });
+    expect(byBlock).toHaveBeenLastCalledWith(5);
+  });
 });
 
 describe("a window started for an agent", () => {
@@ -1309,6 +1584,28 @@ describe("a window started for an agent", () => {
     expect(scrolled).toHaveBeenCalledWith(3, expect.any(Function));
     expect(passageText(scrolled.mock.calls[0])).toBe("Buzz");
     expect(restored).not.toHaveBeenCalled();
+  });
+
+  it("goes to the top for a line above every block, never where the reader left it", async () => {
+    const fake = new FakeBackend(
+      fixtures({
+        // Frontmatter on lines 1 to 3: nothing renders above line 5.
+        [B]: rendered(
+          "Bee",
+          "<h1 id='bee' data-sourcepos='5:1-5:5'>Bee</h1><h2 id='buzz' data-sourcepos='7:1-7:7'>Buzz</h2>",
+        ),
+      }),
+      { initial: B, agentTarget: { target: { line: 1 }, place: placed(1, 1) } },
+    );
+    // The reader left it at Buzz.
+    await fake.savePosition(B, { headingId: "buzz", offset: 40, line: 7, fraction: 0.5 });
+    const app = new App(fake, appRoot());
+    const restored = vi.spyOn(app.view, "restore");
+    app.scroller.scrollTop = 400;
+    await app.start();
+    expect(app.state.doc?.path).toBe(B);
+    expect(restored).not.toHaveBeenCalled();
+    expect(app.scroller.scrollTop).toBe(0);
   });
 
   it("opens a PDF at the agent's page", async () => {
@@ -1450,6 +1747,35 @@ describe("an agent's highlights", () => {
     ).toEqual({ kind: "highlighted", count: 2 });
   });
 
+  it("open a closed details around a passage they paint, so the reader can see it", async () => {
+    stubHighlights();
+    const { fake } = await launched(B);
+    // Two folded paragraphs, as core renders Markdown inside raw HTML: "Bee Buzz. Hum."
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1>" +
+        "<details><summary>More</summary><p data-sourcepos='5:1-5:5'>Buzz.</p></details>" +
+        "<details><summary>Less</summary><p data-sourcepos='9:1-9:4'>Hum.</p></details>",
+    );
+    fake.emit("doc-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll("#lx-doc details")).toHaveLength(2);
+    });
+    const [buzz, hum] = document.querySelectorAll<HTMLDetailsElement>("#lx-doc details");
+    expect([buzz?.open, hum?.open]).toEqual([false, false]);
+    // One where core found its text, and one known only by its line.
+    expect(
+      await fake.agentRequest(highlight([{ quote: "Buzz" }]), "Claude", [placed(5, 5, [4, 8])]),
+    ).toEqual({ kind: "highlighted", count: 1 });
+    expect(agentPainted()).toEqual(["Buzz"]);
+    expect([buzz?.open, hum?.open]).toEqual([true, false]);
+    expect(await fake.agentRequest(highlight([{ line: 9 }]), "Claude", [placed(9, 9)])).toEqual({
+      kind: "highlighted",
+      count: 2,
+    });
+    expect(hum?.open).toBe(true);
+  });
+
   it("are for the file on screen only", async () => {
     const { fake } = await launched(B);
     expect(await fake.agentRequest(highlight([{ line: 1 }], A), "Claude", [placed(1, 1)])).toEqual({
@@ -1459,9 +1785,13 @@ describe("an agent's highlights", () => {
   });
 });
 
-/** An HTML page's text, as its bridge reported it: Weekly report › Results, twice. */
-function reportPage(): PageText {
+/**
+ * An HTML page's text, as its bridge reported it: Weekly report › Results, twice; after `before`,
+ * blocks added at its top.
+ */
+function reportPage(before: PageText["blocks"] = []): PageText {
   const blocks = [
+    ...before,
     { text: "Weekly report", headingLevel: 1 },
     { text: "Results", headingLevel: 2 },
     { text: "Rendered by script" },
@@ -1967,6 +2297,23 @@ describe("a page's target the reader said Show to", () => {
     expect(waited[0]).toBeGreaterThan(0);
     expect(waited[0]).toBeLessThanOrEqual(4500);
   });
+
+  it("is found in the page as Show opens it, not as it was while the bar waited", async () => {
+    const page = reportPage();
+    const { host, answered, landings } = opening(page, true, "ask");
+    const agent = new Agent(host);
+    expect(await agent.answer(call(show(REPORT, { heading: "Archive › Results" })))).toEqual({
+      kind: "asked",
+    });
+    // A notice lands at the page's top while the bar waits: Results is 18 further on.
+    const { text, blocks, starts, headings } = reportPage([{ text: "Updated overnight" }]);
+    Object.assign(page, { text, blocks, starts, headings });
+    [...host.bar.querySelectorAll("button")].find((b) => b.textContent === "Show")?.click();
+    await vi.waitFor(() => {
+      expect(answered).toHaveBeenCalledWith(1, "shown", undefined);
+    });
+    expect(aimed(landings[0], page)).toBe(67);
+  });
 });
 
 describe("an agent's highlights after the text changes", () => {
@@ -2304,7 +2651,7 @@ describe("an agent's show at a comment thread", () => {
     expect(await new Agent(blank.host).answer(call(show(B, { comment: "C2" })))).toEqual({
       kind: "shown",
     });
-    expect(opens).toHaveBeenCalledWith(B, { comment: 2 });
+    expect(opens).toHaveBeenCalledWith(B, { comment: 2 }, undefined);
     expect(opened).not.toHaveBeenCalled();
   });
 

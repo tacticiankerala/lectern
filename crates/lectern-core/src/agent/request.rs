@@ -193,9 +193,9 @@ pub struct ResolveArgs {
 }
 
 /// Where in a file: a heading (its text, or an `A › B` path), a 1-based source line, a quoted
-/// passage with the text just before and after it, a PDF page, a comment thread's id, or an HTML
-/// page's heading by the `#anchor` after the page's path, as Lectern's links name one. An anchor
-/// is Lectern's own, which its window finds: an agent's target is never one.
+/// passage with the text just before and after it, a PDF page, a comment thread's id, or a heading
+/// by the `#anchor` after the file's path, as Lectern's links name one. An anchor is Lectern's
+/// own, an HTML page's found by its window, a note's by core: an agent's target is never one.
 #[derive(Serialize, Deserialize, TS, Clone, Debug, PartialEq)]
 #[serde(untagged)]
 #[ts(export)]

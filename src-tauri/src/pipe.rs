@@ -366,7 +366,7 @@ impl Faults {
     fn now(count: &std::sync::atomic::AtomicU32) -> bool {
         use std::sync::atomic::Ordering::SeqCst;
         count
-            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+            .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
             .is_ok()
     }
 }

@@ -15,15 +15,16 @@ pub struct CacheKey {
     pub version: u32,
 }
 
-/// A least-recently-used cache of renders (64 entries in the app).
-pub struct RenderCache {
+/// A least-recently-used cache of renders (64 entries in the app): each the rendered document, or
+/// whatever the app keeps with it (`V`), such as the text it was rendered from.
+pub struct RenderCache<V = Arc<RenderedDoc>> {
     cap: usize,
     /// Each render with the tick it was last used at.
-    entries: HashMap<CacheKey, (Arc<RenderedDoc>, u64)>,
+    entries: HashMap<CacheKey, (V, u64)>,
     tick: u64,
 }
 
-impl RenderCache {
+impl<V: Clone> RenderCache<V> {
     pub fn new(cap: usize) -> Self {
         Self {
             cap,
@@ -33,16 +34,16 @@ impl RenderCache {
     }
 
     /// The render for `k`, which becomes the most recently used.
-    pub fn get(&mut self, k: &CacheKey) -> Option<Arc<RenderedDoc>> {
+    pub fn get(&mut self, k: &CacheKey) -> Option<V> {
         self.tick += 1;
-        let (doc, used) = self.entries.get_mut(k)?;
+        let (render, used) = self.entries.get_mut(k)?;
         *used = self.tick;
-        Some(Arc::clone(doc))
+        Some(render.clone())
     }
 
     /// Stores `v` as the most recently used. Other renders of the same path are dropped, since the
     /// file has changed since; beyond capacity, the least recently used render goes.
-    pub fn put(&mut self, k: CacheKey, v: Arc<RenderedDoc>) {
+    pub fn put(&mut self, k: CacheKey, v: V) {
         if self.cap == 0 {
             return;
         }

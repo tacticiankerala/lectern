@@ -19,7 +19,6 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use super::request::Target;
-use super::status::HEADING_SEPARATOR;
 use super::tools::number;
 use crate::ipc::PathForms;
 use crate::library::DocKind;
@@ -134,6 +133,8 @@ const PAGE_FRAGMENT: &str = "page=";
 /// - **A quote:** the passage in the text, its whitespace aside, and of two or more, the one the
 ///   text before and after it agrees with most (`prefix`, `suffix`), then the first. Else the
 ///   passage in the source, the same way, by its lines alone.
+/// - **An anchor:** a show's `#anchor` after a note's path, found again as [`show_anchor`] found
+///   it first: the heading whose id it is. An agent never gives one as a target ([`check_target`]).
 pub fn resolve_target(
     text: &TextMap,
     source: &str,
@@ -226,12 +227,13 @@ pub(crate) fn find_target(
             Err("A page target is for PDFs; give a heading, a line or a quote.".to_owned())
         }
         Target::Comment { .. } => Err("A comment thread isn't a passage of the text.".to_owned()),
-        Target::Anchor { anchor } => Err(not_a_page_anchor(anchor, file)),
+        Target::Anchor { anchor } => find_anchor(text, source, anchor)
+            .ok_or_else(|| format!("There's no heading #{anchor} in {file}.")),
     }
 }
 
-/// Why the file named `file`, not an HTML page, can't take `#anchor` as a target: a note's anchor
-/// is found as its heading (`show_anchor`).
+/// Why the file named `file`, not an HTML page, can't take `#anchor` as a target an agent gives: a
+/// note's anchor comes after its path, and is found as its heading (`show_anchor`).
 fn not_a_page_anchor(anchor: &str, file: &str) -> String {
     format!("Only an HTML page takes #{anchor} as a target, not {file}.")
 }
@@ -288,39 +290,41 @@ fn heading_place(text: &TextMap, h: usize) -> Option<Found> {
 /// Where a `show` of the note named `file`, read as `source`, whose text as shown is `text`, goes
 /// for the `#anchor` after its path, when no target is given: the heading the anchor names, found
 /// as the reader's own links find one, by its `id` (the anchor as written, else its slug). Its
-/// target is the heading by its path. An error, a sentence for the agent naming the anchor and the
-/// file, when no heading has it: a text file has none.
+/// target is the anchor as written, which [`resolve_target`] finds again the same way, so the
+/// second of two headings alike stays the second. An error, a sentence for the agent naming the
+/// anchor and the file, when no heading has it: a text file has none.
 pub fn show_anchor(
     text: &TextMap,
     source: &str,
     file: &str,
     anchor: &str,
 ) -> Result<ShowAt, String> {
-    let missing = || format!("There's no heading #{anchor} in {file}.");
-    // A text file's map has no headings, and its source isn't Markdown to look for them in.
+    let found = find_anchor(text, source, anchor)
+        .ok_or_else(|| format!("There's no heading #{anchor} in {file}."))?;
+    Ok(ShowAt {
+        target: Target::Anchor {
+            anchor: anchor.to_owned(),
+        },
+        place: Some(found.place(text)),
+    })
+}
+
+/// The heading `#anchor` names in the note read as `source`, whose text as shown is `text`, as
+/// the reader's own links find one: by its `id`, the anchor as written, else percent-decoded, else
+/// its slug, a repeat's id numbered `-1`, `-2`, … ([`heading_ids`]). None when no heading has it; a
+/// text file has none, its map no headings and its source no Markdown to look for them in.
+fn find_anchor(text: &TextMap, source: &str, anchor: &str) -> Option<Found> {
     if text.headings().is_empty() {
-        return Err(missing());
+        return None;
     }
     let ids = heading_ids(source);
     let decoded = percent_decode_str(anchor).decode_utf8_lossy();
     let line = [anchor.to_owned(), decoded.to_string(), slugify(&decoded)]
         .iter()
         .find_map(|wanted| ids.iter().find(|(_, id)| !id.is_empty() && id == wanted))
-        .map(|&(line, _)| line)
-        .ok_or_else(missing)?;
-    let h = text
-        .headings()
-        .iter()
-        .position(|h| h.line == line)
-        .ok_or_else(missing)?;
-    let found = heading_place(text, h).ok_or_else(missing)?;
-    let path = text.heading_paths().swap_remove(h);
-    Ok(ShowAt {
-        target: Target::Heading {
-            heading: path.join(HEADING_SEPARATOR),
-        },
-        place: Some(found.place(text)),
-    })
+        .map(|&(line, _)| line)?;
+    let h = text.headings().iter().position(|h| h.line == line)?;
+    heading_place(text, h)
 }
 
 /// Whether each of `wanted` is in `path`, in the same order, others between them or not.

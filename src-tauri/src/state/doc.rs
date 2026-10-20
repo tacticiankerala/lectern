@@ -39,7 +39,15 @@ pub struct Rendered {
     pub covered: bool,
     /// The index generation it was rendered against.
     pub gen: u64,
+    /// The text a note or a text file was rendered from: what an agent's targets are found in
+    /// again while it is on screen (`agent_places`), never the file as it is on disk since. `None`
+    /// for an HTML page or a PDF, which isn't read.
+    pub source: Option<Arc<str>>,
 }
+
+/// A note's or a text file's render as the cache keeps it: the document, and the text it was
+/// rendered from (`Rendered::source`).
+pub type CachedRender = (Arc<RenderedDoc>, Arc<str>);
 
 /// The document rendered during boot, before the window exists.
 pub struct EarlyDoc {
@@ -84,6 +92,7 @@ pub fn render_file(
         lossy: text.lossy,
         covered: false,
         gen: 0,
+        source: Some(Arc::from(text.text)),
     })
 }
 
@@ -115,6 +124,7 @@ pub(super) fn framed(path: &Path, kind: DocKind, stamp: &Stamp) -> Result<Render
         lossy: false,
         covered: false,
         gen: 0,
+        source: None,
     })
 }
 
