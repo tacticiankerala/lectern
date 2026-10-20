@@ -38,8 +38,12 @@ pub struct AgentCall {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<TextPlace>>", optional)]
     pub places: Vec<TextPlace>,
-    /// How long the window has to answer, in milliseconds, after which Lectern stops waiting: a
-    /// `show`'s, whose window may wait for an HTML page to load to find its target.
+    /// How long the window has to answer a `show`, in milliseconds, after which Lectern stops
+    /// waiting: its window may wait for an HTML page to load, or for a change to the file on
+    /// screen to show, to find the target. None once Lectern has stopped waiting already, for a
+    /// `show` held for a window that was starting, which answered `waiting`: the window takes as
+    /// long as it needs, and `status` keeps its answer. The other requests, which the window
+    /// answers at once, don't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub within_ms: Option<u32>,

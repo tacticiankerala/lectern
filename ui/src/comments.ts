@@ -40,10 +40,11 @@
 // - An agent's operations on an HTML page (agent.ts) queue with the reader's and show the same
 //   way, but tell the agent why one wasn't saved rather than toasting it. An agent's `show` of a
 //   thread shows its card and passage as a dot's click does, once its note's review has loaded
-//   and, in an HTML page, the page is ready and that review was resolved against the page's current
-//   text; with comments hidden, only its passage (Rust tells the agent they're hidden). One still
-//   waiting is dropped by another navigation, a newer show request or landing, or the document
-//   being left (`PendingReveal`).
+//   for the render on screen (a file shown again after a change loads it again, its lines the
+//   text's as it shows now) and, in an HTML page, the page is ready and that review was resolved
+//   against the page's current text; with comments hidden, only its passage (Rust tells the agent
+//   they're hidden). One still waiting is dropped by another navigation, a newer show request or
+//   landing, the document being left, or its review failing to load twice (`PendingReveal`).
 import type { Backend } from "./backend";
 import { CommentAdding, noteKey, type Outcome } from "./comment-adding";
 import { pageSpan, type PageSurface } from "./comments-page";
@@ -121,10 +122,11 @@ export interface CommentsHost {
 
 /**
  * A thread an agent's show asked for, waiting to be shown: its note and id, and what the show was
- * part of, so it is dropped once that has passed. Shown once the review on screen is its note's and
- * has it and, in an HTML page, the page is ready and that review was resolved against the page's
- * current text; dropped by another navigation than `navigation`, a newer show request or landing
- * than `landing`, or the document being left.
+ * part of, so it is dropped once that has passed. Shown once the review on screen is its note's,
+ * has it and was loaded for the render on screen, and, in an HTML page, the page is ready and
+ * that review was resolved against the page's current text; dropped by another navigation than
+ * `navigation`, a newer show request or landing than `landing`, the document being left, or the
+ * review it waits for failing to load twice.
  */
 export interface PendingReveal {
   path: string;
@@ -152,6 +154,8 @@ export class CommentsController {
   private review: ReviewPayload | null = null;
   /** Bumped by every load: a load waiting its turn is skipped once a newer one is asked for. */
   private gen = 0;
+  /** The latest load that has finished, applied or not: one asked for since is on its way. */
+  private fetched = 0;
   private filter: Filter = "open";
   private shown: boolean;
   /** Where each marked comment's text is in the note, by id. */
@@ -171,6 +175,17 @@ export class CommentsController {
    * in page text that has since changed.
    */
   private reviewRevision = 0;
+  /**
+   * How many times the document area has rendered (a file changed on disk shown again included):
+   * each render loads the review again, whose threads' lines follow the text as it is then.
+   */
+  private docRevision = 0;
+  /**
+   * The render (`docRevision`) the review on screen was loaded for. A reveal waits until this
+   * matches the current one, so an agent's thread shows where it is in the document on screen,
+   * never where the render before had it.
+   */
+  private reviewDocRevision = 0;
   /** The visible text of the note on screen, built when first needed after its render. */
   private index: TextIndex | null = null;
   private focused: number | null = null;
@@ -198,6 +213,8 @@ export class CommentsController {
   private edit: EditBox | null = null;
   /** A thread an agent asked to show, not shown yet (`tryReveal`). */
   private revealing: PendingReveal | null = null;
+  /** Whether a load `revealing` waited for has failed and been asked for once more. */
+  private revealReloaded = false;
   /** The selection button, the block "+", the editor and re-attach mode. */
   private readonly adding: CommentAdding;
   private readonly stops: (() => void)[] = [];
@@ -329,7 +346,13 @@ export class CommentsController {
     if (path === null || this.disposed) {
       return Promise.resolve();
     }
-    return this.enqueue(() => this.fetch(gen, path));
+    return this.enqueue(async () => {
+      try {
+        await this.fetch(gen, path);
+      } finally {
+        this.fetched = gen;
+      }
+    });
   }
 
   private async fetch(gen: number, path: string): Promise<void> {
@@ -348,6 +371,7 @@ export class CommentsController {
     const waited = this.pageWaiting;
     this.pageWaiting = false;
     const revision = this.pageRevision;
+    const render = this.docRevision;
     let payload: ReviewPayload;
     try {
       payload =
@@ -359,12 +383,14 @@ export class CommentsController {
         this.host.toast(String(e));
         // Loading no longer.
         if (waited) this.render();
+        this.reloadForReveal();
       }
       return;
     }
     if (gen === this.gen && this.showing(path)) {
-      // This review was resolved against the page text of `revision`.
+      // This review was loaded for the render `render`, against the page text of `revision`.
       this.reviewRevision = revision;
+      this.reviewDocRevision = render;
       this.apply(payload);
       // The page's text changed while they loaded: they're found in its newest text.
       if (page !== null && revision !== this.pageRevision) {
@@ -403,16 +429,25 @@ export class CommentsController {
    * Shows a thread for an agent, as a click on its dot does: the Comments tab on its card, and its
    * text; with comments hidden, its text alone. At once when everything it waits for is there,
    * else once it is, or never (`tryReveal`). The note's review loads again when the one on screen
-   * lacks the thread: Rust found it in the sidecar, so what's on screen may be older. One already
-   * stale when it arrives (an older show's open landing after a newer one's) is ignored, so it
-   * never displaces the newer thread waiting.
+   * lacks the thread (Rust found it in the sidecar, so what's on screen may be older), or is an
+   * earlier render's with no load on its way (that render's own reload failed), so the thread is
+   * never left waiting for a load that isn't coming. One already stale when it arrives (an older
+   * show's open landing after a newer one's) is ignored, so it never displaces the newer thread
+   * waiting.
    */
   showThread(reveal: PendingReveal): void {
     if (this.stale(reveal)) {
       return;
     }
     this.revealing = reveal;
-    if (this.tryReveal() && !this.hasThread(reveal.path, reveal.id)) {
+    this.revealReloaded = false;
+    // The review loads again when the one on screen lacks the thread, or is an earlier render's
+    // with no load on its way (that render's own failed).
+    if (
+      this.tryReveal() &&
+      (!this.hasThread(reveal.path, reveal.id) ||
+        (this.reviewDocRevision !== this.docRevision && this.fetched >= this.gen))
+    ) {
       void this.load();
     }
   }
@@ -420,9 +455,11 @@ export class CommentsController {
   /**
    * The thread waiting to show, if any (`revealing`), under the one rule for it: dropped once it
    * is stale, which is another navigation than its show's, a newer show request or landing, or the
-   * document on screen not being its note; shown once the review on screen has it and, in an HTML
-   * page, the page is ready and the review was resolved against the page's current text
-   * (`reviewRevision`); left waiting otherwise. Run whenever any of that may have changed: a
+   * document on screen not being its note; shown once the review on screen has it, was loaded for
+   * the render on screen (`reviewDocRevision`, so its lines are the text's as it shows) and, in an
+   * HTML page, the page is ready and the review was resolved against the page's current text
+   * (`reviewRevision`); left waiting otherwise, though a load it waits for failing is asked for
+   * once more and then drops it (`reloadForReveal`). Run whenever any of that may have changed: a
    * document shown, a review applied, a page's text reported. True while one is left waiting.
    */
   private tryReveal(): boolean {
@@ -436,6 +473,7 @@ export class CommentsController {
     }
     if (
       !this.hasThread(reveal.path, reveal.id) ||
+      this.reviewDocRevision !== this.docRevision ||
       (this.host.isPage() &&
         (this.readyPage() === null || this.reviewRevision !== this.pageRevision))
     ) {
@@ -444,6 +482,22 @@ export class CommentsController {
     this.revealing = null;
     this.showFor(reveal.id);
     return false;
+  }
+
+  /**
+   * A load that a thread waiting to show (`revealing`) needed has failed, with the toast up: the
+   * review is asked for once more. Failing again, the thread is dropped, so nothing moves later.
+   */
+  private reloadForReveal(): void {
+    if (this.revealing === null) {
+      return;
+    }
+    if (this.revealReloaded) {
+      this.revealing = null;
+      return;
+    }
+    this.revealReloaded = true;
+    void this.load();
   }
 
   /**
@@ -664,13 +718,15 @@ export class CommentsController {
     // A page that hasn't reported its text sends none, and Rust says why it can't be saved.
     const page = this.pageText() ?? null;
     const revision = this.pageRevision;
+    const render = this.docRevision;
     const payload =
       page === null
         ? await this.host.backend.reviewOp(path, op)
         : await this.host.backend.reviewOp(path, op, page);
     if (this.showing(path)) {
-      // The review it leaves was resolved against the page text of `revision`.
+      // The review it leaves is for the render `render`, against the page text of `revision`.
       this.reviewRevision = revision;
+      this.reviewDocRevision = render;
       this.apply(payload);
     }
     return payload;
@@ -747,6 +803,7 @@ export class CommentsController {
    * note ends what was being added, re-attached or edited on the last.
    */
   private onDoc(): void {
+    this.docRevision++;
     this.index = null;
     const path = this.host.docPath();
     const note = path === null ? null : noteKey(path);

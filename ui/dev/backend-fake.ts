@@ -262,7 +262,11 @@ export interface FakeControl {
    * a sidecar if it has none.
    */
   agentComment(path: string, comment: AgentComment): void;
-  /** Replaces core's text for a note, as if the note were edited. */
+  /**
+   * Replaces core's text for a note, as if the note were edited. A block over several lines may
+   * carry them joined by newlines, so a line target finds its own line (`agentPlaces`); core's
+   * text has a space there instead, one character either way, as the window reads it.
+   */
   setText(path: string, blocks: [number, number, string][]): void;
   /** Core's text blocks for a note, as `setText` takes them. */
   blocksOf(path: string): [number, number, string][];
@@ -307,9 +311,17 @@ export interface FakeControl {
   /**
    * Sends an agent's request to the UI (`agent-request`), from the agent named `agent` as the
    * reader sees it ("Claude" when not given), with where Rust found its targets in a note
-   * (`places`, none when not given); answers with the UI's reply. The requests are numbered from 1.
+   * (`places`, none when not given) and how long Rust waits for the answer (`withinMs`: 5 s when
+   * not given, as Rust gives a window that's up; null for no deadline, as Rust sends a show it
+   * has stopped waiting for, held for the window's start); answers with the UI's reply. The
+   * requests are numbered from 1.
    */
-  agentRequest(request: AgentRequest, agent?: string, places?: TextPlace[]): Promise<AgentReply>;
+  agentRequest(
+    request: AgentRequest,
+    agent?: string,
+    places?: TextPlace[],
+    withinMs?: number | null,
+  ): Promise<AgentReply>;
   /**
    * What became of each `show` the UI asked the reader about, as it told Rust, in order, with why
    * when it `failed`.
@@ -473,28 +485,35 @@ function resolveState(c: StoredComment, text: string | null): AnchorState {
  * one after the text most like its prefix, then the one nearest its first line, then the first.
  * Null when it isn't there.
  */
-function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [number, number] | null {
-  const text = blocks.map(([, , t]) => t).join(" ");
-  const needle = normalize(matchPart(c.quote));
-  // Where each block's text starts in the note's.
+/** Where each of `blocks` starts in the note's text (their texts joined by spaces). */
+function blockStarts(blocks: [number, number, string][]): number[] {
   const starts: number[] = [];
   let offset = 0;
   for (const [, , t] of blocks) {
     starts.push(offset);
     offset += t.length + 1;
   }
-  const linesOf = (from: number, to: number): [number, number] => {
-    let first = Infinity;
-    let last = -Infinity;
-    blocks.forEach(([start, end, t], i) => {
-      const at = starts[i] ?? 0;
-      if (at < to && from < at + t.length) {
-        first = Math.min(first, start);
-        last = Math.max(last, end);
-      }
-    });
-    return [first, last];
-  };
+  return starts;
+}
+
+/** The first and last line of the blocks that the note's text from `from` to `to` touches. */
+function linesOf(blocks: [number, number, string][], from: number, to: number): [number, number] {
+  const starts = blockStarts(blocks);
+  let first = Infinity;
+  let last = -Infinity;
+  blocks.forEach(([start, end, t], i) => {
+    const at = starts[i] ?? 0;
+    if (at < to && from < at + t.length) {
+      first = Math.min(first, start);
+      last = Math.max(last, end);
+    }
+  });
+  return [first, last];
+}
+
+function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [number, number] | null {
+  const text = blocks.map(([, , t]) => t).join(" ");
+  const needle = normalize(matchPart(c.quote));
   const agreement = (at: number): number => {
     let n = 0;
     while (
@@ -512,7 +531,7 @@ function quoteSpan(c: StoredComment, blocks: [number, number, string][]): [numbe
     at !== -1;
     at = text.indexOf(needle, at + 1)
   ) {
-    const [first, last] = linesOf(at, at + needle.length);
+    const [first, last] = linesOf(blocks, at, at + needle.length);
     const fit =
       first >= c.startLine && last <= c.endLine
         ? 0
@@ -1248,15 +1267,22 @@ export class FakeBackend implements Backend, FakeControl {
       } else if (state === "anchored") {
         span = quoteSpan(c, blocks);
       }
+      // As core places a comment's lines where its quote sits: its lines as stored while the
+      // quote is still on them, else where the quote is now, as after an edit above it.
+      let [startLine, endLine] = [c.startLine, c.endLine];
+      if (blocks !== undefined && state === "anchored" && span !== null) {
+        const [first, last] = linesOf(blocks, span[0], span[1]);
+        if (last < c.startLine || first > c.endLine) [startLine, endLine] = [first, last];
+      }
       return {
         id: c.id,
         status: effectiveStatus(c),
         state,
-        startLine: c.startLine,
-        endLine: c.endLine,
+        startLine,
+        endLine,
         headingPath: [...c.headingPath],
         // Detached by an edit, as core with no heading left: the note's top, its first block.
-        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : c.startLine,
+        jumpLine: detached ? (c.state === "detached" ? c.jumpLine : top) : startLine,
         pinnedHeading: detached && c.state === "detached" ? c.pinnedHeading : null,
         pinnedAt: detached && c.state === "detached" ? c.pinnedAt : null,
         quote: c.quote,
@@ -1531,6 +1557,7 @@ export class FakeBackend implements Backend, FakeControl {
     request: AgentRequest,
     agent = "Claude",
     places: TextPlace[] = [],
+    withinMs: number | null = 5000,
   ): Promise<AgentReply> {
     const id = ++this.agentCallId;
     const replied = new Promise<AgentReply>((resolve) => {
@@ -1538,6 +1565,7 @@ export class FakeBackend implements Backend, FakeControl {
     });
     const call: AgentCall = { id, request, agent };
     if (places.length > 0) call.places = places;
+    if (withinMs !== null) call.withinMs = withinMs;
     this.emit("agent-request", call);
     return replied;
   }
@@ -1569,10 +1597,10 @@ export class FakeBackend implements Backend, FakeControl {
   /**
    * As core finds an agent's targets again, simplified, in the note the window shows, as it was
    * when it opened (`rendered`), never as it is since: a quote where it first is, a heading by its
-   * block's text, a line by the block holding it (else alone, as a line with no text is), a
-   * show's `#anchor` by the id of a heading in the
-   * HTML (`anchoredLine`); each with where it starts in its block's own text, as core sends it.
-   * Refused, as Rust refuses it, for a note the window doesn't show.
+   * block's text, a line by its own text in a block whose lines `setText` kept apart, else by the
+   * block holding it (else alone, as a line with no text is), a show's `#anchor` by the id of a
+   * heading in the HTML (`anchoredLine`); each with where it starts in its block's own text, as
+   * core sends it. Refused, as Rust refuses it, for a note the window doesn't show.
    */
   agentPlaces(path: string, targets: Target[]): Promise<(TextPlace | null)[]> {
     const shown = this.rendered;
@@ -1612,9 +1640,26 @@ export class FakeBackend implements Backend, FakeControl {
           return whole(blocks.findIndex(([, , t]) => t.toLowerCase() === wanted));
         }
         if ("line" in target) {
-          // No block holds a line with no text, such as a frontmatter's: core gives it alone.
           const i = blocks.findIndex(([s, e]) => s <= target.line && target.line <= e);
-          return i === -1 ? { startLine: target.line, endLine: target.line } : whole(i);
+          const block = blocks[i];
+          if (block === undefined) {
+            // No block holds a line with no text, such as a frontmatter's: core gives it alone.
+            return { startLine: target.line, endLine: target.line };
+          }
+          // Inside a block whose lines are kept apart, its own line, as core places one.
+          const lines = block[2].split("\n");
+          const k = target.line - block[0];
+          const own = lines.length > 1 ? lines[k] : undefined;
+          if (own === undefined) {
+            return whole(i);
+          }
+          const from =
+            (starts[i] ?? 0) + lines.slice(0, k).reduce((n, line) => n + line.length + 1, 0);
+          return {
+            ...place(from, from + own.length),
+            startLine: target.line,
+            endLine: target.line,
+          };
         }
         if ("anchor" in target) {
           const line = anchoredLine(shown.html, target.anchor);

@@ -19,27 +19,38 @@
 //   names, which answers `replaced`; the reader's own navigation is left be. A request held while
 //   the file on screen is opened again (Rust had taken a dropped open) goes nowhere, failed, once
 //   the reader moves on meanwhile, as one on its way does.
-// - Targets (`landing`): in a note or a text file, Rust's core found the target and sends where
-//   (`places`), so the window goes to its line; to its own text instead (a line's, a quote's,
-//   found in its block's text alone, never the whole document's) when that is far down a block
-//   longer than the view, while a heading lands by its block, and a line above every block (a
-//   note's frontmatter) at the top. A line with no note or text file on screen fails. One an open
-//   goes to (at once, or once the reader says Show on the bar) is found again by core once the
-//   file has opened, before it shows, as the file may have changed since core found it as the
-//   show came, or while the bar waited (a change while it opens renders over where it landed):
-//   gone, it fails as a missing target does, the file staying open; and any navigation after the
-//   open's own leaves it, as the reader's, not shown. (A window starting for an agent has Rust
-//   find it again as its startup opens the file.) A closed
-//   `<details>` folding a target away opens (doc-view.ts). In an HTML page the window finds it
-//   in what the page's bridge reported (`pageSpan`): a quote by its text, whitespace aside, told
-//   apart from others like it by the text before and after it (256 characters of each at most); a
-//   heading by its whole text or its path, in the page's blocks (the outline's list shortens
-//   them); the `#anchor` after the page's path by a heading's id, or the slug of its text, as
-//   Lectern's links find one. A `show`
-//   waits for a page still loading as long as Rust waits for its answer, and so does Show on the
-//   bar: a passage that isn't there fails, and one the page hadn't loaded in time for is
-//   `pending`, gone to once it has, the page aimed at again should it load afresh meanwhile (a
-//   change on disk). A newer request meanwhile (`replaced`), or another file on screen (failed),
+// - Targets (`landing`): in a note or a text file, Rust's core found the target as the show came
+//   and sends where (`places`), and finds it again where it goes, in the file as it is then, so
+//   the window goes to its line; to its own text instead (a line's, a quote's, found in its
+//   block's text alone, never the whole document's) when that is far down a block longer than the
+//   view, while a heading lands by its block, and a line above every block (a note's frontmatter)
+//   at the top. A line with no note or text file on screen fails. One an open goes to (at once, or
+//   once the reader says Show on the bar) is found again once the file has opened, before it
+//   shows, as the file may have changed since the show came, or while the bar waited (a change
+//   while it opens renders over where it landed). One within the file on screen is found again
+//   once no refresh of it (a change on disk being shown again) is on its way, in the document as
+//   it shows, and again should it show afresh meanwhile, so it lands in the revision the reader
+//   sees; and every such wait ends when Rust stops waiting for the answer (`withinMs`): past that,
+//   nothing moves, and the show fails, the file still changing (a wait settled already never
+//   is). A show Rust has stopped waiting for before the window had it (held for the window's
+//   start past its time, it answered `waiting`, and `status` keeps what the window answers) has
+//   no deadline: it waits as long as it needs. A newer request, or the reader navigating, ends
+//   any such wait at once, answered as below; and before any move the file on screen must still
+//   be the show's (a navigation of the reader's under way as the show came may land meanwhile),
+//   else it fails as the reader's navigation does. Gone, it fails as a missing target does,
+//   moving nowhere, the file staying open; and any navigation after the open's own, or since the
+//   show came, leaves it, as the reader's, not shown. (A window starting for an agent has Rust
+//   find it again as its startup opens the file.)
+//   A closed `<details>` folding a target away opens (doc-view.ts). In an HTML page the window
+//   finds it in what the page's bridge reported (`pageSpan`): a quote by its text, whitespace
+//   aside, told apart from others like it by the text before and after it (256 characters of each
+//   at most); a heading by its whole text or its path, in the page's blocks (the outline's list
+//   shortens them); the `#anchor` after the page's path by a heading's id, or the slug of its
+//   text, as Lectern's links find one. A `show`
+//   waits for a page still loading as long as Rust waits for its answer (not at all, for a show
+//   Rust has stopped waiting for), and so does Show on the bar: a passage that isn't there fails,
+//   and one the page hadn't loaded in time for is `pending`, gone to once it has, the page aimed
+//   at again should it load afresh meanwhile (a change on disk). A newer request meanwhile (`replaced`), or another file on screen (failed),
 //   leaves it going nowhere; so does a newer request for a target the window started with, and a
 //   request that ends unreached (dismissed, replaced, or its file failing to open), so the reader
 //   opening that page later isn't taken there. In a PDF, its page. `show` only moves there;
@@ -63,7 +74,9 @@
 //   The answer is the thread and its status now.
 // - A comment thread as `show`'s target: the Comments tab opens on its card, and the document goes
 //   to its passage, once the comments of the file have loaded (`{comment}` landing); with comments
-//   hidden in the window, the document goes to its passage alone.
+//   hidden in the window, the document goes to its passage alone. Within the file on screen, that
+//   waits for any refresh of it on its way, and for the review loaded for the render on screen
+//   (comments.ts), so the thread shows where it is in the revision the reader sees.
 // Loaded on the first request.
 import {
   blockLines,
@@ -128,10 +141,19 @@ const NOT_A_PAGE = "Only an HTML page's comments go through its window.";
 /** The closing note of a `resolve` that gives none, as core writes it. */
 const RESOLVED = "Resolved.";
 
-/** How long the window has to answer when Rust doesn't say, in milliseconds: as Rust waits. */
+/** The answer when a show within the file on screen ran out of time waiting for it to settle. */
+const STILL_CHANGING = "The file was still changing; show it again.";
+
+/**
+ * How long a page is waited for after Show on the bar, at least, in milliseconds: as long as Rust
+ * waits for a show's answer.
+ */
 const ANSWER_WITHIN_MS = 5000;
 
-/** What a wait for a page keeps of the time to answer in, for the answer to get back. */
+/**
+ * What a wait keeps of the time to answer in, for the answer to get back, at most: never more
+ * than half of it (`answerBy`), so some is always left to wait in.
+ */
 const ANSWER_MARGIN_MS = 500;
 
 /** What an HTML page's session gives an agent: its text as its bridge reported it, and paint. */
@@ -257,6 +279,15 @@ interface FindInOpen {
   missing: () => string | null;
 }
 
+/**
+ * What core's look for a target in the document on screen came to (`Agent.foundHere`): where it
+ * is (null for gone), or why core couldn't look.
+ */
+interface Looked {
+  place: TextPlace | null;
+  failure: string | null;
+}
+
 /** Whether the CSS Custom Highlight API is there to paint with. */
 const supported = (): boolean => typeof Highlight === "function" && "highlights" in CSS;
 
@@ -304,6 +335,8 @@ export interface AgentHost extends DocHost {
   pageReady(within: number): Promise<PageText | null>;
   /** The current navigation's number: another one opened another document, or this one again. */
   navigation(): number;
+  /** Resolves once another navigation begins, after this call. */
+  navigated(): Promise<void>;
   /**
    * Where each of `targets` is now in `path`, the note or text file on screen, as core finds them
    * in the file; null for one that's gone.
@@ -333,6 +366,11 @@ export interface AgentHost extends DocHost {
    * have taken a dropped open already, whichever show dropped it; at once when it isn't being.
    */
   recovered(): Promise<void>;
+  /**
+   * Resolves once no refresh of the document on screen (a change on disk being shown again) is
+   * on its way: at once when none is.
+   */
+  refreshed(): Promise<void>;
   /**
    * Saves an agent's `op` to the comments of `path`, the HTML page on screen, with its text, after
    * the operations before it, and shows it: the review as saved, or why it wasn't, as an error.
@@ -377,15 +415,23 @@ export class Agent {
   private lastShow = STARTED_WITH;
   /** A page's target not reached yet, aimed at again should the page load afresh. */
   private pending: Pending | null = null;
+  /** Resolves, and is renewed, whenever a newer request comes (`show`): a wait ends there. */
+  private newer: Promise<void>;
+  private newerCame: () => void = () => undefined;
 
-  constructor(private readonly host: AgentHost) {}
+  constructor(private readonly host: AgentHost) {
+    this.newer = new Promise((resolve) => {
+      this.newerCame = resolve;
+    });
+  }
 
   /** This window's answer to `call`. */
   async answer(call: AgentCall): Promise<AgentReply> {
     const request = call.request;
     const places = call.places ?? [];
-    // When to have answered by, so Rust still waits for it.
-    const by = Date.now() + (call.withinMs ?? ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
+    // When to have answered by, so Rust still waits for it; none when Rust has stopped waiting
+    // already (a show held for the window's start past its time), `status` keeping the answer.
+    const by = call.withinMs === undefined ? null : answerBy(call.withinMs);
     switch (request.tool) {
       case "status":
         return { kind: "view", ...this.view() };
@@ -532,27 +578,40 @@ export class Agent {
   /**
    * `show` from the agent `agent`, the request `id`, at its target, which core found at `places`
    * in a note or a text file: on screen at once, or asked about first (see the top of this file).
-   * An HTML page's target is found once the page has loaded, waited for until `by`: a passage
-   * that isn't there fails, and one the page hadn't loaded in time for is `pending`, gone to once
-   * it has.
+   * Every wait ends at `by` (ms since the epoch, when Rust stops waiting for the answer); null for
+   * none, a show Rust has stopped waiting for already, whose answer `status` keeps. An HTML
+   * page's target is found once the page has loaded, waited for until `by`: a passage that isn't
+   * there fails, and one the page hadn't loaded in time for is `pending`, gone to once it has.
    */
   private async show(
     id: number,
     agent: string,
     args: ShowArgs,
     places: TextPlace[],
-    by: number,
+    by: number | null,
   ): Promise<AgentReply> {
-    // A newer request: an older one's page target, or thread, goes nowhere.
+    // A newer request: an older one's page target, or thread, goes nowhere, and one waiting
+    // within the file on screen answers now (`waited`).
     this.lastShow = id;
+    const wake = this.newerCame;
+    this.newer = new Promise((resolve) => {
+      this.newerCame = resolve;
+    });
+    wake();
     this.host.forgetThreads();
     const target = args.target;
     const showing: Showing = { id, navigation: null };
     const inPage =
       target !== undefined && places.length === 0 && foundInPage(target) ? target : null;
-    // Where core found a note's target, as the show came: an open finds it again as it renders.
+    // Core found a note's target as the show came: it is found again where it goes, in the file
+    // as it is then (an open as it renders, a move once the document on screen is current), so
+    // where core found it isn't kept.
     const inNote = target !== undefined && places[0] !== undefined ? target : null;
-    const land = inPage ? this.pageLanding(inPage, showing, args.path) : landing(target, places[0]);
+    const land = inPage
+      ? this.pageLanding(inPage, showing, args.path)
+      : inNote !== null
+        ? null
+        : landing(target, undefined);
     void this.settle("replaced");
     // The file on screen stays unless this opens another: an older request's open on its way is
     // dropped. Either way, should Rust have taken a dropped open already, the file on screen opens
@@ -562,14 +621,10 @@ export class Agent {
     // The drop has made its own navigation by now: any other from here on is the reader's.
     const navigation = this.host.navigation();
     await settling;
-    if (this.lastShow !== id) {
+    const overtaken = this.overtaken(id, args.path, navigation);
+    if (overtaken !== null) {
       this.ended(showing);
-      return { kind: "replaced" };
-    }
-    if (this.host.navigation() !== navigation) {
-      // The reader moved on meanwhile: this goes nowhere, as a show on its way does.
-      this.ended(showing);
-      return { kind: "failed", message: notOnScreen(args.path) };
+      return overtaken;
     }
     const route = this.route(args.path);
     const doc = this.host.doc();
@@ -578,6 +633,20 @@ export class Agent {
         showing.navigation = this.host.navigation();
         return this.reach(showing, args.path, inPage, land, by, true);
       }
+      if (inNote !== null) {
+        return this.foundHere(id, args.path, navigation, inNote, by);
+      }
+      if (land !== null && "comment" in land) {
+        // The thread shows where it is in the revision the reader will see: once no refresh of
+        // the document is on its way, and (comments.ts) in the review loaded for that render.
+        if (!(await this.waited(this.host.refreshed(), by, id, args.path, navigation))) {
+          return outOfTime();
+        }
+        const stale = this.offScreen(id, args.path, navigation);
+        if (stale !== null) {
+          return stale;
+        }
+      }
       if (land !== null && !this.host.move(land)) {
         return { kind: "failed", message: notThere(doc.path) };
       }
@@ -585,7 +654,7 @@ export class Agent {
     }
     if (route === "open") {
       const again = inNote === null ? null : this.findInOpen(args.path, inNote);
-      const opening = this.open(args.path, again === null ? land : null, again?.find);
+      const opening = this.open(args.path, land, again?.find);
       // The open's own navigation, started before it awaits: any later one is the reader's.
       const own = this.host.navigation();
       const opened = await opening;
@@ -617,7 +686,7 @@ export class Agent {
       path: args.path,
       agent,
       heading,
-      landing: inNote === null ? land : null,
+      landing: land,
       inPage,
       inNote,
       showing,
@@ -702,10 +771,11 @@ export class Agent {
     path: string,
     target: Target,
     land: Landing,
-    by: number,
+    by: number | null,
     move: boolean,
   ): Promise<AgentReply> {
-    const page = await this.host.pageReady(Math.max(0, by - Date.now()));
+    // With no deadline the page isn't waited for: one not loaded yet is `pending`.
+    const page = await this.host.pageReady(by === null ? 0 : Math.max(0, by - Date.now()));
     if (this.lastShow !== showing.id) {
       this.ended(showing);
       return { kind: "replaced" };
@@ -968,7 +1038,7 @@ export class Agent {
     }
     ask.showing.navigation = navigation;
     this.aimed(ask.showing, ask.landing);
-    const by = Math.max(ask.answerBy, Date.now() + ANSWER_WITHIN_MS) - ANSWER_MARGIN_MS;
+    const by = answerBy(Math.max(ask.answerBy - Date.now(), ANSWER_WITHIN_MS));
     const reply = await this.reach(ask.showing, ask.path, ask.inPage, ask.landing, by, false);
     // `reach` ended the target, unless it is still on its way to the page once it loads.
     await (reply.kind === "failed"
@@ -1011,13 +1081,145 @@ export class Agent {
     navigation: number,
     missing: string | null,
   ): AgentReply {
+    return (
+      this.overtaken(id, path, navigation) ??
+      (missing === null ? { kind: "shown" } : { kind: "failed", message: missing })
+    );
+  }
+
+  /**
+   * The show `id`'s note or text file target `target` in `path`, the document on screen: once no
+   * refresh of it is on its way (a change on disk being shown again), core finds the target in
+   * the document as it shows now (`places`), and the window moves there. Should the document show
+   * afresh while core looks, it looks again, so the move lands in the revision the reader sees:
+   * each look again needs a fresh render. Every wait ends at `by` (ms since the epoch, when Rust
+   * stops waiting for the answer): past it, nothing moves, and the show fails, the file still
+   * changing; with no `by` (null: Rust has stopped waiting already, and `status` keeps the
+   * answer), it waits as long as it needs. Replaced by a newer request, or failed as a show on its
+   * way is, after any navigation since `navigation`, the reader's, or once `path` isn't on screen
+   * (`offScreen`), each ending a wait at once; failed as a missing target is when it isn't there,
+   * or when core couldn't look, moving nowhere.
+   */
+  private async foundHere(
+    id: number,
+    path: string,
+    navigation: number,
+    target: Target,
+    by: number | null,
+  ): Promise<AgentReply> {
+    for (;;) {
+      if (!(await this.waited(this.host.refreshed(), by, id, path, navigation))) {
+        return outOfTime();
+      }
+      const before = this.offScreen(id, path, navigation);
+      if (before !== null) {
+        return before;
+      }
+      const doc = this.host.doc();
+      const looked = this.host.places(path, [target]).then(
+        ([found = null]): Looked => ({ place: found, failure: null }),
+        (e: unknown): Looked => ({
+          place: null,
+          failure: e instanceof Error ? e.message : String(e),
+        }),
+      );
+      if (!(await this.waited(looked, by, id, path, navigation))) {
+        return outOfTime();
+      }
+      const meanwhile = this.offScreen(id, path, navigation);
+      if (meanwhile !== null) {
+        return meanwhile;
+      }
+      // Still the one to go: the wait ended as core answered.
+      const { place, failure } = await looked;
+      // A change shown while core looked: it looked in the revision before, so it looks again.
+      if (!(await this.waited(this.host.refreshed(), by, id, path, navigation))) {
+        return outOfTime();
+      }
+      const after = this.offScreen(id, path, navigation);
+      if (after !== null) {
+        return after;
+      }
+      if (failure !== null) {
+        return { kind: "failed", message: failure };
+      }
+      if (this.host.doc() === doc) {
+        const land = place === null ? null : landing(target, place);
+        return land !== null && this.host.move(land)
+          ? { kind: "shown" }
+          : { kind: "failed", message: notThere(path) };
+      }
+    }
+  }
+
+  /**
+   * Why the show `id` of `path` goes nowhere now, if it does: replaced by a newer request; failed,
+   * as a show on its way is, after any navigation since `navigation`, its own (the reader moved
+   * on). Null while it is still the one to go.
+   */
+  private overtaken(id: number, path: string, navigation: number): AgentReply | null {
     if (this.lastShow !== id) {
       return { kind: "replaced" };
     }
     if (this.host.navigation() !== navigation) {
       return { kind: "failed", message: notOnScreen(path) };
     }
-    return missing === null ? { kind: "shown" } : { kind: "failed", message: missing };
+    return null;
+  }
+
+  /**
+   * As `overtaken`, for the show `id` of `path`, the file on screen as it came: failed too, as
+   * the reader's navigation is, once that file isn't on screen (a navigation of theirs under way
+   * as the show came, landed meanwhile, which `navigation` can't tell). Checked after every wait
+   * and before any move, so nothing moves in another file.
+   */
+  private offScreen(id: number, path: string, navigation: number): AgentReply | null {
+    const overtaken = this.overtaken(id, path, navigation);
+    if (overtaken !== null) {
+      return overtaken;
+    }
+    const doc = this.host.doc();
+    return doc && samePath(doc.path, path) ? null : { kind: "failed", message: notOnScreen(path) };
+  }
+
+  /**
+   * Whether the show `id` of `path`, within the file on screen, goes on from `waited`: true once
+   * it settles; true at once should a newer request or the reader's navigation overtake the show
+   * meanwhile, or have already (`offScreen` then says what to answer); false once `by` (ms since
+   * the epoch) passes first with the show still the one to go, `waited` left to settle on its
+   * own. A wait settled already is in time, `by` past or not: the timer runs no sooner than the
+   * next task, after the settling has. With no `by` (null), it waits however long.
+   */
+  private waited(
+    waited: Promise<unknown>,
+    by: number | null,
+    id: number,
+    path: string,
+    navigation: number,
+  ): Promise<boolean> {
+    if (this.offScreen(id, path, navigation) !== null) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (worth: boolean): void => {
+        clearTimeout(timer);
+        resolve(worth);
+      };
+      if (by !== null) {
+        timer = setTimeout(
+          () => {
+            done(this.offScreen(id, path, navigation) !== null);
+          },
+          Math.max(0, by - Date.now()),
+        );
+      }
+      const goOn = (): void => {
+        done(true);
+      };
+      void Promise.race([this.newer, this.host.navigated()]).then(goOn);
+      void waited.then(goOn, goOn);
+    });
   }
 
   /** The request being asked about, if any, settles as `answer` (see `take` and `record`). */
@@ -1130,6 +1332,20 @@ function notOnScreen(path: string): string {
 /** The answer when a target isn't in `path`, in the words Rust uses. */
 function notThere(path: string): string {
   return `That passage isn't in ${fileName(path)}.`;
+}
+
+/** The answer when a show within the file on screen ran out of time: nothing moved. */
+function outOfTime(): AgentReply {
+  return { kind: "failed", message: STILL_CHANGING };
+}
+
+/**
+ * When to have answered by, in ms since the epoch, given `withinMs` to answer in: a margin is
+ * kept for the answer to get back (`ANSWER_MARGIN_MS`), at most half the time, so some is always
+ * left to wait in.
+ */
+function answerBy(withinMs: number): number {
+  return Date.now() + withinMs - Math.min(ANSWER_MARGIN_MS, withinMs / 2);
 }
 
 /**

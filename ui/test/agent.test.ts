@@ -1195,9 +1195,23 @@ function passageText(call: [number, Passage] | undefined): string | undefined {
   return doc ? call?.[1](doc)?.toString() : undefined;
 }
 
+/**
+ * B on screen, opened from A, with its text as core has it: Bee, then the paragraph "Buzz.". A
+ * show within it has core find its target in that text again.
+ */
+async function readingBee() {
+  const { fake, app } = await launched(A);
+  fake.setText(B, [
+    [1, 1, "Bee"],
+    [3, 3, "Buzz."],
+  ]);
+  await app.open(B, { push: true });
+  return { fake, app };
+}
+
 describe("an agent's targets", () => {
   it("move within the file on screen to where core found them, and Back returns", async () => {
-    const { fake, app } = await launched(B);
+    const { fake, app } = await readingBee();
     const reading: SavedPosition = { headingId: "bee", offset: 4, line: 1, fraction: 0 };
     vi.spyOn(app.view, "captureAnchor").mockReturnValue(reading);
     const scrolled = passageLandings(app);
@@ -1251,6 +1265,14 @@ describe("an agent's targets", () => {
       `<h1 id="bee" data-sourcepos="1:1-1:5">Bee</h1>${paragraphs}` +
         `<h2 id="results" data-sourcepos="${String(last)}:1-${String(last)}:10">Results</h2>`,
     );
+    fake.setText(B, [
+      [1, 1, "Bee"],
+      ...Array.from({ length: entries }, (_, i): [number, number, string] => {
+        const line = 3 + 2 * i;
+        return [line, line, `Survey entry ${String(i)}: the lanternfish count.`];
+      }),
+      [last, last, "Results"],
+    ]);
     fake.emit("doc-changed", { path: B });
     await vi.waitFor(() => {
       expect(document.getElementById("results")).not.toBeNull();
@@ -1267,7 +1289,7 @@ describe("an agent's targets", () => {
   });
 
   it("find a quote's passage in its own block's text alone", async () => {
-    const { fake, app } = await launched(B);
+    const { fake, app } = await readingBee();
     const scrolled = passageLandings(app);
     // "Bee Buzz.": "zz" is 6 in, and 2 into its paragraph.
     await fake.agentRequest(show(B, { quote: "zz" }), "Claude", [placed(3, 3, [6, 8], 2)]);
@@ -1560,6 +1582,253 @@ describe("a note's target the reader said Show to", () => {
       expect(fake.agentAnswers).toEqual([{ id: 1, answer: "shown" }]);
     });
     expect(byBlock).toHaveBeenLastCalledWith(5);
+  });
+});
+
+describe("a note's target within the file on screen", () => {
+  /** Where core found Buzz as the show came: on line 3, in the revision on screen. */
+  const found = () => [placed(3, 3, [4, 8], 0)];
+
+  /**
+   * B on screen with Buzz on line 3; then `between` lands before Buzz, now on line `buzz` (gone
+   * for null), and the window hears of the change. The refresh that follows opens B only once
+   * `refreshing` is let go.
+   */
+  async function changing(between: [number, string][], buzz: number | null) {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    beeWith(fake, between, buzz);
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      await refreshing.promise;
+      return open(path, generation);
+    });
+    fake.emit("doc-changed", { path: B });
+    return { fake, app, byBlock, refreshing };
+  }
+
+  /** Two paragraphs before Buzz, which is on line 7 then. */
+  const moved = (): [number, string][] => [
+    [3, "New one."],
+    [5, "New two."],
+  ];
+
+  it("lands in the revision a change is being shown as, once it has rendered", async () => {
+    const { fake, byBlock, refreshing } = await changing(moved(), 7);
+    const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found());
+    await settle();
+    // Nothing moves while the refresh is on its way.
+    expect(byBlock).not.toHaveBeenCalled();
+    refreshing.resolve();
+    expect(await reply).toEqual({ kind: "shown" });
+    expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+  });
+
+  it("fails as a missing target does once the change took it away, moving nowhere", async () => {
+    const { fake, app, byBlock, refreshing } = await changing([[3, "Hum."]], null);
+    const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found());
+    refreshing.resolve();
+    expect(await reply).toEqual({ kind: "failed", message: "That passage isn't in b.md." });
+    expect(app.state.doc?.path).toBe(B);
+    expect(byBlock).not.toHaveBeenCalled();
+  });
+
+  it("goes nowhere once the reader moves on meanwhile, as a show on its way does", async () => {
+    const { fake, app, byBlock, refreshing } = await changing(moved(), 7);
+    const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found());
+    await settle();
+    await app.open(A, { push: true });
+    refreshing.resolve();
+    expect(await reply).toEqual({
+      kind: "failed",
+      message: "b.md isn't on screen any more: another file took its place.",
+    });
+    expect(app.state.doc?.path).toBe(A);
+    expect(byBlock).not.toHaveBeenCalled();
+  });
+
+  it("is found again when the file shows afresh as core looks, in the revision that stays", async () => {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // Core's first look, in the revision on screen, answers only once let go: B changes and
+    // shows afresh meanwhile.
+    const looking = deferred();
+    const places = fake.agentPlaces.bind(fake);
+    const looked = vi.spyOn(fake, "agentPlaces").mockImplementationOnce(async (path, targets) => {
+      const where = await places(path, targets);
+      await looking.promise;
+      return where;
+    });
+    const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found());
+    await settle();
+    beeWith(fake, moved(), 7);
+    fake.emit("doc-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
+    });
+    looking.resolve();
+    expect(await reply).toEqual({ kind: "shown" });
+    expect(looked).toHaveBeenCalledTimes(2);
+    expect(byBlock).toHaveBeenCalledWith(7);
+    expect(byBlock).not.toHaveBeenCalledWith(3);
+  });
+
+  it("goes on once a newer refresh has rendered, never waiting for a slower one it superseded", async () => {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    beeWith(fake, moved(), 7);
+    // Two changes in a row: the first refresh's open is slow, the second's answers first.
+    const slow = deferred();
+    const quick = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument")
+      .mockImplementationOnce(async (path, generation) => {
+        await slow.promise;
+        return open(path, generation);
+      })
+      .mockImplementationOnce(async (path, generation) => {
+        await quick.promise;
+        return open(path, generation);
+      });
+    fake.emit("doc-changed", { path: B });
+    let answered: unknown;
+    const reply = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found()).then((r) => {
+      answered = r;
+      return r;
+    });
+    await settle();
+    fake.emit("doc-changed", { path: B });
+    await settle();
+    expect(answered).toBeUndefined();
+    quick.resolve();
+    await settle();
+    // The newer refresh rendered the change: the show went on, the slower one still unanswered.
+    expect(answered).toEqual({ kind: "shown" });
+    expect(byBlock).toHaveBeenCalledWith(7);
+    slow.resolve();
+    await reply;
+  });
+
+  it("gives up without moving once the request's time runs out while the refresh is on its way", async () => {
+    const { fake, byBlock, refreshing } = await changing(moved(), 7);
+    // Rust waits 200 ms for the answer: the show has 100 ms, the margin for the answer (half)
+    // aside.
+    let answered: unknown;
+    const reply = fake
+      .agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), 200)
+      .then((r) => {
+        answered = r;
+        return r;
+      });
+    await settle(300);
+    expect(answered).toEqual({
+      kind: "failed",
+      message: "The file was still changing; show it again.",
+    });
+    expect(byBlock).not.toHaveBeenCalled();
+    // The refresh renders later: still nothing moves.
+    refreshing.resolve();
+    await reply;
+    await settle();
+    expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
+    expect(byBlock).not.toHaveBeenCalled();
+  });
+
+  it("waits as long as it needs for a show Rust has stopped waiting for, which has no deadline", async () => {
+    const { fake, byBlock, refreshing } = await changing(moved(), 7);
+    // Held for the window's start past its show's time: Rust answered `waiting`, keeps the
+    // window's answer for `status`, and sends no time to answer in.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], shouldAdvanceTime: true });
+    try {
+      let answered: unknown;
+      const reply = fake
+        .agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), null)
+        .then((r) => {
+          answered = r;
+          return r;
+        });
+      // Long past where any time to answer in would have run out: still waiting, nothing moved.
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(answered).toBeUndefined();
+      expect(byBlock).not.toHaveBeenCalled();
+      refreshing.resolve();
+      expect(await reply).toEqual({ kind: "shown" });
+      expect(document.querySelectorAll("#lx-doc p")).toHaveLength(2);
+      expect(byBlock).toHaveBeenCalledWith(7);
+      expect(byBlock).not.toHaveBeenCalledWith(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes on past the request's time when nothing is on its way: only a wait that outlasts it gives up", async () => {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // Rust stops waiting for the answer now: the time to answer in has run out as the show comes.
+    // With no refresh on its way, nothing waits past it.
+    expect(await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), 0)).toEqual({
+      kind: "shown",
+    });
+    expect(byBlock).toHaveBeenCalledWith(3);
+  });
+
+  it("leaves time for core's look when little is left: the margin kept is at most half of it", async () => {
+    const { fake, app } = await launched(A);
+    beeWith(fake, [], 3);
+    await app.open(B, { push: true });
+    const byBlock = vi.spyOn(app.view, "scrollToLine");
+    // Core's look takes 10 ms, and Rust waits 300 ms for the answer.
+    const places = fake.agentPlaces.bind(fake);
+    vi.spyOn(fake, "agentPlaces").mockImplementationOnce(async (path, targets) => {
+      await settle(10);
+      return places(path, targets);
+    });
+    expect(await fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), 300)).toEqual({
+      kind: "shown",
+    });
+    expect(byBlock).toHaveBeenCalledWith(3);
+  });
+
+  /** A newer request while the refresh is on its way: the older show answers `replaced` now. */
+  async function replacedAtOnce(withinMs: number | null) {
+    const { fake, byBlock, refreshing } = await changing(moved(), 7);
+    let older: unknown;
+    const first = fake
+      .agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), withinMs)
+      .then((r) => {
+        older = r;
+        return r;
+      });
+    await settle();
+    expect(older).toBeUndefined();
+    const second = fake.agentRequest(show(B, { heading: "Buzz" }), "Claude", found(), withinMs);
+    await settle();
+    // Not once the refresh has rendered, nor once its time has run out: now.
+    expect(older).toEqual({ kind: "replaced" });
+    expect(byBlock).not.toHaveBeenCalled();
+    refreshing.resolve();
+    expect(await second).toEqual({ kind: "shown" });
+    expect(byBlock).toHaveBeenCalledWith(7);
+    await first;
+  }
+
+  it("answers replaced at once when a newer request comes while the refresh is on its way", async () => {
+    await replacedAtOnce(5000);
+  });
+
+  it("answers replaced at once when a newer request comes, with no deadline too", async () => {
+    await replacedAtOnce(null);
   });
 });
 
@@ -1992,6 +2261,8 @@ function agentHost(
     forgetThreads: () => undefined,
     dropOpen: () => Promise.resolve(),
     recovered: () => Promise.resolve(),
+    refreshed: () => Promise.resolve(),
+    navigated: () => new Promise<void>(() => undefined),
     bar: document.createElement("div"),
   };
   return { host, move };
@@ -2110,6 +2381,8 @@ function opening(page: PageText, ready: boolean, opens: AgentOpens = "switch") {
     forgetThreads: () => undefined,
     dropOpen: () => Promise.resolve(),
     recovered: () => Promise.resolve(),
+    refreshed: () => Promise.resolve(),
+    navigated: () => new Promise<void>(() => undefined),
     bar: document.createElement("div"),
   };
   const leave = (): void => {
@@ -2678,9 +2951,279 @@ describe("an agent's show at a comment thread", () => {
   });
 });
 
+describe("a comment target within the file on screen", () => {
+  it("waits for a refresh on its way, then reveals the thread where it is in the revision shown", async () => {
+    const { fake, app } = await readingBee();
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    fake.agentComment(B, {
+      startLine: 3,
+      endLine: 3,
+      quote: "Buzz.",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why buzz?",
+    });
+    // The review on screen has the thread, on line 3.
+    fake.emit("review-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    // Two paragraphs land before Buzz., on line 7 now, and the window hears of the change; the
+    // refresh that follows opens B only once let go.
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><p data-sourcepos='3:1-3:9'>New one.</p>" +
+        "<p data-sourcepos='5:1-5:9'>New two.</p><p data-sourcepos='7:1-7:6'>Buzz.</p>",
+    );
+    fake.setText(B, [
+      [1, 1, "Bee"],
+      [3, 3, "New one."],
+      [5, 5, "New two."],
+      [7, 7, "Buzz."],
+    ]);
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      await refreshing.promise;
+      return open(path, generation);
+    });
+    // The review loads again for the render, with the thread on line 7: once let go too.
+    const loading = deferred();
+    const load = fake.loadReview.bind(fake);
+    vi.spyOn(fake, "loadReview").mockImplementationOnce(async (path, page) => {
+      await loading.promise;
+      return load(path, page);
+    });
+    // Where the reader is, which the refresh keeps.
+    const bee: SavedPosition = { headingId: "bee", offset: 0, line: 1, fraction: 0 };
+    vi.spyOn(app.view, "captureAnchor").mockReturnValue(bee);
+    const restored = vi.spyOn(app.view, "restore");
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    fake.emit("doc-changed", { path: B });
+    const reply = fake.agentRequest(show(B, { comment: "C1" }));
+    await settle();
+    // Nothing is revealed while the refresh is on its way.
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+    ).toBe(false);
+    refreshing.resolve();
+    expect(await reply).toEqual({ kind: "shown" });
+    await settle();
+    // The change has rendered, but the review on screen is the render before's: still nothing.
+    expect(document.querySelectorAll("#lx-doc p")).toHaveLength(3);
+    expect(scrolled).not.toHaveBeenCalled();
+    loading.resolve();
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+      ).toBe(true);
+    });
+    // The thread where it is in the revision shown, after the refresh kept the reader's place,
+    // never undone by it.
+    expect(scrolled).toHaveBeenCalledWith(7);
+    expect(scrolled).not.toHaveBeenCalledWith(3);
+    expect(restored).toHaveBeenCalledWith(bee);
+    expect(Math.min(...scrolled.mock.invocationCallOrder)).toBeGreaterThan(
+      Math.max(...restored.mock.invocationCallOrder),
+    );
+    expect(document.getElementById("lx-tab-comments")?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("loads the review again on a show of a thread it has, when the render's reload failed", async () => {
+    const { fake, app } = await readingBee();
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    fake.agentComment(B, {
+      startLine: 3,
+      endLine: 3,
+      quote: "Buzz.",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why buzz?",
+    });
+    fake.emit("review-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    // Two paragraphs land before Buzz., on line 7 now; the review's reload for the render fails.
+    fake.setDoc(
+      B,
+      "<h1 id='bee' data-sourcepos='1:1-1:5'>Bee</h1><p data-sourcepos='3:1-3:9'>New one.</p>" +
+        "<p data-sourcepos='5:1-5:9'>New two.</p><p data-sourcepos='7:1-7:6'>Buzz.</p>",
+    );
+    fake.setText(B, [
+      [1, 1, "Bee"],
+      [3, 3, "New one."],
+      [5, 5, "New two."],
+      [7, 7, "Buzz."],
+    ]);
+    const loads = vi.spyOn(fake, "loadReview");
+    loads.mockImplementationOnce(() => Promise.reject(new Error("The sidecar is busy.")));
+    fake.emit("doc-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll("#lx-doc p")).toHaveLength(3);
+    });
+    await settle();
+    expect(loads).toHaveBeenCalledTimes(1);
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    // The review on screen has the thread, but is the render before's: it loads again.
+    await settle();
+    expect(loads).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected"),
+      ).toBe(true);
+    });
+    expect(scrolled).toHaveBeenCalledWith(7);
+  });
+
+  /**
+   * B on screen with the thread C1 on "Buzz." (line 3) in its sidecar; the review on screen holds
+   * it when `loaded`, else lacks it still, so a show of it has the review load again.
+   */
+  async function readingThread(loaded = true) {
+    const { fake, app } = await readingBee();
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
+        false,
+      );
+    });
+    fake.agentComment(B, {
+      startLine: 3,
+      endLine: 3,
+      quote: "Buzz.",
+      headingPath: ["Bee"],
+      name: "Claude",
+      kind: "question",
+      text: "Why buzz?",
+    });
+    if (loaded) {
+      fake.emit("review-changed", { path: B });
+      await vi.waitFor(() => {
+        expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+      });
+    }
+    const scrolled = vi.spyOn(app.view, "scrollToLine");
+    return { fake, app, scrolled };
+  }
+
+  const selected = () =>
+    document.querySelector('.comment-card[data-id="1"]')?.classList.contains("selected");
+
+  it("goes nowhere once a navigation under way as it came lands meanwhile: nothing shows in the other file", async () => {
+    const { fake, app, scrolled } = await readingThread();
+    // The reader's open of C is on its way as the show comes, and lands while the show waits for
+    // the refresh.
+    const opening = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      await opening.promise;
+      return open(path, generation);
+    });
+    const reading = app.open(C, { push: true });
+    const waiting = deferred();
+    vi.spyOn(app.nav, "refreshed").mockImplementationOnce(async () => {
+      await waiting.promise;
+    });
+    let answered: unknown;
+    const reply = fake.agentRequest(show(B, { comment: "C1" })).then((r) => {
+      answered = r;
+      return r;
+    });
+    await settle();
+    expect(answered).toBeUndefined();
+    opening.resolve();
+    await reading;
+    expect(app.state.doc?.path).toBe(C);
+    waiting.resolve();
+    expect(await reply).toEqual({
+      kind: "failed",
+      message: "b.md isn't on screen any more: another file took its place.",
+    });
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(selected()).toBeFalsy();
+  });
+
+  it("gives up without revealing once the request's time runs out while the refresh is on its way", async () => {
+    const { fake, scrolled } = await readingThread();
+    const refreshing = deferred();
+    const open = fake.openDocument.bind(fake);
+    vi.spyOn(fake, "openDocument").mockImplementationOnce(async (path, generation) => {
+      await refreshing.promise;
+      return open(path, generation);
+    });
+    fake.emit("doc-changed", { path: B });
+    let answered: unknown;
+    const reply = fake.agentRequest(show(B, { comment: "C1" }), "Claude", [], 200).then((r) => {
+      answered = r;
+      return r;
+    });
+    await settle(300);
+    expect(answered).toEqual({
+      kind: "failed",
+      message: "The file was still changing; show it again.",
+    });
+    refreshing.resolve();
+    await reply;
+    await settle();
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(selected()).toBe(false);
+  });
+
+  it("has the review loaded once more when the load it waits for fails, then reveals the thread", async () => {
+    const { fake, scrolled } = await readingThread(false);
+    // The review on screen lacks the thread: the show has it load again, and that load fails.
+    const loads = vi.spyOn(fake, "loadReview");
+    loads.mockImplementationOnce(() => Promise.reject(new Error("The sidecar is busy.")));
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    await settle();
+    expect(loads).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(selected()).toBe(true);
+    });
+    expect(scrolled).toHaveBeenCalledWith(3);
+    expect(document.querySelector("#lx-toasts .toast")?.textContent).toContain(
+      "The sidecar is busy.",
+    );
+  });
+
+  it("drops the thread once the load it waits for fails twice: nothing moves later", async () => {
+    const { fake, scrolled } = await readingThread(false);
+    const loads = vi.spyOn(fake, "loadReview");
+    loads
+      .mockImplementationOnce(() => Promise.reject(new Error("The sidecar is busy.")))
+      .mockImplementationOnce(() => Promise.reject(new Error("The sidecar is busy.")));
+    expect(await fake.agentRequest(show(B, { comment: "C1" }))).toEqual({ kind: "shown" });
+    await settle();
+    expect(loads).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('.comment-card[data-id="1"]')).toBeNull();
+    // The review loads later (saved elsewhere): the thread is there, but nothing goes to it.
+    fake.emit("review-changed", { path: B });
+    await vi.waitFor(() => {
+      expect(document.querySelector('.comment-card[data-id="1"]')).not.toBeNull();
+    });
+    await settle();
+    expect(loads).toHaveBeenCalledTimes(3);
+    expect(selected()).toBe(false);
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(document.querySelectorAll("#lx-toasts .toast")).toHaveLength(2);
+  });
+});
+
 describe("an agent's show at a thread whose review is still loading", () => {
   it("is dropped when a newer show goes elsewhere in the file meanwhile", async () => {
-    const { fake, app } = await launched(B);
+    const { fake, app } = await readingBee();
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLElement>("#lx-comments-pane .comments-head")?.hidden).toBe(
         false,

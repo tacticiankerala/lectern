@@ -198,13 +198,16 @@ impl OpenQueue {
 
     /// Marks the UI ready and returns the request held for it, if any. The agent's show held for
     /// the UI goes to `send` first, so none sent after overtakes it, with as long to answer as its
-    /// `show` still waits: none, once that has stopped waiting, though the UI still acts on it.
+    /// `show` still waits; with no deadline (`within_ms` none) once that has stopped waiting,
+    /// having answered `waiting`: the UI still acts on it, taking as long as it needs, and
+    /// `status` keeps its answer (`settled_late`).
     pub(super) fn ready(&self, send: impl FnOnce(AgentCall)) -> Option<HeldOpen> {
         let mut inner = lock(&self.inner);
         inner.ready = true;
         if let Some(HeldShow { mut call, by, .. }) = inner.show.take() {
             let left = by.saturating_duration_since(Instant::now());
-            call.within_ms = Some(u32::try_from(left.as_millis()).unwrap_or(u32::MAX));
+            call.within_ms =
+                (!left.is_zero()).then(|| u32::try_from(left.as_millis()).unwrap_or(u32::MAX));
             send(call);
         }
         inner.held.take()
@@ -406,7 +409,8 @@ mod tests {
     }
 
     /// An agent's show, held for the UI with the time its `show` gave it, goes to the UI with as
-    /// long as that `show` still waits: none, once it has stopped waiting, though it still goes.
+    /// long as that `show` still waits; with no deadline at all once it has stopped waiting, as
+    /// the UI's answer then goes to `status`, however long it takes.
     #[test]
     fn a_held_show_goes_to_the_ui_with_the_time_its_show_still_waits() {
         let sent = |by: Instant| {
@@ -422,13 +426,13 @@ mod tests {
             ));
             let mut sent = None;
             assert!(queue.ready(|call| sent = Some(call)).is_none());
-            sent.expect("sent").within_ms.expect("given time")
+            sent.expect("sent").within_ms
         };
         // Its show waits 2 s more: 2 s at most, not the 5 s it was held with.
-        let within = sent(Instant::now() + Duration::from_secs(2));
+        let within = sent(Instant::now() + Duration::from_secs(2)).expect("given time");
         assert!(within <= 2000, "{within}");
-        // Its show stopped waiting: no time.
-        assert_eq!(sent(Instant::now()), 0);
+        // Its show stopped waiting: no deadline.
+        assert_eq!(sent(Instant::now()), None);
     }
 
     /// An agent's show `id` of `path`, as `show_in` makes it.

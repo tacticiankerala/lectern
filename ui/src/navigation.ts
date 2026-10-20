@@ -18,7 +18,10 @@
 //   from navigations: one never cancels a navigation, and one that arrives while a navigation is
 //   in flight waits for it, applying only if it lands on that path. A navigation may find where it
 //   lands once its file has opened, before it shows (an agent's target found again in the file as
-//   it is now): still in flight meanwhile, so a change then renders over where it landed.
+//   it is now): still in flight meanwhile, so a change then renders over where it landed. A move
+//   within the document for an agent waits for a refresh on its way (`refreshed`), so it goes to
+//   the revision the reader sees; never for one that a newer refresh or a navigation has left for
+//   dropping.
 // - A navigation that lands somewhere else saves the reading position in the document it leaves.
 //   Those that ask to `push` also record it, with that position, on the history; back and forward
 //   restore it. A travel changes the history only once it lands, and a second one in flight goes
@@ -30,6 +33,14 @@ import type { OpenRequest } from "./generated/OpenRequest";
 import type { OpenResult } from "./generated/OpenResult";
 import { History, type HistoryEntry } from "./history";
 import { iconButton, ICONS } from "./icons";
+
+/** A refresh while it is on its way (`Navigation.refreshing`). */
+interface Refreshing {
+  refresh: number;
+  path: string;
+  /** The navigation it started in: after another, its answer is dropped. */
+  navigation: number;
+}
 
 export class Navigation {
   private history = new History();
@@ -50,12 +61,27 @@ export class Navigation {
   /** Resolves once `numberFrom` has seeded the numbering from the startup payload. */
   private readonly seeded: Promise<void>;
   private seed: () => void = () => undefined;
-  /** The latest refresh while it is on its way: its number and path (`drop` requeues it). */
-  private refreshing: { refresh: number; path: string } | null = null;
+  /**
+   * The latest refresh while it is on its way: its number and path (`drop` requeues it), and the
+   * navigation it started in.
+   */
+  private refreshing: Refreshing | null = null;
+  /** Resolves, and is renewed, whenever a refresh starts, answers or loses its place (`refreshMoved`). */
+  private refreshChanged: Promise<void>;
+  private refreshChange: () => void = () => undefined;
+  /** Resolves, and is renewed, whenever a navigation begins (`beginNavigation`): `navigated`. */
+  private navigationBegun: Promise<void>;
+  private navigationBegin: () => void = () => undefined;
 
   constructor(private readonly app: App) {
     this.seeded = new Promise((resolve) => {
       this.seed = resolve;
+    });
+    this.refreshChanged = new Promise((resolve) => {
+      this.refreshChange = resolve;
+    });
+    this.navigationBegun = new Promise((resolve) => {
+      this.navigationBegin = resolve;
     });
     this.backButton = iconButton("lx-back", "Back", ICONS.back, "Alt+←");
     this.forwardButton = iconButton("lx-forward", "Forward", ICONS.forward, "Alt+→");
@@ -233,7 +259,19 @@ export class Navigation {
 
   beginNavigation(): number {
     this.pendingNavigation = ++this.navigations;
+    // A refresh in flight is left for dropping: `refreshed` looks again.
+    this.refreshMoved();
+    const wake = this.navigationBegin;
+    this.navigationBegun = new Promise((resolve) => {
+      this.navigationBegin = resolve;
+    });
+    wake();
     return this.navigations;
+  }
+
+  /** Resolves once a navigation begins, after this call: a wait on the document ends there. */
+  navigated(): Promise<void> {
+    return this.navigationBegun;
   }
 
   /** True when `navigation` is still the latest, which then stops being pending. */
@@ -390,6 +428,7 @@ export class Navigation {
     }
     // Any refresh still in flight is now out of date.
     ++this.refreshes;
+    this.refreshMoved();
     // Missing, not left: Rust still watches it, so its return reloads it (`changed`).
     this.app.leaveDocument(true);
     this.app.show({
@@ -406,31 +445,82 @@ export class Navigation {
     const paths = [...this.deferred];
     this.deferred.clear();
     const path = paths.find((p) => this.isCurrent(p));
-    return path === undefined ? Promise.resolve() : this.refresh(path);
+    if (path === undefined) {
+      this.refreshMoved();
+      return Promise.resolve();
+    }
+    return this.refresh(path);
   }
 
   /**
    * Re-renders the document at `path` in place, keeping the reading position, and notes the time
    * in the properties strip when the file changed on disk (rather than, say, its links resolving
    * once the library is indexed). A newer refresh, or any navigation started meanwhile, makes the
-   * answer obsolete.
+   * answer obsolete. Resolves once it has rendered, or been dropped.
    */
-  async refresh(path: string): Promise<void> {
+  refresh(path: string): Promise<void> {
     const refresh = ++this.refreshes;
+    const done = this.rerender(refresh, path);
+    // On its way until its fetch answers, which takes this off (`rerender`).
+    this.refreshing = { refresh, path, navigation: this.navigations };
+    this.refreshMoved();
+    return done;
+  }
+
+  /**
+   * Resolves once no refresh of the document on screen is on its way (`refreshOnItsWay`); at once
+   * when none is. Looks again whenever a refresh starts, answers or loses its place, so it never
+   * waits for an answer that will be dropped.
+   */
+  async refreshed(): Promise<void> {
+    while (this.refreshOnItsWay()) {
+      await this.refreshChanged;
+    }
+  }
+
+  /**
+   * Whether a refresh of the document on screen is on its way: one in flight that can still
+   * render (not one a newer refresh, or a navigation since, has left for dropping), or a change to
+   * it deferred with no navigation in flight to settle it, which `settleDeferred` is about to (a
+   * refresh lost to `drop`). A change deferred behind the reader's navigation is theirs: that
+   * navigation settles it once it lands.
+   */
+  private refreshOnItsWay(): boolean {
+    const refreshing = this.refreshing;
+    if (
+      refreshing !== null &&
+      refreshing.refresh === this.refreshes &&
+      refreshing.navigation === this.navigations
+    ) {
+      return true;
+    }
+    return this.pendingNavigation === null && [...this.deferred].some((p) => this.isCurrent(p));
+  }
+
+  /** Wakes `refreshed` to look again: a refresh started, answered or lost its place. */
+  private refreshMoved(): void {
+    const wake = this.refreshChange;
+    this.refreshChanged = new Promise((resolve) => {
+      this.refreshChange = resolve;
+    });
+    wake();
+  }
+
+  /** The refresh `refresh` of `path`: its fetch, then its render unless obsolete by then. */
+  private async rerender(refresh: number, path: string): Promise<void> {
     const navigation = this.navigations;
     const before = this.app.state.doc;
     const position = before ? (this.app.view.captureAnchor() ?? undefined) : undefined;
     // This fetches the latest, so a change deferred for the path is covered by it.
     this.deferred.delete(path);
-    const refreshing = { refresh, path };
-    this.refreshing = refreshing;
     let result: OpenResult;
     try {
       result = await this.app.backend.openDocument(path, await this.nextGeneration());
     } catch {
       return;
     } finally {
-      if (this.refreshing === refreshing) this.refreshing = null;
+      if (this.refreshing?.refresh === refresh) this.refreshing = null;
+      this.refreshMoved();
     }
     if (refresh !== this.refreshes || navigation !== this.navigations) {
       return;

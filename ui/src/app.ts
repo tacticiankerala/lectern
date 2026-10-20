@@ -1160,6 +1160,8 @@ export class App {
       },
       dropOpen: () => this.dropAgentOpen(),
       recovered: () => this.recovered(),
+      refreshed: () => this.nav.refreshed(),
+      navigated: () => this.nav.navigated(),
       answered: (id, answer, message) =>
         this.backend
           .replyToAgent(id, {

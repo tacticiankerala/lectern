@@ -549,8 +549,9 @@ impl App {
     /// the wait at once. A window still starting with the user's launch gets the request once its
     /// UI is up (`OpenQueue::to_ui`), with as long to answer as is left, and is waited for that
     /// long: `waiting` when it hasn't answered by then, as for any window that hasn't started in
-    /// time, and `status` has what it answers later (`AgentCalls::later`). The newest held so
-    /// wins, as at the ask bar: the one it takes the place of hears it was replaced.
+    /// time, and `status` has what it answers later (`AgentCalls::later`); past that, the request
+    /// reaches the UI with no deadline, so it takes as long as it needs. The newest held so wins,
+    /// as at the ask bar: the one it takes the place of hears it was replaced.
     fn show_in(
         &self,
         window: &WindowState,
@@ -2108,8 +2109,44 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].0, Target::Window("main".to_owned()));
         assert_eq!(shown_path(&requests[0].1), path_string(&notes));
-        // Past its show's deadline already: the UI is given no time, not the time it had once.
-        assert_eq!(requests[0].1.within_ms, Some(0));
+        // Past its show's deadline already: the UI is given no deadline, not the time it had once.
+        assert_eq!(requests[0].1.within_ms, None);
+    }
+
+    /// A held show that answered `waiting`, to a target in the file the window launched with: it
+    /// goes to the UI with where core found the target and no deadline, so the UI takes as long
+    /// as it needs (for a change to the file being shown, say) instead of giving up, and what it
+    /// answers, shown, reaches `status`.
+    #[test]
+    fn a_held_show_past_its_deadline_has_no_deadline_and_its_landing_reaches_status() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n\n## Rollout\n\nText.\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.opens.launched();
+        f.early.fill(early_doc(&plan));
+        let args = ShowArgs {
+            path: path_string(&plan),
+            workspace: None,
+            target: Some(heading("Rollout")),
+            new_window: false,
+            wait: 0,
+        };
+        let soon = Budget(Instant::now() + Duration::from_millis(300));
+        let answer = f.app.agent_show(args, &claude(), soon).unwrap();
+        assert_eq!(answer.state, ShowState::Waiting);
+        let payload = f.state.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        let (_, call) = agent_requests(&f.host).remove(0);
+        assert_eq!(shown_path(&call), path_string(&plan));
+        assert_eq!(call.places.len(), 1);
+        assert_eq!(call.within_ms, None);
+        let shown = AgentReply::Shown { target: None };
+        assert!(f.app.agent_reply("main", call.id, shown));
+        assert_eq!(
+            status_answers(&f, "main"),
+            [(path_string(&plan), AskAnswer::Shown, None)]
+        );
     }
 
     /// A held show that answered `waiting`, whose file then fails to open once the window's UI

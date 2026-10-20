@@ -205,6 +205,8 @@ async function surveyFile(page: Page): Promise<string> {
       const last = lines[lines.length - 1] ?? "";
       const html = `<p class="lx-plain" data-sourcepos="1:1-${String(lines.length)}:${String(last.length)}">${lines.join("\n")}</p>`;
       window.__fake.setDoc(path, html);
+      // Its text as core has it, the lines kept apart, so a line target finds its own.
+      window.__fake.setText(path, [[1, lines.length, lines.join("\n")]]);
       window.__fake.emit("doc-changed", { path });
     },
     { path, lines: SURVEY },
@@ -397,6 +399,16 @@ test("a line target in a long code block of a note lands that line at the top", 
             `<p data-sourcepos="${String(66 + 2 * i)}:1-${String(66 + 2 * i)}:9">After.</p>`,
         ).join("");
       window.__fake.setDoc(path, html);
+      // Its text as core has it: the code's lines, kept apart, between the fences.
+      window.__fake.setText(path, [
+        [1, 1, "Alpha"],
+        [4, 63, code],
+        ...Array.from({ length: 40 }, (_, i): [number, number, string] => [
+          66 + 2 * i,
+          66 + 2 * i,
+          "After.",
+        ]),
+      ]);
       window.__fake.emit("doc-changed", { path });
     },
     { path, lines },
@@ -466,6 +478,18 @@ test("a quote folded in a closed details opens it, and lands with the quote in v
       `<p data-sourcepos="86:1-86:41">The lanternfish surface at dusk in spring.</p></details>` +
       paragraphs(90, "After.");
     window.__fake.setDoc(path, html);
+    const lines = (from: number, text: string) =>
+      Array.from({ length: 40 }, (_, i): [number, number, string] => [
+        from + 2 * i,
+        from + 2 * i,
+        text,
+      ]);
+    window.__fake.setText(path, [
+      [1, 1, "Alpha"],
+      ...lines(3, "Before."),
+      [86, 86, "The lanternfish surface at dusk in spring."],
+      ...lines(90, "After."),
+    ]);
     window.__fake.emit("doc-changed", { path });
   }, path);
   const details = page.locator("#lx-doc details");
@@ -666,6 +690,97 @@ test("Show finds a held target in the revision it renders, though the file chang
   const pane = await page.locator("#lx-doc-pane").evaluate((el) => el.clientHeight);
   expect(offset).toBeGreaterThanOrEqual(0);
   expect(offset).toBeLessThan(pane);
+});
+
+test("a show within the file on screen lands in the revision a change is being shown as", async ({
+  page,
+}) => {
+  await openFixture(page, BIG_PLAN);
+  const plan = fixturePath(BIG_PLAN);
+  // Where core finds Section 12 as the show comes: its heading's line, in the revision on screen.
+  const line = await page.evaluate(
+    (plan) => window.__fake.blocksOf(plan).find(([, , text]) => text === "Section 12")?.[0] ?? 0,
+    plan,
+  );
+  expect(line).toBeGreaterThan(1);
+  // The plan changes on disk: a paragraph lands before Section 12, which moves two lines down; the
+  // watcher tells the window. The refresh that follows is held until the test lets it go.
+  await page.evaluate(
+    ({ plan, line }) => {
+      const fake = window.__fake as unknown as Backend & typeof window.__fake;
+      const open = fake.openDocument.bind(fake);
+      const held = new Promise<void>((resolve) => {
+        (window as unknown as { letRefresh: () => void }).letRefresh = resolve;
+      });
+      fake.openDocument = async (path, generation) => {
+        if (path === plan) {
+          await held;
+        }
+        return open(path, generation);
+      };
+      const html = (fake.html(plan) ?? "").replace(
+        /data-sourcepos="(\d+):(\d+)-(\d+):(\d+)"/g,
+        (_, s: string, a: string, e: string, b: string) => {
+          const shift = (n: string) => String(Number(n) >= line ? Number(n) + 2 : Number(n));
+          return `data-sourcepos="${shift(s)}:${a}-${shift(e)}:${b}"`;
+        },
+      );
+      fake.setDoc(
+        plan,
+        html.replace(
+          '<h2 id="section-12"',
+          `<p data-sourcepos="${String(line)}:1-${String(line)}:9">Inserted.</p><h2 id="section-12"`,
+        ),
+      );
+      const blocks = fake
+        .blocksOf(plan)
+        .map(([s, e, text]): [number, number, string] => [
+          s >= line ? s + 2 : s,
+          e >= line ? e + 2 : e,
+          text,
+        ]);
+      const at = blocks.findIndex(([s]) => s > line);
+      blocks.splice(at, 0, [line, line, "Inserted."]);
+      fake.setText(plan, blocks);
+      fake.emit("doc-changed", { path: plan });
+    },
+    { plan, line },
+  );
+  const scrollTop = () => page.locator("#lx-doc-pane").evaluate((el) => el.scrollTop);
+  const top = await scrollTop();
+  // The show comes with where core found Section 12 as it came, while the refresh is on its way.
+  await page.evaluate(
+    ({ plan, line }) => {
+      void window.__fake
+        .agentRequest(
+          {
+            tool: "show",
+            path: plan,
+            target: { heading: "Section 12" },
+            newWindow: false,
+            wait: 0,
+          },
+          "Claude",
+          [{ startLine: line, endLine: line }],
+        )
+        .then((reply) => {
+          (window as unknown as { shown: unknown }).shown = reply;
+        });
+    },
+    { plan, line },
+  );
+  const answer = () => page.evaluate(() => (window as unknown as { shown?: unknown }).shown);
+  // It waits for the refresh: unanswered, the view not moved.
+  await page.waitForTimeout(300);
+  expect(await answer()).toBeUndefined();
+  expect(await scrollTop()).toBe(top);
+  await page.evaluate(() => {
+    (window as unknown as { letRefresh: () => void }).letRefresh();
+  });
+  await expect.poll(answer).toEqual({ kind: "shown" });
+  // Landed in the revision the reader sees, the change rendered: Section 12 at the top.
+  await expect(page.locator("#lx-doc p", { hasText: /^Inserted\.$/ })).toHaveCount(1);
+  await expectLandedOn(page, "section-12");
 });
 
 const REPORT = "artifacts/report.html";
