@@ -313,6 +313,24 @@ describe("the page bridge", () => {
     expect((await small.next("ready")).truncated).toBeUndefined();
   });
 
+  it("reports a page that grows past the limit, though the text it keeps is the same", async () => {
+    const big = "x".repeat(800 * 1024);
+    const p = page(`<body><p>${big}</p><p>${big}</p></body>`);
+    const ready = await p.next("ready");
+    expect(ready.truncated).toBeUndefined();
+    const cut = p.next("blocks");
+    const added = p.doc.createElement("p");
+    added.textContent = big;
+    p.doc.body.append(added);
+    const grown = await cut;
+    expect(textOf(grown.blocks)).toBe(textOf(ready.blocks));
+    expect(grown.truncated).toBe(true);
+    // And back: the whole page again once the block goes.
+    const whole = p.next("blocks");
+    added.remove();
+    expect((await whole).truncated).toBeUndefined();
+  });
+
   it("hands a clicked link to Lectern as the browser resolves it; in-page anchors stay the page's", async () => {
     const p = page(`<head><base href="http://lxpage.localhost/o/tok1/docs/"></head><body>
       <a id="rel" href="other.html#part">Other</a>

@@ -163,7 +163,8 @@ pub struct Boot {
     pub early: Arc<Slot<Early>>,
     /// Starts the highlighter's warm-up; the first paint may be what it waits for.
     pub warm: Arc<StartupWarmUp>,
-    /// Second launches held for the first window.
+    /// Second launches held for the first window, marked `launched` when the command line named
+    /// a path.
     pub opens: Arc<OpenQueue>,
     pub timings: Timings,
     /// Not running from the folder Lectern was installed in (`updater::detect_portable`).

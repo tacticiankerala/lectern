@@ -22,8 +22,10 @@ impl WindowState {
     /// The window's startup payload, with every workspace for its title. The document rendered as
     /// the window started (during boot, for the first window) becomes the initial document, unless
     /// a second launch, or an agent's `show`, asked for another one meanwhile: the agent's comes
-    /// with its target, and its `show` hears whether it opened. The payloads of the window that
-    /// asked first are the primary ones, until the automatic update check has run
+    /// with its target, and its `show` hears whether it opened. An agent's never takes the place
+    /// of the user's launch (the command line's file, or a second launch's): its request goes to
+    /// the UI now, which answers it once it has shown the user's file. The payloads of the window
+    /// that asked first are the primary ones, until the automatic update check has run
     /// (`App::claims_update_check`). The payload tells the highest generation the UI has numbered
     /// with, so a page loaded over this same state (a reload) numbers from above it, and an open
     /// still on its way from the page before never becomes current.
@@ -47,13 +49,15 @@ impl WindowState {
         let mut agent_target = None;
         // Last, so a second launch during the waits above still wins. It counts as an open even
         // when it opens nothing (a folder without a README), so a boot render landing late
-        // stays quiet.
+        // stays quiet. The UI's listeners are in place before it asks for this payload.
         if let Some(HeldOpen {
             request,
             by_agent,
             at,
             settle,
-        }) = self.opens.ready()
+        }) = self
+            .opens
+            .ready(|call| self.emit(UiEvent::AgentRequest(call)))
         {
             self.count_open();
             let path = PathBuf::from(&request.path);

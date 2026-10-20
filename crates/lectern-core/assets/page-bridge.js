@@ -567,14 +567,25 @@
   /** What `blocks` last reported, to say nothing when a change leaves the text as it was. */
   var reported = "";
 
-  /** The text, where its blocks break, and the headings: a change in any is reported. */
+  /**
+   * The text, where its blocks break, the headings, and whether the text stopped short at the
+   * limit: a change in any is reported.
+   */
   function signature(headings) {
     var breaks = model.blocks
       .map(function (block) {
         return block.text.length;
       })
       .join(",");
-    return model.text + "\u0000" + breaks + "\u0000" + JSON.stringify(headings);
+    return (
+      model.text +
+      "\u0000" +
+      breaks +
+      "\u0000" +
+      JSON.stringify(headings) +
+      "\u0000" +
+      (model.truncated ? "cut" : "whole")
+    );
   }
 
   function ready() {

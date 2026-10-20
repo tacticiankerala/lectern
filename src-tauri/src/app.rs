@@ -233,6 +233,12 @@ fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<()
     }
     let portable = updater::detect_portable(&app.package_info().name);
     app.manage(Updates::new(portable));
+    // What the command line named is the user's launch, which the first window opens before any
+    // agent's request.
+    let opens = Arc::new(OpenQueue::default());
+    if launch.args.path.is_some() {
+        opens.launched();
+    }
     let state = App::new(
         Boot {
             config_dir: launch.dirs.config,
@@ -242,7 +248,7 @@ fn setup(app: &mut tauri::App, launch: Launch, held: &HeldLaunches) -> Result<()
             profile,
             early: launch.early,
             warm: launch.warm,
-            opens: Arc::new(OpenQueue::default()),
+            opens,
             timings: Timings::default(),
             portable,
         },

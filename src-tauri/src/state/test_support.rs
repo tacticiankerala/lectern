@@ -481,3 +481,15 @@ pub(super) fn early_doc(path: &Path) -> Early {
         folder: None,
     }
 }
+
+/// What boot renders when the command line names nothing: the workspace's last document, restored.
+pub(super) fn restored_doc(path: &Path) -> Early {
+    Early {
+        doc: Some(EarlyDoc {
+            path: path.to_path_buf(),
+            from_args: false,
+            outcome: render_file(path, &PathMapper::default(), &[]),
+        }),
+        folder: None,
+    }
+}

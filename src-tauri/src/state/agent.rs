@@ -4,12 +4,16 @@
 //!   answered by the command `agent_reply`).
 //! - **`show`:** the file goes to the window `route_show` picks. A window whose UI is up decides
 //!   itself whether to ask the reader first (the bar) and answers `shown` or `asked`; a window
-//!   still starting, or a new one, opens the file first thing, unless it holds a file the user
-//!   launched, which an agent's never takes the place of. Such a show answers once the file has
-//!   opened (`shown`, or the open's error), `replaced` when a newer agent's took its place first,
-//!   or `waiting` when the window hasn't started in time; `status` has what became of it either
-//!   way. The window then comes forward as `agentFocus` has it. With a `wait`, an `asked` waits
-//!   that long for what became of the request, which the UI sends once it is settled
+//!   still starting, or a new one, opens the file first thing. Such a show answers once the file
+//!   has opened (`shown`, or the open's error), `replaced` when a newer agent's took its place
+//!   first, or `waiting` when the window hasn't started in time; `status` has what became of it
+//!   either way. A window starting with the user's launch (the command line's file, or a second
+//!   launch's) opens that instead, which an agent's never takes the place of: the show goes to its
+//!   UI as to one that's up, once it is, and the UI shows the user's file first; `waiting` when it
+//!   hasn't started in time, and `status` has what its UI answers then. A newer show held so takes
+//!   its place, as at the ask bar (`replaced`).
+//!   The window then comes forward as `agentFocus` has it. With a `wait`, an `asked` waits that
+//!   long for what became of the request, which the UI sends once it is settled
 //!   (`AgentReply::Answered`). A window that turns to another workspace meanwhile (its page
 //!   reloads) dismisses it; one that closes is the tool's error. With no target, a `#anchor` after
 //!   the path is the heading it names, and a PDF's `#page=N` its page.
@@ -49,7 +53,7 @@
 //! The review tools (`comment`, `comments`, `reply`, `resolve`) and `show`'s comment target are
 //! in `review`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -68,7 +72,8 @@ use lectern_core::agent::show::{
     no_such_workspace, AgentRoute, FocusStep, ShowAnswer, ShowState, TargetState, WorkspaceAnswer,
 };
 use lectern_core::agent::status::{
-    window_status, AgentCall, AgentReply, AgentSettings, Status, WindowView,
+    window_status, AgentCall, AgentReply, AgentSettings, AskAnswer, Status, WindowView,
+    ANSWERS_KEPT,
 };
 use lectern_core::agent::target::{
     check_target, pdf_suffix_page, resolve_target, show_anchor, HighlightAnswer, ShowAt, TextPlace,
@@ -83,7 +88,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::doc::{check_size, opened_kind, read_text as read_file, stat_doc};
-use super::open_queue::{AgentOffer, Settled};
+use super::open_queue::{AgentOffer, ForUi, OpenQueue, Settled};
 use super::paths::{normalize_root, path_string, same_path};
 use super::sync::{lock, read};
 use super::trust::Trust;
@@ -107,10 +112,6 @@ const ANSWER_SPARE: Duration = Duration::from_secs(1);
 /// The tool error when the window a request went to closes before it is settled.
 const CLOSED: &str = "That window has closed.";
 
-/// The tool error for an agent's `show` while the window it goes to starts with a file the user
-/// launched.
-const OPENING_FOR_USER: &str = "Lectern is opening a file for the user; try again in a moment.";
-
 /// The tool error when a window's UI answers with something else than what was asked.
 const UNEXPECTED: &str = "The window gave an answer Lectern didn't expect.";
 
@@ -121,12 +122,43 @@ const NO_PDF_TEXT: &str = "PDF text isn't available.";
 const NO_PDF_HIGHLIGHT: &str = "PDFs can't be highlighted; use show with a page target.";
 
 /// The requests sent to windows' UIs that wait for an answer, by id, with the window each went
-/// to; and the `show`s whose agents wait for what becomes of them, by the same id.
+/// to; the `show`s whose agents wait for what becomes of them, by the same id; and the held `show`s
+/// that answered `waiting`, whose UI's answer `status` keeps once it comes (`later`).
 #[derive(Default)]
 pub struct AgentCalls {
     next: AtomicU64,
     waiting: Mutex<HashMap<u64, (String, Sender<AgentReply>)>>,
     asks: Mutex<HashMap<u64, (String, Sender<Settled>)>>,
+    /// The latest `ANSWERS_KEPT`, the oldest first. Changed only under `waiting`'s lock, so an
+    /// answer finds either its waiter or its entry here.
+    late: Mutex<VecDeque<Late>>,
+    /// Runs as `later` begins, before it takes a held show's waiters: a test's way into the moment
+    /// between a wait's end and its clean-up.
+    #[cfg(test)]
+    before_later: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// A held `show` that answered `waiting` (`AgentCalls::later`): its request's id, the window it
+/// went to, its file, and the outcomes that window keeps for `status`, where its UI's answer goes.
+struct Late {
+    id: u64,
+    label: String,
+    path: String,
+    opens: Arc<OpenQueue>,
+}
+
+impl Late {
+    /// Keeps its UI's answer, `reply`, for `status`: shown, failed with why, or replaced. What
+    /// becomes of an ask is the window's own to keep, once the reader has answered.
+    fn settle(self, reply: AgentReply) {
+        let settled = match reply {
+            AgentReply::Shown { .. } => (AskAnswer::Shown, None),
+            AgentReply::Failed { message } => (AskAnswer::Failed, Some(message)),
+            AgentReply::Replaced => (AskAnswer::Replaced, None),
+            _ => return,
+        };
+        self.opens.settled_late(&self.path, settled);
+    }
 }
 
 impl AgentCalls {
@@ -148,13 +180,67 @@ impl AgentCalls {
 
     /// Hands `reply` to whoever waits on request `id`, if the window `label` was asked it; false
     /// when no one waits (it took too long, or the id isn't one sent to that window). What became
-    /// of a `show` goes to whoever waits for that.
+    /// of a `show` goes to whoever waits for that. A held `show` that answered `waiting` has its
+    /// UI's answer kept for `status` instead (`later`).
     fn answer(&self, label: &str, id: u64, reply: AgentReply) -> bool {
         if let AgentReply::Answered { answer, message } = reply {
-            return take_for(&self.asks, label, id)
+            return take_for(&mut lock(&self.asks), label, id)
                 .is_some_and(|s| s.send((answer, message)).is_ok());
         }
-        take_for(&self.waiting, label, id).is_some_and(|s| s.send(reply).is_ok())
+        let mut waiting = lock(&self.waiting);
+        if let Some(sender) = take_for(&mut waiting, label, id) {
+            return sender.send(reply).is_ok();
+        }
+        let late = {
+            let mut late = lock(&self.late);
+            let at = late.iter().position(|l| l.id == id && l.label == label);
+            at.and_then(|at| late.remove(at))
+        };
+        drop(waiting);
+        match late {
+            Some(late) => {
+                late.settle(reply);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The held `show` `late.id`, whose answer on `reply` stopped being waited for (it answers
+    /// `waiting`): what its UI answers is kept for `status` once it comes (`answer`), the latest
+    /// `ANSWERS_KEPT`. An answer that came as the wait ended is handed back instead, to answer
+    /// with, and the show's wait for the reader's choice, if it has one, stays.
+    fn later(&self, late: Late, reply: &Receiver<AgentReply>) -> Option<AgentReply> {
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.before_later).take() {
+            hook();
+        }
+        let mut waiting = lock(&self.waiting);
+        waiting.remove(&late.id);
+        // Sent under the same lock, before the waiter went. The show answers with it, and, asked,
+        // goes on to wait for the reader: what they choose still reaches it.
+        if let Ok(came) = reply.try_recv() {
+            return Some(came);
+        }
+        lock(&self.asks).remove(&late.id);
+        let mut kept = lock(&self.late);
+        kept.push_back(late);
+        if kept.len() > ANSWERS_KEPT {
+            kept.pop_front();
+        }
+        None
+    }
+
+    /// The held `show` `id`, for the window `label`, is replaced by a newer one before its UI had
+    /// it, which the window's outcomes keep already: its waiter hears so, if it still waits.
+    fn replaced(&self, label: &str, id: u64) {
+        let mut waiting = lock(&self.waiting);
+        if let Some(sender) = take_for(&mut waiting, label, id) {
+            // Gone when it stopped waiting.
+            let _ = sender.send(AgentReply::Replaced);
+            return;
+        }
+        lock(&self.late).retain(|late| late.id != id);
     }
 
     /// Stops waiting on request `id`, and on what becomes of it.
@@ -165,10 +251,12 @@ impl AgentCalls {
 
     /// Stops waiting on every request sent to the window `label`, and on what becomes of them, as
     /// its state is let go of (`WindowState::retire`): whoever waits on one wakes at once, finding
-    /// nothing will answer.
+    /// nothing will answer, and the held shows that answered `waiting` there are let go of too.
     pub(super) fn forget_window(&self, label: &str) {
-        lock(&self.waiting).retain(|_, (asked, _)| asked != label);
+        let mut waiting = lock(&self.waiting);
+        waiting.retain(|_, (asked, _)| asked != label);
         lock(&self.asks).retain(|_, (asked, _)| asked != label);
+        lock(&self.late).retain(|late| late.label != label);
     }
 }
 
@@ -197,19 +285,18 @@ impl Budget {
 
 /// The sender waiting in `waiting` on `id`, taken out, if the window `label` was asked it.
 fn take_for<T>(
-    waiting: &Mutex<HashMap<u64, (String, Sender<T>)>>,
+    waiting: &mut HashMap<u64, (String, Sender<T>)>,
     label: &str,
     id: u64,
 ) -> Option<Sender<T>> {
-    let mut waiting = lock(waiting);
     if !waiting.get(&id).is_some_and(|(asked, _)| asked == label) {
         return None;
     }
     waiting.remove(&id).map(|(_, sender)| sender)
 }
 
-/// Where a `show` went: a window whose UI is up, or one that opens the file as it starts (a new
-/// window when `new`).
+/// Where a `show` went: a window whose UI is up (or will be, once it has opened the user's launch),
+/// or one that opens the file as it starts (a new window when `new`).
 enum Placed {
     Ready(Arc<WindowState>),
     Starting {
@@ -376,7 +463,8 @@ impl App {
             };
             let window = self.window(&label).ok_or(CLOSED)?;
             // A window whose UI isn't up yet opens the file first thing, as it would a launch's,
-            // but trusting nothing; unless it holds a launch's, which goes first.
+            // but trusting nothing; unless it starts with the user's launch, which goes first: the
+            // request then goes to its UI, as to one that's up.
             match window.opens.offer_from_agent(request, at.clone()) {
                 AgentOffer::Held(settled) => Placed::Starting {
                     label,
@@ -384,8 +472,7 @@ impl App {
                     reopened,
                     settled,
                 },
-                AgentOffer::Now => Placed::Ready(window),
-                AgentOffer::Refused => return Err(OPENING_FOR_USER.to_owned()),
+                AgentOffer::ToUi => Placed::Ready(window),
             }
         };
         let (label, state, target, focus) = match placed {
@@ -455,7 +542,11 @@ impl App {
     /// HTML page's target may take to load: one that isn't there is the tool's error, and one the
     /// page hadn't loaded in time for is `pending`. Asked, with a `wait`, what became of it is
     /// waited for that long. A window let go of before it settles the request (`let_go_of`) ends
-    /// the wait at once.
+    /// the wait at once. A window still starting with the user's launch gets the request once its
+    /// UI is up (`OpenQueue::to_ui`), with as long to answer as is left, and is waited for that
+    /// long: `waiting` when it hasn't answered by then, as for any window that hasn't started in
+    /// time, and `status` has what it answers later (`AgentCalls::later`). The newest held so
+    /// wins, as at the ask bar: the one it takes the place of hears it was replaced.
     fn show_in(
         &self,
         window: &WindowState,
@@ -475,15 +566,45 @@ impl App {
             return Ok((self.let_go_of(label)?, None, None));
         }
         let within = budget.at_most(UI_WAIT);
-        window.emit(UiEvent::AgentRequest(AgentCall {
+        let path = args.path.clone();
+        let call = AgentCall {
             id,
             request: AgentRequest::Show(args),
             agent: agent.to_owned(),
             places,
             within_ms: Some(u32::try_from(within.as_millis()).unwrap_or(u32::MAX)),
-        }));
+        };
+        let held = match window.opens.to_ui(&path, call, budget.0) {
+            ForUi::Now(call) => {
+                window.emit(UiEvent::AgentRequest(call));
+                false
+            }
+            ForUi::Held { replaced } => {
+                if let Some(older) = replaced {
+                    self.agent_calls.replaced(label, older);
+                }
+                true
+            }
+        };
+        let received = match reply.recv_timeout(if held { budget.left() } else { within }) {
+            // Its UI gets it once up all the same, and what it answers then is kept for `status`;
+            // unless that came as the wait ended.
+            Err(RecvTimeoutError::Timeout) if held => {
+                let late = Late {
+                    id,
+                    label: label.to_owned(),
+                    path,
+                    opens: Arc::clone(&window.opens),
+                };
+                match self.agent_calls.later(late, &reply) {
+                    Some(came) => Ok(came),
+                    None => return Ok((ShowState::Waiting, None, None)),
+                }
+            }
+            received => received,
+        };
         let mut target = None;
-        let state = match reply.recv_timeout(within) {
+        let state = match received {
             Ok(AgentReply::Shown { target: pending }) => {
                 target = pending;
                 ShowState::Shown
@@ -1091,7 +1212,7 @@ mod tests {
     use crate::state::sync::write;
     use crate::state::test_support::*;
     use lectern_core::agent::request::{HighlightArgs, ReadArgs, Target as AgentTarget};
-    use lectern_core::agent::status::{AskAnswer, ViewSelection};
+    use lectern_core::agent::status::{AskOutcome, ViewSelection};
     use lectern_core::agent::target::{ShowAt, TextPlace};
     use lectern_core::ipc::{
         AgentOpens, OpenResult, OpenWhere, PathMapping, StartupPayload, WorkspaceOutcome,
@@ -1674,8 +1795,17 @@ mod tests {
         );
     }
 
-    /// A window still starting with a file the user launched opens that one: an agent's `show`
-    /// meanwhile is refused, never taking its place.
+    /// The path of the `show` `call`.
+    fn shown_path(call: &AgentCall) -> &str {
+        match &call.request {
+            AgentRequest::Show(args) => &args.path,
+            other => panic!("not a show: {other:?}"),
+        }
+    }
+
+    /// A window still starting with a file the user launched (a second launch, held for it) opens
+    /// that one: an agent's `show` meanwhile never takes its place. It goes to the window's UI
+    /// once that is up, as to any window's, and the UI shows the launched file first.
     #[test]
     fn an_agents_show_never_takes_the_place_of_a_launch_a_starting_window_holds() {
         let dir = TempDir::new();
@@ -1689,12 +1819,283 @@ mod tests {
             folder: false,
         };
         assert!(f.state.opens.offer(launch).is_none());
-        assert_eq!(
-            f.app.agent_answer(show(&path_string(&notes), 0), &claude()),
-            Err(OPENING_FOR_USER.to_owned())
-        );
+        let shown = showing(&f, show(&path_string(&notes), 0));
+        wait_until("the show waits for the window's UI", || {
+            f.state.opens.agent_waits()
+        });
+        assert!(agent_requests(&f.host).is_empty());
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
         let payload = f.state.startup();
         assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        assert!(payload.agent_target.is_none());
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(shown_path(&call), path_string(&notes));
+        assert_eq!(shown.join().unwrap().unwrap()["state"], "asked");
+    }
+
+    /// The first window starting with the file the user launched Lectern with (the command
+    /// line's, which boot is still rendering): an agent's `show` meanwhile never takes its place.
+    /// The window opens the user's file, and the show then goes to its UI as to any window's, which
+    /// shows the user's file first: then asks the reader, or, with `agentOpens: switch`, opens the
+    /// agent's file after it.
+    #[test]
+    fn an_agents_show_waits_for_the_file_the_user_launched_lectern_with() {
+        for (opens, reply, state) in [
+            (AgentOpens::Ask, AgentReply::Asked, "asked"),
+            (
+                AgentOpens::Switch,
+                AgentReply::Shown { target: None },
+                "shown",
+            ),
+        ] {
+            let dir = TempDir::new();
+            let root = dir.folder("vault");
+            let plan = dir.file("vault/plan.md", "# Plan\n");
+            let notes = dir.file("vault/notes.md", "# Notes\n");
+            let mut profile = profile(&[&root]);
+            profile.settings.agent_opens = opens;
+            let f = fixture_in(dir, profile, FakeHost::default());
+            // As setup marks it when the command line names a path.
+            f.opens.launched();
+            let shown = showing(&f, show(&path_string(&notes), 0));
+            wait_until("the show waits for the window's UI", || {
+                f.opens.agent_waits()
+            });
+            assert!(agent_requests(&f.host).is_empty());
+            f.early.fill(early_doc(&plan));
+            let answering = ui_answers(&f, "main", vec![reply]);
+            let payload = f.state.startup();
+            assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+            assert!(payload.agent_target.is_none());
+            let (_, call) = answering.join().unwrap();
+            assert_eq!(shown_path(&call), path_string(&notes));
+            assert_eq!(shown.join().unwrap().unwrap()["state"], state);
+        }
+    }
+
+    /// Shows held for a window starting with the user's file: the newest wins, as at the ask bar.
+    /// Each older one is replaced, which its agent hears at once and `status` keeps, so the window
+    /// holds one at most, and only the newest goes to its UI once that is up.
+    #[test]
+    fn of_the_shows_waiting_for_a_launch_the_newest_alone_goes_to_the_ui() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let shows = ["a", "b", "c"].map(|name| dir.file(&format!("vault/{name}.md"), "# Show\n"));
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.opens.launched();
+        f.early.fill(early_doc(&plan));
+        let first = showing(&f, show(&path_string(&shows[0]), 0));
+        wait_until("the first waits for the window's UI", || {
+            f.opens.held_for_ui() == 1
+        });
+        let second = showing(&f, show(&path_string(&shows[1]), 0));
+        assert_eq!(first.join().unwrap().unwrap()["state"], "replaced");
+        assert_eq!(f.opens.held_for_ui(), 1);
+        let third = showing(&f, show(&path_string(&shows[2]), 0));
+        assert_eq!(second.join().unwrap().unwrap()["state"], "replaced");
+        assert_eq!(f.opens.held_for_ui(), 1);
+        assert!(agent_requests(&f.host).is_empty());
+        let answering = ui_answers(&f, "main", vec![AgentReply::Asked]);
+        let payload = f.state.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        let (_, call) = answering.join().unwrap();
+        assert_eq!(shown_path(&call), path_string(&shows[2]));
+        assert_eq!(third.join().unwrap().unwrap()["state"], "asked");
+        assert_eq!(agent_requests(&f.host).len(), 1);
+        assert_eq!(f.opens.held_for_ui(), 0);
+        assert_eq!(
+            status_answers(&f, "main"),
+            [
+                (path_string(&shows[0]), AskAnswer::Replaced, None),
+                (path_string(&shows[1]), AskAnswer::Replaced, None),
+            ]
+        );
+    }
+
+    /// A held show that waits for the reader (`wait`), whose wait for its UI ends just as the UI
+    /// answers `asked` (the answer comes between the wait's end and its clean-up): it answers with
+    /// that, and goes on to wait for the reader, as any asked show does, answering what they chose.
+    #[test]
+    fn a_held_show_asked_as_its_wait_ends_still_waits_for_the_reader() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let notes = dir.file("vault/notes.md", "# Notes\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.opens.launched();
+        f.early.fill(early_doc(&plan));
+        // As the show's wait ends, the window starts and its UI asks the reader.
+        let (state, app, host) = (
+            Arc::clone(&f.state),
+            Arc::clone(&f.app),
+            Arc::clone(&f.host),
+        );
+        *lock(&f.app.agent_calls.before_later) = Some(Box::new(move || {
+            let _ = state.startup();
+            let (_, call) = agent_requests(&host).remove(0);
+            assert!(app.agent_reply("main", call.id, AgentReply::Asked));
+        }));
+        let args = ShowArgs {
+            path: path_string(&notes),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: 30,
+        };
+        let soon = Budget(Instant::now() + Duration::from_millis(300));
+        let app = Arc::clone(&f.app);
+        let shown = thread::spawn(move || app.agent_show(args, &claude(), soon));
+        // Past its clean-up, the show brings its window forward, then waits for the reader.
+        wait_until("the window comes forward", || {
+            !lock(&f.host.focus_within).is_empty()
+        });
+        let (_, call) = agent_requests(&f.host).remove(0);
+        let chose = AgentReply::Answered {
+            answer: AskAnswer::Shown,
+            message: None,
+        };
+        let heard = f.app.agent_reply("main", call.id, chose);
+        assert_eq!(shown.join().unwrap().unwrap().state, ShowState::Shown);
+        assert!(heard);
+    }
+
+    /// The held shows that answered `waiting` are kept for their UI's answer, the latest
+    /// `ANSWERS_KEPT`, each for the window it went to, until that window is let go of. An answer
+    /// that came as the wait ended goes to the show itself.
+    #[test]
+    fn late_shows_are_kept_for_the_latest_few_and_go_with_their_window() {
+        let calls = AgentCalls::default();
+        let opens = Arc::new(OpenQueue::default());
+        let path = |n: usize| format!(r"C:\{n}.md");
+        let late = |label: &str, n: usize| {
+            let (id, reply) = calls.open(label);
+            let late = Late {
+                id,
+                label: label.to_owned(),
+                path: path(n),
+                opens: Arc::clone(&opens),
+            };
+            assert_eq!(calls.later(late, &reply), None);
+            id
+        };
+        let ids: Vec<u64> = (0..=ANSWERS_KEPT).map(|n| late("main", n)).collect();
+        // The oldest was let go of: its answer is no one's.
+        assert!(!calls.answer("main", ids[0], AgentReply::Replaced));
+        // Another window's answer isn't taken for it.
+        assert!(!calls.answer("win-1", ids[1], AgentReply::Replaced));
+        assert!(calls.answer("main", ids[1], AgentReply::Replaced));
+        // Kept once, then done with.
+        assert!(!calls.answer("main", ids[1], AgentReply::Replaced));
+        // What becomes of an ask is its window's to keep.
+        assert!(calls.answer("main", ids[2], AgentReply::Asked));
+        let other = late("win-1", 99);
+        calls.forget_window("win-1");
+        assert!(!calls.answer("win-1", other, AgentReply::Replaced));
+        let replaced = AskOutcome {
+            path: path(1),
+            answer: AskAnswer::Replaced,
+            message: None,
+        };
+        assert_eq!(opens.answers(), [replaced]);
+        // Answered as its wait ended: handed back, not kept.
+        let (id, reply) = calls.open("main");
+        assert!(calls.answer("main", id, AgentReply::Asked));
+        let late = Late {
+            id,
+            label: "main".to_owned(),
+            path: path(100),
+            opens: Arc::clone(&opens),
+        };
+        assert_eq!(calls.later(late, &reply), Some(AgentReply::Asked));
+        assert!(!calls.answer("main", id, AgentReply::Replaced));
+        assert_eq!(opens.answers().len(), 1);
+    }
+
+    /// A boot that restores the workspace's last note (the command line names none): that isn't a
+    /// file the user asked for, so an agent's `show` meanwhile opens in its place, as the window
+    /// starts.
+    #[test]
+    fn an_agents_show_takes_the_place_of_a_restored_note() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let notes = dir.file("vault/notes.md", "# Notes\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.early.fill(restored_doc(&plan));
+        let (answer, payload, _) = shown_as_it_starts(&f, show(&path_string(&notes), 0));
+        assert_eq!(answer.unwrap()["state"], "shown");
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), notes);
+        assert!(agent_requests(&f.host).is_empty());
+    }
+
+    /// A show waiting for a window that starts with the user's file, which hasn't started by the
+    /// time the show must answer: it answers `waiting`, as a show held for any starting window
+    /// does, and still goes to the window's UI once that is up, after the user's file.
+    #[test]
+    fn a_show_waiting_for_a_launch_that_starts_too_late_answers_waiting_and_still_goes_to_the_ui() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let notes = dir.file("vault/notes.md", "# Notes\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.opens.launched();
+        f.early.fill(early_doc(&plan));
+        let args = ShowArgs {
+            path: path_string(&notes),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: 0,
+        };
+        let started = Instant::now();
+        let soon = Budget(Instant::now() + Duration::from_millis(300));
+        let answer = f.app.agent_show(args, &claude(), soon).unwrap();
+        assert_eq!(answer.state, ShowState::Waiting);
+        assert!(started.elapsed() < UI_WAIT);
+        assert!(agent_requests(&f.host).is_empty());
+        let payload = f.state.startup();
+        assert_eq!(opened_path(payload.initial.as_ref().unwrap()), plan);
+        let requests = agent_requests(&f.host);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, Target::Window("main".to_owned()));
+        assert_eq!(shown_path(&requests[0].1), path_string(&notes));
+        // Past its show's deadline already: the UI is given no time, not the time it had once.
+        assert_eq!(requests[0].1.within_ms, Some(0));
+    }
+
+    /// A held show that answered `waiting`, whose file then fails to open once the window's UI
+    /// has it: `status` has that outcome, with why, as it has an ask's.
+    #[test]
+    fn a_held_shows_outcome_after_it_answered_waiting_reaches_status() {
+        let dir = TempDir::new();
+        let root = dir.folder("vault");
+        let plan = dir.file("vault/plan.md", "# Plan\n");
+        let notes = dir.file("vault/notes.md", "# Notes\n");
+        let f = fixture_in(dir, profile(&[&root]), FakeHost::default());
+        f.opens.launched();
+        f.early.fill(early_doc(&plan));
+        let args = ShowArgs {
+            path: path_string(&notes),
+            workspace: None,
+            target: None,
+            new_window: false,
+            wait: 0,
+        };
+        let soon = Budget(Instant::now() + Duration::from_millis(300));
+        let answer = f.app.agent_show(args, &claude(), soon).unwrap();
+        assert_eq!(answer.state, ShowState::Waiting);
+        let _ = f.state.startup();
+        let (_, call) = agent_requests(&f.host).remove(0);
+        let failed = format!("{} isn't a text file", notes.display());
+        let reply = AgentReply::Failed {
+            message: failed.clone(),
+        };
+        assert!(f.app.agent_reply("main", call.id, reply));
+        assert_eq!(
+            status_answers(&f, "main"),
+            [(path_string(&notes), AskAnswer::Failed, Some(failed))]
+        );
     }
 
     /// `newWindow`: a file no open window's libraries hold opens in a new blank window, as it
